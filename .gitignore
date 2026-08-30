@@ -2,3 +2,6 @@
 **/target
 Cargo.lock.bak
 *.pdb
+
+# Agent worktrees created by the orchestration pipeline (orchestration.md).
+.claude/worktrees/
