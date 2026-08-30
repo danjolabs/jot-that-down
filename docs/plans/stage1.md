@@ -95,6 +95,11 @@ Three rules worth stating outright, because each one is a decision:
 
 - [ ] Pick a maintained YAML crate. `serde_yaml` is archived; evaluate the current forks and record
       the choice and date in this file. This is a small decision with a long tail — write down why.
+      **Chosen 2026-08-30: `yaml_serde` 0.10.7** (the `serde_yaml` continuation under the official
+      `yaml` GitHub org), with `chrono` 0.4.45 for timestamps and `toml` 1.1 for `workspace.toml`.
+      Full evidence and the one caveat — no serde-lineage emitter can be told to quote a scalar, so
+      the canonical path must emit timestamps as explicitly double-quoted strings itself — in
+      [`runs/stage1/yaml-crate.md`](runs/stage1/yaml-crate.md).
 - [ ] Parse: split on the leading `---` fence, deserialize, keep the body as the exact remaining bytes.
 - [ ] Serialize: known keys in a fixed order, then unknown keys in their original order.
 - [ ] **Round-trip test as the gate**: parse → serialize of an unmodified note is byte-identical.

@@ -10,3 +10,20 @@ license = "MIT"
 repository = "https://github.com/danjolabs/jot-that-down"
 
 [workspace.dependencies]
+# Chosen in docs/plans/runs/stage1/yaml-crate.md (T2.1, 2026-08-30). Read that file before
+# changing anything here — each of these is a decision with a written rationale.
+chrono = { version = "0.4.45", default-features = false, features = [
+    "clock",
+    "serde",
+    "std",
+] }
+directories = "6.0.0"
+indexmap = { version = "2.14", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+toml = "1.1"
+uuid = { version = "1.26", features = ["serde", "v7"] }
+yaml_serde = "0.10.7"
+
+# dev only
+tempfile = "3.27"
