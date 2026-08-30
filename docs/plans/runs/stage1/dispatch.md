@@ -144,3 +144,101 @@ is accepted, and stage 2's scanner is where a repair path belongs if one is ever
 | --- | --- | --- | --- | --- | --- | --- |
 | 0 | Stage decomposition | stage-planner | claude-opus-5 | high | in place | done |
 | 1 | T1.1 scaffold, manifests, CI, fixtures | implementer | claude-sonnet-5 | high | in place | dispatched |
+
+## API contract, pinned at the wave 2/3 boundary
+
+Phase A was written concurrently with T2.1, so the verifier had to guess names it could not see. The
+guesses are now reconciled here. **These names are binding on wave 3.** An implementer that prefers a
+different name files an appeal; it does not rename unilaterally.
+
+Where T2.1 and the verifier disagreed, **T2.1 wins** — `error.rs` is frozen and landed, and the
+acceptance suite is the cheaper of the two to change. That is a contract reconciliation, not a
+weakened test.
+
+### Error variants — the verifier must rename, five places
+
+| Phase A wrote | Frozen name in `error.rs` |
+| --- | --- |
+| `Error::IdMismatch` | `Error::NoteIdMismatch` |
+| `Error::MissingFence` | `Error::MissingFrontmatterFence` |
+| `Error::UnterminatedFence` | `Error::UnterminatedFrontmatter` |
+| `Error::AlreadyAWorkspace` | `Error::WorkspaceExists` |
+| `Error::SchemaVersionFromFuture` | `Error::UnsupportedSchemaVersion` |
+
+`NoteIdMismatch { path, filename_id: Uuid, frontmatter_id: Uuid }` — field *contents* are ruled by
+U9 and are not negotiable; only the variant name moved.
+
+### `note`
+
+- `NoteId` — newtype over `uuid::Uuid`. `NoteId::new()` mints v7. Exposes `as_uuid(&self) -> Uuid`
+  and `impl From<Uuid> for NoteId`, because `error.rs` carries ids as bare `Uuid` and callers must
+  be able to build `NoteIdMismatch`. Also `short()` (8-char prefix), `Display`, `FromStr`, `Ord` by
+  UUIDv7 timestamp.
+- `Note { pub meta: NoteMeta, pub body: String }` — both fields public.
+- `NoteMeta` — every known field public, `id` among them.
+- `Note::parse(bytes: &[u8]) -> Result<Note>` — **never consults a filename.** Frontmatter `id` wins
+  unconditionally. Takes bytes, not `&str`, per U9 and "the exact remaining bytes".
+- `Note::load(path: &Path) -> Result<Note>` — parses, then compares the filename's uuid to the
+  frontmatter `id` and returns `NoteIdMismatch` on disagreement. Lives in `note`, not `fs`, because
+  `fs` may not depend on `note`.
+- `Note::to_bytes(&self) -> Vec<u8>` — **preserving path.** Re-emits the retained original
+  frontmatter block verbatim. Byte-identical for any unmodified note.
+- `Note::to_canonical_bytes(&self) -> Vec<u8>` — **canonical path.** Known keys in the fixed order,
+  then unknown keys in original relative order.
+
+### `fs` — resolves the breakdown's contradiction
+
+`breakdown.md` says both "`fs` must not depend on `note`" and that filename parsing "returns the
+`NoteId`". T2.1 flagged the conflict rather than resolving it, correctly. **Ruling: `fs` returns
+bare `uuid::Uuid`; callers wrap.** Resolving toward `NoteId` would make T3.2 uncompilable until T3.1
+lands, destroying the concurrency wave 3 exists to buy.
+
+- `fs::atomic_write(target: &Path, tmp_dir: &Path, bytes: &[u8]) -> Result<()>`
+- `fs::parse_note_filename(path: &Path) -> Result<Uuid>`
+- `fs::live_note_paths(root: &Path) -> Result<Vec<PathBuf>>`
+- `fs::trashed_note_paths(root: &Path) -> Result<Vec<PathBuf>>`
+
+### `workspace`
+
+- `Workspace`, `WorkspaceKind::{Jot, Plain}`.
+- `Workspace::root(&self) -> &Path` — required: without an accessor, acceptance criterion 6
+  (`discover` from three deep) has no observable at all.
+
+### `registry` — makes U7 testable
+
+U7 ("`init`/`open` never touch the registry") is a negative with no observable, so the verifier
+wrote no test for it and reported it UNVERIFIED. **Ruling: the registry API takes an injectable
+path**, which makes U7 testable and satisfies U5's "no test touches the real OS config dir" at the
+same time.
+
+- `Registry::load_from(path: &Path) -> Result<Registry>` (total; never fails on missing/corrupt)
+- `Registry::save_to(&self, path: &Path) -> Result<()>` (via `fs::atomic_write`)
+- `registry::default_path() -> Result<PathBuf>` (the `directories` lookup, isolated in one function)
+
+The U7 test then points `load_from` at a temp path, runs `init` and `open`, and asserts it stayed
+empty.
+
+### Open shape T3.1 owns, and must report
+
+The relationship between `Note`/`NoteMeta` and `Frontmatter` is deliberately **not** pinned here —
+it is T3.1's design call. Consequence, flagged by the verifier: phase A contains **no test that
+references `Frontmatter` at all**; every unknown-key assertion goes through emitted bytes instead.
+That is a real coverage gap. T3.1 reports the shape it lands, and the verifier closes the gap in
+phase B.
+
+Two notes from T2.1 that bear on the shape:
+
+- No serde-lineage YAML crate can be told to quote a scalar. The canonical path must emit the
+  known-key prefix itself; only unknown keys go through the crate. `indexmap` was provisioned so
+  `Frontmatter` need not expose `yaml_serde::Mapping` in its public API.
+- `chrono`'s serde derive writes subsecond precision. Anything emitting a timestamp must call
+  `to_rfc3339_opts(SecondsFormat::Secs, true)` explicitly rather than rely on the derive — this
+  bites `registry`'s `last_opened` as well as frontmatter.
+
+## Dispatch log, continued
+
+| Wave | Task | Agent | Model | Effort | Isolation | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | T2.1 deps, crate decisions, error taxonomy | implementer | claude-opus-5 | high | worktree | done, merged 7b3d52a |
+| 2 | T2.2 phase A acceptance suite | verifier | claude-opus-5 | high | worktree | done, merged 7b96d51, correctly red |
+| 2 | wave 2 merge + mechanical gate | integrator | claude-sonnet-5 | high | in place | done, gates 1-3 green, gate 4 red as designed |
