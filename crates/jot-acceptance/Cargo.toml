@@ -21,10 +21,9 @@ jot-core = { path = "../jot-core", optional = true }
 default = []
 stage1 = ["dep:jot-core"]
 
-# Declared here, not in the root `[workspace.dependencies]`: this crate is a single-owner island
-# and must not contend with T2.1 over the shared manifest. These are assertion tools only — no
-# type from them ever crosses into a `jot-core` signature, so their versions may drift freely from
-# whatever `jot-core` ends up pinning.
+# Assertion tools only — no type from them ever crosses into a `jot-core` signature. They still go
+# through the workspace aliases: pinning `toml` directly here resolved a second `toml` major into
+# `Cargo.lock` alongside jot-core's, which is a real cost for a crate that only reads manifests.
 [dev-dependencies]
-tempfile = "3"
-toml = "0.9"
+tempfile = { workspace = true }
+toml = { workspace = true }

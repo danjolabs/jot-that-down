@@ -7,22 +7,26 @@
 //! means), §U7 (`init`/`open` never touch the registry), §U9/§U10 (hard errors only, and
 //! "the frontmatter wins" is a property of parsing from bytes).
 //!
-//! ## API names assumed here, to be reconciled at wave 3 integration
+//! ## API names
 //!
-//! Fixed by `breakdown.md` "Shared contracts", not assumed:
-//!   `jot_core::note::{NoteId, Note, NoteMeta}`, `jot_core::workspace::Workspace`,
-//!   `jot_core::error::{Error, Result}`,
-//!   `jot_core::fs::atomic_write(target, tmp_dir, bytes) -> Result<()>`.
+//! Every name below is now pinned by `dispatch.md` "API contract, pinned at the wave 2/3
+//! boundary". Phase A guessed several of them; the guesses were reconciled against T2.1's frozen
+//! `error.rs` and the five error variants that disagreed were renamed here — a contract fix, not a
+//! weakened assertion. Nothing in this file may be renamed again without an appeal.
 //!
-//! Assumed, because no doc names them:
-//!   `Note::parse(&[u8]) -> Result<Note>`      — the from-bytes path (§U9)
-//!   `Note::load(&Path) -> Result<Note>`       — the from-path path (§U9)
-//!   `Note::to_bytes(&self) -> Vec<u8>`        — the preserving path (§U1)
-//!   `Note::to_canonical_bytes(&self) -> Vec<u8>` — the canonical path (§U1)
-//!   `Note { meta, body }` with `meta.id: NoteId` and `body: String`
-//!   `Workspace::root(&self) -> &Path`
-//!   `jot_core::workspace::WorkspaceKind::{Jot, Plain}`
-//!   `Error::{IdMismatch, AlreadyAWorkspace, NoWorkspaceFound, ...}` — T2.1 owns the real names.
+//!   `Note::parse(&[u8]) -> Result<Note>`         — from bytes; never consults a filename (§U9)
+//!   `Note::load(&Path) -> Result<Note>`          — from a path; reports `NoteIdMismatch` (§U9)
+//!   `Note::to_bytes(&self) -> Vec<u8>`           — preserving path (§U1)
+//!   `Note::to_canonical_bytes(&self) -> Vec<u8>` — canonical path (§U1)
+//!   `Note { pub meta: NoteMeta, pub body: String }`, `NoteMeta.id: NoteId`
+//!   `Workspace::{init, open, discover}`, `Workspace::root(&self) -> &Path`
+//!   `WorkspaceKind::{Jot, Plain}`
+//!   `fs::atomic_write(target, tmp_dir, bytes) -> Result<()>`
+//!   `Error::NoteIdMismatch { path, filename_id: Uuid, frontmatter_id: Uuid }`
+//!
+//! Still unpinned, and deliberately untested here: the `Note`/`NoteMeta`/`Frontmatter`
+//! relationship is T3.1's design call, so this suite references `Frontmatter` nowhere and reaches
+//! every unknown-key assertion through emitted bytes. That gap closes in phase B.
 
 use jot_acceptance::*;
 use jot_core::error::Error;
@@ -458,7 +462,7 @@ fn a_note_whose_filename_uuid_disagrees_with_its_frontmatter_id_is_reported() {
     };
 
     match &err {
-        Error::IdMismatch {
+        Error::NoteIdMismatch {
             path: reported_path,
             filename_id,
             frontmatter_id,

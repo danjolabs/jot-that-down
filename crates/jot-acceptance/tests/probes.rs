@@ -4,15 +4,20 @@
 //! of. Every one of these is still a documented obligation somewhere — nothing here is invented
 //! scope.
 //!
-//! Assumed API names are listed in `criteria.rs`; two more are assumed only here:
-//!   `jot_core::fs::parse_note_filename(&Path) -> Result<NoteId>`
-//!   `jot_core::fs::live_note_paths(&Path) -> Result<Vec<PathBuf>>`
-//!   `jot_core::fs::trashed_note_paths(&Path) -> Result<Vec<PathBuf>>`
+//! API names are pinned by `dispatch.md` "API contract, pinned at the wave 2/3 boundary"; the ones
+//! used only here:
+//!   `fs::parse_note_filename(&Path) -> Result<uuid::Uuid>` — **bare `Uuid`, not `NoteId`**. The
+//!     breakdown contradicted itself (`fs` may not depend on `note`, yet filename parsing was said
+//!     to return `NoteId`); the ruling resolves it toward `Uuid` so T3.2 compiles without T3.1.
+//!   `fs::live_note_paths(&Path) -> Result<Vec<PathBuf>>`
+//!   `fs::trashed_note_paths(&Path) -> Result<Vec<PathBuf>>`
+//!   `Registry::load_from(&Path)`, `Registry::save_to(&self, &Path)`, `registry::default_path()`
 
 use jot_acceptance::*;
 use jot_core::error::Error;
 use jot_core::fs as jot_fs;
 use jot_core::note::{Note, NoteId};
+use jot_core::registry::{self, Registry};
 use jot_core::workspace::{Workspace, WorkspaceKind};
 use std::mem::discriminant;
 use std::path::{Path, PathBuf};
@@ -56,13 +61,20 @@ fn assert_names_the_path(err: &Error, path: &Path) {
         "\"a message that says only 'parse error' is a bug\" (overview.md): the error must name \
          {name}; it said: {message}"
     );
+    // Strengthened after the wave 2/3 pin: `error.rs` landed an `Error::path()` accessor, so the
+    // claim can be checked structurally rather than by looking for a filename in a string.
+    assert_eq!(
+        err.path(),
+        Some(path),
+        "the error must carry the exact offending path, not merely mention it"
+    );
 }
 
 #[test]
 fn probe_a_note_with_no_fence_is_a_distinct_error_naming_the_path() {
     let (_tmp, path, err) = load_err(NO_FENCE);
     assert!(
-        matches!(err, Error::MissingFence { .. }),
+        matches!(err, Error::MissingFrontmatterFence { .. }),
         "expected a missing-fence error, got {err:?}"
     );
     assert_names_the_path(&err, &path);
@@ -72,7 +84,7 @@ fn probe_a_note_with_no_fence_is_a_distinct_error_naming_the_path() {
 fn probe_a_note_with_an_unterminated_fence_is_a_distinct_error_naming_the_path() {
     let (_tmp, path, err) = load_err(UNTERMINATED);
     assert!(
-        matches!(err, Error::UnterminatedFence { .. }),
+        matches!(err, Error::UnterminatedFrontmatter { .. }),
         "expected an unterminated-fence error, got {err:?}"
     );
     assert_names_the_path(&err, &path);
@@ -226,7 +238,16 @@ fn probe_filename_parsing_accepts_the_bare_uuid_and_the_uuid_slug_forms() {
     assert_eq!(a.to_string(), "01a03d4c-c708-7cbf-83c0-883cedb7f1d5");
     assert_eq!(
         a, b,
-        "the slug is decorative: both filename forms must yield the same NoteId"
+        "the slug is decorative: both filename forms must yield the same uuid"
+    );
+
+    // The pinned signature returns a bare `uuid::Uuid`, and `NoteId: From<Uuid>` is what callers
+    // use to lift it. Asserting the lift here is what keeps the two halves of the ruling honest:
+    // if `parse_note_filename` ever drifted back to returning `NoteId`, this line stops compiling.
+    assert_eq!(
+        NoteId::from(a).to_string(),
+        "01a03d4c-c708-7cbf-83c0-883cedb7f1d5",
+        "callers wrap the bare Uuid; fs must not depend on note"
     );
 
     // A slug containing underscores must not confuse the split.
@@ -248,9 +269,12 @@ fn probe_filename_parsing_rejects_names_that_are_not_notes() {
         "_first_thoughts.md",
         "README.md",
     ] {
+        let err = jot_fs::parse_note_filename(Path::new(bad))
+            .err()
+            .unwrap_or_else(|| panic!("{bad} is not a valid note filename and must be rejected"));
         assert!(
-            jot_fs::parse_note_filename(Path::new(bad)).is_err(),
-            "{bad} is not a valid note filename and must be rejected"
+            matches!(err, Error::InvalidNoteFilename { .. }),
+            "{bad} must be rejected as an invalid note filename, got {err:?}"
         );
     }
 }
@@ -415,7 +439,7 @@ fn probe_init_errors_when_a_jot_directory_already_exists() {
         .err()
         .expect("a second init must be an error, never a silent overwrite (dispatch.md U3)");
     assert!(
-        matches!(err, Error::AlreadyAWorkspace { .. }),
+        matches!(err, Error::WorkspaceExists { .. }),
         "expected an already-a-workspace error, got {err:?}"
     );
     assert_bytes_eq(
@@ -499,7 +523,7 @@ fn probe_open_refuses_a_schema_version_from_the_future() {
         .err()
         .expect("a schema_version from the future must be refused");
     assert!(
-        matches!(err, Error::SchemaVersionFromFuture { .. }),
+        matches!(err, Error::UnsupportedSchemaVersion { .. }),
         "expected a schema-version error, got {err:?}"
     );
     let message = err.to_string();
@@ -791,12 +815,171 @@ fn probe_parse_of_an_empty_file_is_an_error_not_a_panic() {
 
 #[test]
 fn probe_parse_of_a_fence_only_file_is_an_error_not_a_panic() {
-    // Which of the three required-field errors fires first is deliberately not asserted: no doc
-    // fixes the validation order, so pinning it here would invent a contract.
+    // `error.rs` (frozen) documents `FrontmatterNotAMapping` as covering "an empty block, a bare
+    // scalar, or a sequence", so this one *is* pinned — by the taxonomy's own doc comment rather
+    // than by dispatch.md. If T3.1 disagrees, that is a contract conflict to raise, not a test to
+    // soften.
     let err = Note::parse(b"---\n---\n")
         .err()
-        .expect("an empty frontmatter block has no id, created_at or root");
-    assert!(!err.to_string().is_empty(), "got {err:?}");
+        .expect("an empty frontmatter block is not a mapping and has no id");
+    assert!(
+        matches!(err, Error::FrontmatterNotAMapping { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn probe_a_frontmatter_block_that_is_a_sequence_is_not_a_mapping() {
+    let err = Note::parse(b"---\n- one\n- two\n---\n\nBody.\n")
+        .err()
+        .expect("a sequence is well-formed YAML but is not a frontmatter mapping");
+    assert!(
+        matches!(err, Error::FrontmatterNotAMapping { .. }),
+        "a YAML sequence must be distinguished from malformed YAML, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Registry (U5) and the U7 negative.
+//
+// None of this was testable in phase A: the registry had no injectable path, so U7 ("init/open
+// never touch the registry") was a negative with no observable and was reported UNVERIFIED. The
+// wave 2/3 pin gives `load_from` / `save_to` an explicit path, which is what makes the section
+// below possible without any test writing to the real OS config directory.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn probe_registry_load_from_a_missing_path_is_an_empty_registry_not_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("workspaces.toml");
+
+    Registry::load_from(&path).expect("U5: load is total; a missing file yields an empty registry");
+    assert!(
+        !path.exists(),
+        "load_from must not create the registry file as a side effect"
+    );
+}
+
+#[test]
+fn probe_registry_load_from_a_corrupt_file_is_total_and_never_propagates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("workspaces.toml");
+    std::fs::write(&path, b"this is not toml [ = = =\n\x00\x01 [[[").unwrap();
+
+    Registry::load_from(&path).expect(
+        "U5: a corrupt registry costs one re-add, never data; it must never surface as an error \
+         to a caller trying to open a workspace",
+    );
+}
+
+#[test]
+fn probe_registry_load_from_a_directory_is_still_total() {
+    // The registry path being occupied by a directory is the shape of "unreadable" that a synced
+    // vault or a botched restore actually produces. It must degrade the same way corruption does.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("workspaces.toml");
+    std::fs::create_dir(&path).unwrap();
+
+    Registry::load_from(&path)
+        .expect("an unreadable registry is recoverable (Error::is_registry_recoverable)");
+}
+
+#[test]
+fn probe_registry_save_then_load_is_a_fixed_point() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("workspaces.toml");
+
+    let empty = Registry::load_from(&path).unwrap();
+    empty
+        .save_to(&path)
+        .expect("save_to must write the registry");
+    assert!(path.is_file(), "save_to must have created the file");
+    let first = read_bytes(&path);
+
+    let reloaded = Registry::load_from(&path).expect("what save_to wrote must load back");
+    reloaded.save_to(&path).unwrap();
+    assert_bytes_eq(
+        &read_bytes(&path),
+        &first,
+        "save -> load -> save must be a fixed point, or the registry churns on every command",
+    );
+}
+
+#[test]
+fn probe_registry_default_path_is_workspaces_toml_under_the_apps_own_config_dir() {
+    let path = registry::default_path().expect("the OS config directory must resolve here");
+    assert_eq!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("workspaces.toml"),
+        "U5 fixes the registry file name; got {}",
+        path.display()
+    );
+    assert!(
+        path.to_string_lossy().to_lowercase().contains("jot"),
+        "the registry must live under jot's own config directory, not loose in the config root: {}",
+        path.display()
+    );
+}
+
+#[test]
+fn probe_init_and_open_do_not_touch_the_registry() {
+    // dispatch.md U7: neither `init` nor `open` records anything — registration is an explicit
+    // `registry::*` call the CLI wires in stage 4. A library call with a global filesystem side
+    // effect outside the vault is a testing problem and a surprise.
+    //
+    // The injected path alone proves nothing here: `init` never knew about it. The load-bearing
+    // observable is a *read-only* before/after snapshot of the real `registry::default_path()`,
+    // which is the only file `init` could plausibly write. This test never writes there and never
+    // creates it. breakdown.md's rule exists to stop concurrent suites racing on that file; an
+    // idempotent read does not race.
+    let tmp = tempfile::tempdir().unwrap();
+    let injected = tmp.path().join("workspaces.toml");
+    Registry::load_from(&injected)
+        .unwrap()
+        .save_to(&injected)
+        .unwrap();
+    let injected_before = read_bytes(&injected);
+
+    let real = registry::default_path().ok();
+    let real_before = real
+        .as_ref()
+        .map(|p| (p.exists(), std::fs::read(p).unwrap_or_default()));
+
+    let root = tmp.path().join("vault");
+    std::fs::create_dir(&root).unwrap();
+    Workspace::init(&root, WorkspaceKind::Jot).expect("init");
+    let after_init = relative_tree(&root);
+
+    Workspace::open(&root).expect("open");
+    let deep = root.join("a").join("b");
+    std::fs::create_dir_all(&deep).unwrap();
+    Workspace::discover(&deep).expect("discover");
+
+    if let (Some(p), Some(before)) = (real.as_ref(), real_before) {
+        let after = (p.exists(), std::fs::read(p).unwrap_or_default());
+        assert_eq!(
+            after,
+            before,
+            "init/open/discover wrote to the real workspace registry at {} — U7 says they must \
+             not",
+            p.display()
+        );
+    }
+
+    assert_bytes_eq(
+        &read_bytes(&injected),
+        &injected_before,
+        "no workspace lifecycle call may write a registry",
+    );
+
+    let mut expected = after_init;
+    expected.extend(["a".to_string(), "a/b".to_string()]);
+    expected.sort();
+    assert_eq!(
+        relative_tree(&root),
+        expected,
+        "open and discover are reads: they must add nothing to the vault either"
+    );
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
