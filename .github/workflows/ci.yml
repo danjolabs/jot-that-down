@@ -60,5 +60,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # `criteria.rs` and `probes.rs` are `#![cfg(feature = "stage1")]`, so the `test` job's
+      # `cargo clippy --workspace --all-targets -- -D warnings` compiles them to nothing and the
+      # acceptance crate's own code is linted nowhere. This is that lint.
+      #
+      # Deliberately without `-D warnings`: the suite currently carries nine known warnings (two
+      # `non_snake_case` in `criteria.rs`, seven `clippy::err_expect` in `probes.rs`), and denying
+      # them now would fail the job for reasons unrelated to the code under test.
+      #
+      # TODO(seal): add `-- -D warnings` once those nine are resolved, alongside this job's
+      # `continue-on-error` flip.
+      - name: cargo clippy -p jot-acceptance --features stage1
+        run: cargo clippy -p jot-acceptance --features stage1 --all-targets
+
       - name: cargo test -p jot-acceptance --features stage1
         run: cargo test -p jot-acceptance --features stage1

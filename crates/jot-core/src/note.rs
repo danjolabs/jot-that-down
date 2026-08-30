@@ -173,6 +173,18 @@ impl Note {
     /// than an id mismatch it could not have checked. Then the filename's UUID is compared with the
     /// frontmatter `id`, and a disagreement is [`Error::NoteIdMismatch`] carrying the path and both
     /// ids (§U9).
+    ///
+    /// # Errors
+    ///
+    /// Two filename failures, and they are deliberately distinct:
+    ///
+    /// - [`Error::InvalidNoteFilename`] — the name is not a note filename at all, so there is no
+    ///   id to compare. Raised by [`crate::fs::parse_note_filename`], which is the *only* parser of
+    ///   note filenames in this crate: a file that [`crate::fs::live_note_paths`] enumerates and
+    ///   that parser rejects must not then load cleanly here, or enumeration and the scanner
+    ///   disagree about what a note is.
+    /// - [`Error::NoteIdMismatch`] — the name is a well-formed note filename whose id is not the
+    ///   frontmatter's.
     pub fn load(path: &Path) -> Result<Note> {
         let bytes = std::fs::read(path).map_err(|source| Error::Read {
             path: path.to_path_buf(),
@@ -180,7 +192,7 @@ impl Note {
         })?;
         let note = Note::parse_at(path, &bytes)?;
 
-        let filename_id = filename_id(path)?;
+        let filename_id = crate::fs::parse_note_filename(path)?;
         if filename_id != note.meta.id.as_uuid() {
             return Err(Error::NoteIdMismatch {
                 path: path.to_path_buf(),
@@ -228,24 +240,6 @@ impl Note {
         out.extend_from_slice(self.body.as_bytes());
         Ok(out)
     }
-}
-
-/// The UUID in a note's filename: `<uuid>.md` or `<uuid>_<slug>.md`, where the slug is decorative.
-///
-/// `fs` lands the same parse in the same wave as this module and cannot be called from here yet, so
-/// these few lines are duplicated on purpose; stage 2 unifies them. Keep the two in step until it
-/// does.
-fn filename_id(path: &Path) -> Result<Uuid> {
-    let invalid = || Error::InvalidNoteFilename {
-        path: path.to_path_buf(),
-    };
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(invalid)?;
-    // A UUID contains hyphens but never an underscore, so the first `_` starts the slug.
-    let head = stem.split('_').next().unwrap_or(stem);
-    Uuid::parse_str(head).map_err(|_| invalid())
 }
 
 #[cfg(test)]
@@ -384,33 +378,6 @@ mod tests {
         assert_eq!(Uuid::from(id), raw);
     }
 
-    // ------------------------------------------------------------------------- filename_id
-
-    #[test]
-    fn filename_parsing_accepts_both_forms_and_ignores_the_slug() {
-        let bare = Path::new("v/01a03d21-7c11-7a02-b3de-9f0e21c4a771.md");
-        let slugged = Path::new("v/01a03d21-7c11-7a02-b3de-9f0e21c4a771_first_thoughts.md");
-        let expected = Uuid::parse_str("01a03d21-7c11-7a02-b3de-9f0e21c4a771").unwrap();
-        assert_eq!(filename_id(bare).unwrap(), expected);
-        assert_eq!(filename_id(slugged).unwrap(), expected);
-        // A slug containing further underscores is still just a slug.
-        assert_eq!(
-            filename_id(Path::new("v/01a03d21-7c11-7a02-b3de-9f0e21c4a771_a_b_c.md")).unwrap(),
-            expected
-        );
-    }
-
-    #[test]
-    fn a_filename_without_a_uuid_is_rejected() {
-        for name in ["v/README.md", "v/.md", "v/_slug.md", "v/notes.md"] {
-            let err = filename_id(Path::new(name)).unwrap_err();
-            assert!(
-                matches!(err, Error::InvalidNoteFilename { .. }),
-                "{name} gave {err:?}"
-            );
-        }
-    }
-
     // -------------------------------------------------------------------------------- Note
 
     const MINIMAL: &str = "\
@@ -488,6 +455,117 @@ Body.
         assert_eq!(
             note.meta.id.to_string(),
             "01a03d21-7c11-7a02-b3de-9f0e21c4a771"
+        );
+    }
+
+    // --------------------------------------------------------------- load and the filename
+
+    const MINIMAL_ID: &str = "01a03d21-7c11-7a02-b3de-9f0e21c4a771";
+
+    /// Stages [`MINIMAL`] under `name`, so the only thing under test is what `load` makes of the
+    /// filename: every case here has identical, valid contents.
+    fn load_named(name: &str) -> (tempfile::TempDir, std::path::PathBuf, Result<Note>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(name);
+        std::fs::write(&path, MINIMAL).unwrap();
+        let result = Note::load(&path);
+        (tmp, path, result)
+    }
+
+    /// Filenames [`crate::fs::parse_note_filename`] accepts, and `load` therefore must too.
+    fn accepted_filenames() -> Vec<String> {
+        vec![
+            format!("{MINIMAL_ID}.md"),
+            format!("{MINIMAL_ID}_slug.md"),
+            format!("{MINIMAL_ID}_a_b_c.md"),
+            format!("{MINIMAL_ID}_slug.with.dots.md"),
+            format!("{}.md", MINIMAL_ID.to_uppercase()),
+        ]
+    }
+
+    /// Filenames it rejects. The first five are the shapes the deleted private `filename_id` used
+    /// to accept and `fs` did not — three of them end in `.md`, so `live_note_paths` returns them
+    /// and the disagreement was reachable from a real vault.
+    fn rejected_filenames() -> Vec<String> {
+        vec![
+            format!("{MINIMAL_ID}_.md"),
+            format!("{MINIMAL_ID}.txt"),
+            MINIMAL_ID.to_string(),
+            "01a03d217c117a02b3de9f0e21c4a771.md".to_string(),
+            format!("{{{MINIMAL_ID}}}.md"),
+            format!("{MINIMAL_ID}.md.bak"),
+            "README.md".to_string(),
+            "_slug.md".to_string(),
+            "01a03d21-7c11-7a02-b3c0.md".to_string(),
+        ]
+    }
+
+    #[test]
+    fn load_accepts_every_filename_shape_fs_accepts() {
+        for name in accepted_filenames() {
+            let (_tmp, _path, result) = load_named(&name);
+            let note = result.unwrap_or_else(|e| panic!("{name} must load: {e}"));
+            assert_eq!(note.meta.id.to_string(), MINIMAL_ID);
+        }
+    }
+
+    #[test]
+    fn load_rejects_every_filename_shape_fs_rejects() {
+        for name in rejected_filenames() {
+            let (_tmp, _path, result) = load_named(&name);
+            match result {
+                Ok(_) => panic!("{name} is not a note filename and must not load"),
+                Err(Error::InvalidNoteFilename { .. }) => {}
+                Err(other) => panic!("{name} must be InvalidNoteFilename, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn load_and_fs_parse_note_filename_never_disagree() {
+        // The regression test for the defect this replaced: `load` used to run its own private
+        // filename parser, which accepted a strict superset. Two components disagreeing about
+        // whether a file is a note is worse than either answer, so this asserts agreement rather
+        // than a particular verdict — a future change to `fs`'s rules stays green here for free.
+        let mut divergent = Vec::new();
+        for name in accepted_filenames().into_iter().chain(rejected_filenames()) {
+            let (_tmp, path, result) = load_named(&name);
+            let fs_accepts = crate::fs::parse_note_filename(&path).is_ok();
+            let load_accepts = !matches!(result, Err(Error::InvalidNoteFilename { .. }));
+            if fs_accepts != load_accepts {
+                divergent.push(format!(
+                    "  {name}: fs::parse_note_filename={fs_accepts}, Note::load={load_accepts}"
+                ));
+            }
+        }
+        assert!(
+            divergent.is_empty(),
+            "the two note-filename parsers disagree:\n{}",
+            divergent.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_filename_that_is_not_a_note_and_one_that_is_the_wrong_note_are_different_errors() {
+        // `InvalidNoteFilename` says "this file is not a note"; `NoteIdMismatch` says "this note
+        // is filed under the wrong name" and carries both ids. Collapsing them would lose the
+        // distinction acceptance criterion 4 rests on.
+        let (_a, _, not_a_note) = load_named("README.md");
+        let (_b, _, wrong_note) = load_named("01a03d99-0000-7000-8000-000000000000.md");
+        let not_a_note = not_a_note.unwrap_err();
+        let wrong_note = wrong_note.unwrap_err();
+
+        assert!(
+            matches!(not_a_note, Error::InvalidNoteFilename { .. }),
+            "{not_a_note:?}"
+        );
+        assert!(
+            matches!(wrong_note, Error::NoteIdMismatch { .. }),
+            "{wrong_note:?}"
+        );
+        assert_ne!(
+            std::mem::discriminant(&not_a_note),
+            std::mem::discriminant(&wrong_note)
         );
     }
 
