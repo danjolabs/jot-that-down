@@ -1,0 +1,30 @@
+[package]
+name = "jot-acceptance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Executable form of stage acceptance criteria. Owned by the verifier; read-only to implementers."
+
+[lib]
+name = "jot_acceptance"
+path = "src/lib.rs"
+
+# `jot-core` is optional so that the crate still compiles (to nothing) when the stage feature is
+# off. `cargo clippy --workspace --all-targets` in CI builds this crate with default features and
+# must stay clean; the red suite lives entirely behind `--features stage1`.
+[dependencies]
+jot-core = { path = "../jot-core", optional = true }
+
+[features]
+default = []
+stage1 = ["dep:jot-core"]
+
+# Declared here, not in the root `[workspace.dependencies]`: this crate is a single-owner island
+# and must not contend with T2.1 over the shared manifest. These are assertion tools only — no
+# type from them ever crosses into a `jot-core` signature, so their versions may drift freely from
+# whatever `jot-core` ends up pinning.
+[dev-dependencies]
+tempfile = "3"
+toml = "0.9"
