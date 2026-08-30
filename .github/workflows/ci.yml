@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+  # This job is expected to be red for most of stage 1: `jot-acceptance` is excluded from
+  # `default-members`, so the main `test` job above never builds it, and this is the only place
+  # the suite runs. It goes red at wave 2 (T2.2 lands tests against an API that does not exist
+  # yet), turns green incrementally through waves 3-4, and is expected to be fully green only
+  # once stage 1 is sealed. `continue-on-error: true` keeps it from blocking implementers in the
+  # meantime.
+  #
+  # TODO(seal): flip `continue-on-error` to `false` once stage 1 is sealed, per dispatch.md U8.
+  acceptance:
+    name: acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test -p jot-acceptance --features stage1
+        run: cargo test -p jot-acceptance --features stage1

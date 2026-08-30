@@ -1,0 +1,15 @@
+[package]
+name = "jot-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Domain, vault I/O, index, and thread algebra for jot-that-down."
+
+[lib]
+name = "jot_core"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
