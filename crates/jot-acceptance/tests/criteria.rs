@@ -176,6 +176,12 @@ fn a_hand_written_note_file_parses_and_re_serializing_it_changes_nothing() {
     );
 }
 
+/// The `__` is deliberate and is allowed rather than renamed: everything left of it is the
+/// criterion's name as `stage1.md` writes it, and everything right of it is the sub-case. That
+/// makes a line in a CI failure log map back to a line in the stage doc without a lookup, which is
+/// the whole point of naming a test after a criterion. Ratified at seal in
+/// `runs/stage1/verification.md`.
+#[allow(non_snake_case)]
 #[test]
 fn a_hand_written_note_file_parses_and_re_serializing_it_changes_nothing__out_of_order_keys() {
     // Called out separately from the walk so a failure names this criterion directly rather than
@@ -499,6 +505,12 @@ fn a_note_whose_filename_uuid_disagrees_with_its_frontmatter_id_is_reported() {
     }
 }
 
+/// The `__` is deliberate and is allowed rather than renamed: everything left of it is the
+/// criterion's name as `stage1.md` writes it, and everything right of it is the sub-case. That
+/// makes a line in a CI failure log map back to a line in the stage doc without a lookup, which is
+/// the whole point of naming a test after a criterion. Ratified at seal in
+/// `runs/stage1/verification.md`.
+#[allow(non_snake_case)]
 #[test]
 fn a_note_whose_filename_uuid_disagrees_with_its_frontmatter_id__the_frontmatter_wins() {
     let path = fixture_vault().join(MISMATCHED_FILENAME_NOTE);

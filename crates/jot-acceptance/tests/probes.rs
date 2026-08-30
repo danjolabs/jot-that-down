@@ -436,8 +436,7 @@ fn probe_init_errors_when_a_jot_directory_already_exists() {
     let before = read_bytes(&manifest);
 
     let err = Workspace::init(&root, WorkspaceKind::Jot)
-        .err()
-        .expect("a second init must be an error, never a silent overwrite (dispatch.md U3)");
+        .expect_err("a second init must be an error, never a silent overwrite (dispatch.md U3)");
     assert!(
         matches!(err, Error::WorkspaceExists { .. }),
         "expected an already-a-workspace error, got {err:?}"
@@ -519,9 +518,7 @@ fn probe_open_refuses_a_schema_version_from_the_future() {
     let bumped = read_text(&manifest).replace("schema_version = 1", "schema_version = 9999");
     std::fs::write(&manifest, &bumped).unwrap();
 
-    let err = Workspace::open(&root)
-        .err()
-        .expect("a schema_version from the future must be refused");
+    let err = Workspace::open(&root).expect_err("a schema_version from the future must be refused");
     assert!(
         matches!(err, Error::UnsupportedSchemaVersion { .. }),
         "expected a schema-version error, got {err:?}"
@@ -536,9 +533,7 @@ fn probe_open_refuses_a_schema_version_from_the_future() {
 #[test]
 fn probe_open_on_a_directory_with_no_jot_is_an_error() {
     let tmp = tempfile::tempdir().unwrap();
-    let err = Workspace::open(tmp.path())
-        .err()
-        .expect("open must not invent a workspace");
+    let err = Workspace::open(tmp.path()).expect_err("open must not invent a workspace");
     assert!(
         matches!(err, Error::NotAWorkspace { .. }),
         "expected a not-a-workspace error, got {err:?}"
@@ -707,12 +702,10 @@ fn probe_atomic_write_actually_stages_in_the_tmp_dir_it_is_given() {
     let target = tmp.path().join("t.md");
     std::fs::write(&target, b"original").unwrap();
 
-    let err = jot_fs::atomic_write(&target, &not_a_dir, b"new")
-        .err()
-        .expect(
-            "atomic_write must stage inside tmp_dir; if it succeeds with tmp_dir pointing at a \
+    let err = jot_fs::atomic_write(&target, &not_a_dir, b"new").expect_err(
+        "atomic_write must stage inside tmp_dir; if it succeeds with tmp_dir pointing at a \
              file, it is writing straight to the target and is not atomic at all",
-        );
+    );
     assert!(
         !err.to_string().is_empty(),
         "the error must carry a message naming a path, not be empty"
@@ -807,9 +800,7 @@ fn probe_every_valid_fixture_loads_from_its_path_except_the_deliberate_mismatch(
 
 #[test]
 fn probe_parse_of_an_empty_file_is_an_error_not_a_panic() {
-    let err = Note::parse(b"")
-        .err()
-        .expect("an empty file has no frontmatter and cannot be a note");
+    let err = Note::parse(b"").expect_err("an empty file has no frontmatter and cannot be a note");
     assert!(!err.to_string().is_empty());
 }
 
@@ -820,8 +811,7 @@ fn probe_parse_of_a_fence_only_file_is_an_error_not_a_panic() {
     // than by dispatch.md. If T3.1 disagrees, that is a contract conflict to raise, not a test to
     // soften.
     let err = Note::parse(b"---\n---\n")
-        .err()
-        .expect("an empty frontmatter block is not a mapping and has no id");
+        .expect_err("an empty frontmatter block is not a mapping and has no id");
     assert!(
         matches!(err, Error::FrontmatterNotAMapping { .. }),
         "got {err:?}"
@@ -831,8 +821,7 @@ fn probe_parse_of_a_fence_only_file_is_an_error_not_a_panic() {
 #[test]
 fn probe_a_frontmatter_block_that_is_a_sequence_is_not_a_mapping() {
     let err = Note::parse(b"---\n- one\n- two\n---\n\nBody.\n")
-        .err()
-        .expect("a sequence is well-formed YAML but is not a frontmatter mapping");
+        .expect_err("a sequence is well-formed YAML but is not a frontmatter mapping");
     assert!(
         matches!(err, Error::FrontmatterNotAMapping { .. }),
         "a YAML sequence must be distinguished from malformed YAML, got {err:?}"
@@ -853,10 +842,27 @@ fn probe_registry_load_from_a_missing_path_is_an_empty_registry_not_an_error() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("workspaces.toml");
 
-    Registry::load_from(&path).expect("U5: load is total; a missing file yields an empty registry");
+    let registry = Registry::load_from(&path)
+        .expect("U5: load is total; a missing file yields an empty registry");
     assert!(
         !path.exists(),
         "load_from must not create the registry file as a side effect"
+    );
+
+    // Added in the phase B fixer round, to kill mutation M43. U5 distinguishes the two outcomes
+    // explicitly: a missing file is "indistinguishable from a fresh install. Not a degraded state,
+    // so `Registry::recovered` is `None`", whereas an unreadable or corrupt one carries a
+    // recoverable signal. Asserting only that the call succeeded cannot tell them apart, and a
+    // load path that reported a fresh install as damaged would make every surface warn about
+    // corruption on first run.
+    assert!(
+        registry.is_empty(),
+        "a fresh install has no known workspaces"
+    );
+    assert_eq!(registry.current(), None, "and nothing current");
+    assert!(
+        registry.recovered().is_none(),
+        "a registry file that has never been written is not a degraded state (U5); it must carry          no recovered-from signal, or a fresh install is indistinguishable from a corrupt one"
     );
 }
 
