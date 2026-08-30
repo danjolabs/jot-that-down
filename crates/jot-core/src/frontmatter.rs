@@ -344,6 +344,10 @@ struct Split<'a> {
     body: &'a str,
 }
 
+/// The UTF-8 byte order mark, as a `char`. Decoded from the bytes by `from_utf8` long before this
+/// module sees it, so it is one character and not three bytes.
+const BOM: char = '\u{feff}';
+
 /// A fence is a line whose content, ignoring trailing whitespace, is exactly `---`.
 ///
 /// Trailing whitespace is tolerated so a CRLF file (`---\r`) and a file with a stray trailing space
@@ -374,6 +378,15 @@ fn split_fences<'a>(path: &Path, text: &'a str) -> Result<Split<'a>> {
             path: path.to_path_buf(),
         });
     };
+    // At most one leading UTF-8 BOM is tolerated before the opening fence. Notepad and several
+    // sync clients write one, and hand-written vaults are a supported way to make notes; without
+    // this, a file whose first line is `---` in every editor the user owns reports "expected a
+    // `---` fence on the first line".
+    //
+    // Only the *fence test* skips the BOM. `verbatim` still starts at byte 0, so the preserving
+    // path re-emits the BOM with everything else and U1's byte-retention guarantee is untouched.
+    // The canonical path normalizes it away, like every other lexical choice it normalizes.
+    let first = first.strip_prefix(BOM).unwrap_or(first);
     if !is_fence(first) {
         return Err(Error::MissingFrontmatterFence {
             path: path.to_path_buf(),
@@ -605,6 +618,74 @@ Body.
             format!("{}{}", fm.to_preserved_string(), body),
             text,
             "a CRLF note must still round-trip byte-identically"
+        );
+    }
+
+    /// Notepad and several sync clients write a UTF-8 BOM. The file's first line is `---` in every
+    /// editor the user has, so refusing it with "expected a `---` fence on the first line" is a
+    /// message about a problem the user cannot see.
+    #[test]
+    fn a_leading_utf8_bom_does_not_hide_the_opening_fence() {
+        let text = format!("{BOM}{MINIMAL}");
+        let (fm, body) = parse(&text).expect("a BOM before the fence must not hide it");
+        assert_eq!(
+            fm.id.to_string(),
+            "01a03d21-7c11-7a02-b3de-9f0e21c4a771",
+            "and the frontmatter behind it parses normally"
+        );
+        assert_eq!(body, "\nBody.\n");
+    }
+
+    /// The consequence that makes the BOM safe to accept: §U1's byte retention does not get an
+    /// exception for it. The BOM stays *inside* the retained verbatim block — only the fence test
+    /// skips over it — so the preserving path re-emits the file byte for byte.
+    #[test]
+    fn a_note_with_a_bom_round_trips_byte_identically_on_the_preserving_path() {
+        let text = format!("{BOM}{MINIMAL}");
+        let (fm, body) = parse(&text).unwrap();
+        assert_eq!(
+            format!("{}{}", fm.to_preserved_string(), body),
+            text,
+            "the BOM must survive a parse -> write cycle"
+        );
+        assert!(fm.verbatim().unwrap().starts_with(BOM));
+    }
+
+    /// And the canonical path drops it, like every other lexical choice it normalizes. Pinned so
+    /// that a note *edited* by jot is known to lose its BOM deliberately rather than by accident.
+    #[test]
+    fn the_canonical_path_normalizes_a_bom_away() {
+        let text = format!("{BOM}{MINIMAL}");
+        let (fm, _) = parse(&text).unwrap();
+        let canonical = fm.to_canonical_string();
+        assert!(!canonical.contains(BOM), "{canonical:?}");
+        assert!(canonical.starts_with("---\n"));
+    }
+
+    /// At most *one* BOM, and only before the opening fence: a second one, or one in front of the
+    /// closing fence, is ordinary text and must not be skipped over.
+    #[test]
+    fn only_one_bom_and_only_before_the_opening_fence_is_tolerated() {
+        assert!(
+            matches!(
+                split_fences(&p(), &format!("{BOM}{BOM}---\nid: a\n---\n")).unwrap_err(),
+                Error::MissingFrontmatterFence { .. }
+            ),
+            "two BOMs is not a note"
+        );
+        assert!(
+            matches!(
+                split_fences(&p(), &format!("---\nid: a\n{BOM}---\n")).unwrap_err(),
+                Error::UnterminatedFrontmatter { .. }
+            ),
+            "a BOM before the closing fence is content, not a fence"
+        );
+        assert!(
+            matches!(
+                split_fences(&p(), &format!("{BOM}id: a\n---\n")).unwrap_err(),
+                Error::MissingFrontmatterFence { .. }
+            ),
+            "and a BOM does not conjure a fence that was never there"
         );
     }
 

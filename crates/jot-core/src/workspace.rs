@@ -481,6 +481,11 @@ impl Workspace {
     /// Starting inside `.jot/` — from `.jot/tmp/`, say — lands on the vault root, since `.jot/`
     /// does not contain a `.jot/` of its own.
     ///
+    /// `from` is made absolute and lexically normal first (see [`absolutize`]), so the walk never
+    /// climbs *through* a `..` into a directory the caller did not name — `discover("../sibling")`
+    /// considers `sibling` and its parents, never the vault the process happens to be standing in.
+    /// This is why the answer is the same on Windows and on Linux.
+    ///
     /// # Errors
     ///
     /// - [`Error::WorkspaceNotFound`] carrying `from` if the walk reaches the filesystem root
@@ -566,15 +571,89 @@ fn manifest_path_of(root: &Path) -> PathBuf {
     jot_dir(root).join(MANIFEST_FILE)
 }
 
-/// Makes `path` absolute without touching the filesystem.
+/// Makes `path` absolute **and lexically normal** without touching the filesystem: the result
+/// contains no `.` and no `..` component on any platform.
 ///
 /// [`std::path::absolute`] rather than [`Path::canonicalize`] on purpose: canonicalizing requires
 /// the path to exist (it does not, for `init`), and on Windows it returns a `\\?\` verbatim prefix
-/// that would then show up in every error message a user reads. Falling back to the path as given
-/// keeps this infallible — a relative path is worse than an absolute one, but it is not worth an
-/// error, and `discover` is the only caller for which the difference matters.
+/// that would then show up in every error message a user reads.
+///
+/// # Why the normalization is not optional
+///
+/// [`std::path::absolute`] normalizes `.` and `..` on Windows (it is `GetFullPathNameW`) and, by
+/// documented design, does **not** on POSIX, where `..` components are retained because resolving
+/// them without the filesystem is wrong in the presence of symlinks. [`Workspace::discover`] then
+/// walks [`Path::ancestors`], which is purely lexical, so an un-normalized `..` made the same call
+/// return different workspaces on the two platforms:
+///
+/// ```text
+/// cwd = /home/u/vaults/work, which is a vault. /home/u/vaults/personal is not.
+/// discover("../personal")
+///   POSIX, before: ancestors of `/home/u/vaults/work/../personal` include
+///                  `/home/u/vaults/work` -> the WORK vault is returned.
+///   Windows:       `C:\...\vaults\personal` -> WorkspaceNotFound.
+/// ```
+///
+/// Normalizing here makes the walk mean the same thing everywhere. The symlink caveat that stops
+/// POSIX from doing this in the standard library is accepted deliberately: a `..` that crosses a
+/// symlink now resolves lexically rather than through the link, which is the same answer Windows
+/// has always given and the same answer a user reading the path aloud would give. Vault roots are
+/// directories the user typed; silently capturing a note into a *different vault* than the one the
+/// path names is the far more expensive failure.
+///
+/// # The empty path
+///
+/// `Path::new("")` is **the current directory**, exactly as `.` is, and is resolved to it here.
+/// This is a decision, not a fallback: [`std::path::absolute`] errors on an empty path, and the
+/// previous "keep the path as given" behavior left `init("")` and `open("")` operating on the
+/// process working directory while reporting an *empty* `root()` — a workspace whose every derived
+/// path was silently relative. Rejecting instead was considered and would need an error variant
+/// the frozen stage-1 taxonomy does not have.
+///
+/// Infallible: if the process has no working directory (it was deleted out from under us) the
+/// relative path is kept rather than raising, which is no worse than the input.
 fn absolutize(path: &Path) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    let base = if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    };
+    let absolute = std::path::absolute(base).unwrap_or_else(|_| base.to_path_buf());
+    normalize_lexically(&absolute)
+}
+
+/// Removes every `.` and `..` component from `path` by pure text manipulation — no `stat`, no
+/// symlink resolution, no requirement that anything exist.
+///
+/// `..` at (or above) a root or a Windows prefix is absorbed, matching `GetFullPathNameW` and the
+/// kernel's own treatment of `/..`. A leading `..` in a path that is still relative — reachable
+/// only when `std::path::absolute` failed — is retained, because there is nothing to pop it
+/// against.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut out: Vec<Component<'_>> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // `/..` is `/`, and `C:\..` is `C:\`.
+                Some(Component::RootDir) => {}
+                _ => out.push(component),
+            },
+            other => out.push(other),
+        }
+    }
+
+    if out.is_empty() {
+        // Everything cancelled out — only reachable for a relative path such as `a/..`, which
+        // named the current directory to begin with.
+        return PathBuf::from(".");
+    }
+    out.iter().collect()
 }
 
 /// The display name a workspace gets when the manifest does not supply one: the directory's
@@ -1186,6 +1265,132 @@ mod tests {
             matches!(err, Error::Read { .. }),
             "expected the inner vault's own failure, got {err:?}"
         );
+    }
+
+    // ------------------------------------------------------------ path normalization (F3)
+    //
+    // Every assertion in this section is written to hold *identically* on Windows and on POSIX.
+    // That cross-platform agreement is the property being tested: `std::path::absolute` normalizes
+    // `.` and `..` on Windows and deliberately does not on POSIX, so before `absolutize`
+    // normalized for itself, the three behaviors below differed by platform and only the Windows
+    // one was ever observed.
+
+    /// The bug in one test. `work` is a vault, `personal` is not, and `personal` is reached
+    /// through a `..` that passes over `work`.
+    ///
+    /// Lexically, `<tmp>/work/../personal`'s ancestors include `<tmp>/work` — so an un-normalized
+    /// walk finds the *work* vault and hands back a workspace the caller never named. On Windows
+    /// the same call has always returned `WorkspaceNotFound`, because `std::path::absolute` folded
+    /// the `..` away before the walk started. Both platforms must now say `WorkspaceNotFound`.
+    #[test]
+    fn discover_does_not_climb_through_a_parent_dir_into_a_vault_the_caller_did_not_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = dir(tmp.path(), "work");
+        dir(tmp.path(), "personal");
+        Workspace::init(&work, WorkspaceKind::Jot).unwrap();
+
+        let sibling = work.join("..").join("personal");
+        match Workspace::discover(&sibling) {
+            Err(Error::WorkspaceNotFound { .. }) => {}
+            Ok(found) => panic!(
+                "discover walked through `..` and returned {}",
+                found.root().display()
+            ),
+            Err(other) => panic!("expected WorkspaceNotFound, got {other:?}"),
+        }
+    }
+
+    /// The other direction: a `..` that cancels out *within* the vault must still find it, so the
+    /// fix above is normalization and not a blanket refusal of `..`.
+    #[test]
+    fn discover_still_finds_the_vault_through_a_dot_and_a_parent_dir_that_cancel_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dir(tmp.path(), "vault");
+        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        let sub = dir(&root, "sub");
+
+        for start in [
+            sub.join("..").join("sub"),
+            root.join(".").join("sub"),
+            sub.join("does-not-exist").join(".."),
+        ] {
+            let found = Workspace::discover(&start).unwrap_or_else(|e| {
+                panic!("discover({}) failed: {e}", start.display());
+            });
+            assert_eq!(
+                found.root(),
+                root.as_path(),
+                "from {}, root() must be the vault itself with nothing left to normalize",
+                start.display()
+            );
+        }
+    }
+
+    /// `root()` is joined onto for every note path and printed in every error message, so a `.` or
+    /// a `..` surviving in it leaks into both. On POSIX `discover(".")` used to report
+    /// `<cwd>/.`; here the workspace is reached through both a `.` and a `..` that does not exist
+    /// on disk — normalization is lexical, so the missing component is not a problem.
+    #[test]
+    fn root_never_keeps_a_dot_or_parent_dir_component_from_the_path_it_was_given() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dir(tmp.path(), "vault");
+
+        let weird = root.join(".").join("nowhere").join("..");
+        let ws = Workspace::init(&weird, WorkspaceKind::Jot).expect("init");
+        assert_eq!(ws.root(), root.as_path());
+        assert!(root.join(".jot").is_dir(), "and it initialized the vault");
+        assert_eq!(Workspace::open(&weird).unwrap().root(), root.as_path());
+        assert_eq!(ws.name(), "vault", "the basename, not `..`");
+    }
+
+    /// `absolutize` is the one place the platforms disagreed, so it is asserted directly as well
+    /// as through its callers.
+    #[test]
+    fn absolutize_is_absolute_and_free_of_dot_components_on_every_platform() {
+        use std::path::Component;
+
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(absolutize(Path::new(".")), cwd);
+        assert_eq!(absolutize(Path::new("a/./b/../c")), cwd.join("a").join("c"));
+        assert_eq!(absolutize(Path::new("a/b/..")), cwd.join("a"));
+
+        for input in ["", ".", "..", "a/./b", "../x", "a/b/../..", "./a/../a/"] {
+            let out = absolutize(Path::new(input));
+            assert!(out.is_absolute(), "`{input}` -> {}", out.display());
+            assert!(
+                out.components()
+                    .all(|c| !matches!(c, Component::CurDir | Component::ParentDir)),
+                "`{input}` -> {} still carries a `.` or `..`",
+                out.display()
+            );
+        }
+    }
+
+    /// `..` above a root is absorbed rather than escaping into a path no filesystem can name.
+    #[test]
+    fn normalize_lexically_absorbs_parent_dirs_at_the_root() {
+        let root = absolutize(Path::new("/"));
+        assert_eq!(normalize_lexically(&root.join("..")), root);
+        assert_eq!(normalize_lexically(&root.join("..").join("..")), root);
+        assert_eq!(normalize_lexically(&root.join("a").join("..")), root);
+    }
+
+    /// An empty path is the current directory — the same as `.` — and says so in `root()` and in
+    /// error messages. It used to be neither: `std::path::absolute("")` errors, the old fallback
+    /// kept the empty path, and `init("")` then created `.jot/` in the process working directory
+    /// while reporting `root() == ""`.
+    #[test]
+    fn an_empty_path_means_the_current_directory_and_reports_it_absolutely() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(absolutize(Path::new("")), cwd);
+
+        // Whatever the working directory happens to be, `""` and `.` must be the same call.
+        let outcome = |path: &str| match Workspace::open(Path::new(path)) {
+            Ok(ws) => ws.root().to_path_buf(),
+            Err(e) => e.path().expect("open names a path").to_path_buf(),
+        };
+        assert_eq!(outcome(""), cwd);
+        assert_eq!(outcome(""), outcome("."));
     }
 
     // -------------------------------------------------------------------------------- pieces

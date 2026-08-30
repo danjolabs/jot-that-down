@@ -247,12 +247,25 @@ pub fn live_note_paths(root: &Path) -> Result<Vec<PathBuf>> {
 /// directory is not an error: it means nothing has ever been trashed, and it yields an empty
 /// vector. The asymmetry with [`live_note_paths`] is deliberate — an absent vault root is a lost
 /// vault, an absent trash is an empty one.
+///
+/// **Absent is the only silent case.** The guard is existence, not directory-ness: a `.jot/.trash`
+/// that a sync client replaced with a regular file, or a symlink whose target is gone, is a fault
+/// and is reported as [`Error::ReadDir`] naming the trash. Answering "no trashed notes" there
+/// would hide every trashed note in the vault behind a successful, empty result — the same
+/// reasoning that makes an absent *vault root* an error rather than an empty listing.
 pub fn trashed_note_paths(root: &Path) -> Result<Vec<PathBuf>> {
     let trash = trash_dir(root);
-    if !trash.is_dir() {
-        return Ok(Vec::new());
+    // `symlink_metadata`, not `metadata`: a dangling symlink is *something* standing where the
+    // trash should be, and must not be mistaken for nothing being there at all.
+    match std::fs::symlink_metadata(&trash) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(source) => Err(Error::ReadDir {
+            path: trash,
+            source,
+        }),
+        // Anything that is not a listable directory fails in `read_dir`, which names the path.
+        Ok(_) => note_paths_in(&trash),
     }
-    note_paths_in(&trash)
 }
 
 /// `<root>/.jot/.trash` — the one place this module encodes the on-disk layout.
@@ -893,6 +906,48 @@ mod tests {
             trashed_note_paths(&f.vault).unwrap().is_empty(),
             "an absent trash is an empty trash, not a failure"
         );
+    }
+
+    /// A trash that is not there at all is empty; a trash that is there and is *not a listable
+    /// directory* is a fault. The distinction matters because the failure mode of the wrong guard
+    /// is invisible: a sync client that replaces `.jot/.trash` with a regular file would make
+    /// every trashed note in the vault disappear behind a successful, empty result.
+    #[test]
+    fn trashed_note_paths_of_a_trash_that_is_a_file_is_an_error_not_an_empty_listing() {
+        let f = Fixture::new();
+        let trash = trash_dir(&f.vault);
+        std::fs::create_dir_all(trash.parent().unwrap()).unwrap();
+        std::fs::write(&trash, b"a sync client put a file here").unwrap();
+
+        let err = trashed_note_paths(&f.vault)
+            .expect_err("a trash that is a file is a fault, not an empty trash");
+        assert!(matches!(err, Error::ReadDir { .. }), "{err:?}");
+        assert!(
+            err.to_string().contains(".trash"),
+            "the error must name the trash: {err}"
+        );
+    }
+
+    /// The dangling-symlink case, which is the one `is_dir()` and `metadata()` both answer
+    /// "false"/"missing" to. Unix only: creating a symlink on Windows needs a privilege CI does
+    /// not have, and the `is_dir()` guard this replaces was wrong on both platforms for the
+    /// regular-file case above, which does run everywhere.
+    #[cfg(unix)]
+    #[test]
+    fn trashed_note_paths_of_a_dangling_symlink_is_an_error_not_an_empty_listing() {
+        let f = Fixture::new();
+        let trash = trash_dir(&f.vault);
+        std::fs::create_dir_all(trash.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(f.vault.join("gone"), &trash).unwrap();
+
+        assert!(!trash.is_dir(), "the premise: is_dir() cannot see it");
+        assert!(
+            std::fs::symlink_metadata(&trash).is_ok(),
+            "but something is standing there"
+        );
+        let err = trashed_note_paths(&f.vault)
+            .expect_err("a dangling trash symlink is a fault, not an empty trash");
+        assert!(matches!(err, Error::ReadDir { .. }), "{err:?}");
     }
 
     /// An absent vault root is a different thing entirely: the caller is pointing at nothing.

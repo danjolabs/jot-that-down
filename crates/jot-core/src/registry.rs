@@ -38,6 +38,32 @@
 //! last_opened = "2026-08-29T12:00:00Z"
 //! ```
 //!
+//! # Forward compatibility
+//!
+//! Keys this build does not model are **preserved through a load → save cycle**, both top-level and
+//! per `[[workspace]]` table. `workspace.toml` gets this for free because `Workspace::open` never
+//! writes; the registry does write, so it has to do the work.
+//!
+//! Without it: a newer jot writes `workspaces.toml`, an older build runs one command that saves,
+//! and the newer settings are gone with no signal. The registry is a cache, so the cost is bounded
+//! — but it is the same class of silent loss the note format goes to great lengths to avoid, and
+//! the note format's rule ("unknown frontmatter keys are preserved verbatim on every write") reads
+//! the same way here.
+//!
+//! They are re-emitted *after* the keys this build owns, mirroring the note format's rule for
+//! frontmatter, and among themselves in sorted order rather than the file's original order —
+//! `toml::Table` is a sorted map, so document order is already gone by the time the parser hands
+//! the file over. Sorted is at least stable, which is what makes a save → load → save a fixed
+//! point.
+//!
+//! Three things this deliberately does *not* do. It does not let an unknown key shadow a known one
+//! — [`Registry::save_to`] always emits this build's own value. It does not keep the unknown keys
+//! of an entry that was [`Registry::remove`]d, since they describe a workspace that is no longer
+//! registered. And it does not survive a file that failed to load: a corrupt registry recovers to
+//! an *empty* one (see "Totality"), and saving that empty registry overwrites the unreadable file,
+//! unknown keys and all. Preserving keys out of a file that could not be parsed is not possible,
+//! and pretending otherwise would be worse than saying so here.
+//!
 //! # Stale entries
 //!
 //! "Stale" means the entry's `path` no longer exists on disk. A stale entry is **retained**, never
@@ -202,6 +228,12 @@ pub struct Registry {
     current: Option<Uuid>,
     entries: IndexMap<Uuid, Entry>,
     recovered: Option<Error>,
+    /// Top-level keys the loaded file carried that this build does not know, values verbatim. See
+    /// "Forward compatibility" in the module docs, including why the file's key order is not one
+    /// of the things preserved.
+    unknown: toml::Table,
+    /// The same, per `[[workspace]]` table, keyed by the entry's id.
+    unknown_entries: IndexMap<Uuid, toml::Table>,
 }
 
 impl Registry {
@@ -239,7 +271,18 @@ impl Registry {
             }
         };
 
-        match Registry::from_file(file) {
+        // The same text a second time, as a plain table: it still holds the keys `RegistryFile`
+        // threw away, which is what makes forward compatibility possible.
+        //
+        // Deserializing `RegistryFile` *out of* that table instead would be one parse rather than
+        // two, and is wrong: `toml::Value`'s deserializer renders a native TOML datetime as a
+        // string, so `last_opened = 2026-08-30T07:08:43Z` (unquoted, which is what a hand-editor
+        // writes) would quietly start loading instead of recovering as corrupt. The strictness of
+        // the load path is not this change's to move. Failing here is unreachable — the document
+        // just deserialized — and costs only the unknown keys if it ever happens.
+        let raw: toml::Table = toml::from_str(&text).unwrap_or_default();
+
+        match Registry::from_file(file, &raw) {
             Ok(registry) => Ok(registry),
             Err(message) => {
                 let err = Error::RegistryCorrupt {
@@ -255,11 +298,11 @@ impl Registry {
     /// (see the module docs' "Save: staging directory" section). Not total: a write failure is a
     /// real `Err`, because a save that silently loses the user's action is worse than a crash.
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        let toml_text =
-            toml::to_string_pretty(&self.to_file()).map_err(|source| Error::RegistrySerialize {
-                path: path.to_path_buf(),
-                message: source.to_string(),
-            })?;
+        let serialize_err = |source: toml::ser::Error| Error::RegistrySerialize {
+            path: path.to_path_buf(),
+            message: source.to_string(),
+        };
+        let toml_text = self.to_toml_string().map_err(serialize_err)?;
 
         let tmp_dir = path.parent().unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(tmp_dir).map_err(|source| Error::CreateDir {
@@ -299,6 +342,9 @@ impl Registry {
     /// Removes an entry by id, returning it if it was present. Does not touch `current`, even if it
     /// named the id just removed — a dangling `current` is not an error (see [`Registry::current`]).
     pub fn remove(&mut self, id: Uuid) -> Option<Entry> {
+        // Unregistering the workspace takes its forward-compatibility keys with it: they describe
+        // an entry that no longer exists, and keeping them would resurrect them on a re-add.
+        self.unknown_entries.shift_remove(&id);
         self.entries.shift_remove(&id)
     }
 
@@ -348,6 +394,8 @@ impl Registry {
             current: None,
             entries: IndexMap::new(),
             recovered: Some(err),
+            unknown: toml::Table::new(),
+            unknown_entries: IndexMap::new(),
         }
     }
 
@@ -356,7 +404,10 @@ impl Registry {
     /// deserialization; a `last_opened` that isn't RFC 3339 has not) into a single `String` reason so
     /// the caller can report it as [`Error::RegistryCorrupt`] alongside genuine parse failures —
     /// "corrupt" covers both shapes per the totality guarantee.
-    fn from_file(file: RegistryFile) -> std::result::Result<Registry, String> {
+    ///
+    /// `table` is the same file as a plain TOML table, from which the keys `RegistryFile` does not
+    /// model are lifted out and kept for the next save.
+    fn from_file(file: RegistryFile, table: &toml::Table) -> std::result::Result<Registry, String> {
         let mut entries = IndexMap::new();
         for raw in file.workspaces {
             let last_opened = DateTime::parse_from_rfc3339(&raw.last_opened)
@@ -384,6 +435,8 @@ impl Registry {
             current: file.current,
             entries,
             recovered: None,
+            unknown: unknown_keys(table, &TOP_LEVEL_KEYS),
+            unknown_entries: unknown_entry_keys(table),
         })
     }
 
@@ -404,21 +457,158 @@ impl Registry {
                 .collect(),
         }
     }
+
+    /// The exact text `save_to` writes: the known keys in their fixed order, then whatever unknown
+    /// keys were retained from the loaded file.
+    ///
+    /// Emitted through [`RegistryOut`] rather than by merging into a `toml::Table`, because
+    /// `toml::Table` is sorted: routing the document through one would re-alphabetize
+    /// `id, path, name, last_opened` on every save and scatter the unknown keys among them.
+    fn to_toml_string(&self) -> std::result::Result<String, toml::ser::Error> {
+        let file = self.to_file();
+        toml::to_string_pretty(&RegistryOut {
+            file: &file,
+            unknown: &self.unknown,
+            unknown_entries: &self.unknown_entries,
+        })
+    }
+}
+
+/// The registry as it is written out: [`RegistryFile`]'s keys, in their declared order, followed by
+/// the unknown keys this build is only carrying.
+///
+/// Known keys are emitted first and unknown keys are skipped if they collide, so a retained key can
+/// only ever *add* to the document, never shadow a value this build is responsible for. Ordering
+/// mirrors the note format's rule for frontmatter — known keys in a fixed order, then the rest — so
+/// the two files this project writes read the same way.
+struct RegistryOut<'a> {
+    file: &'a RegistryFile,
+    unknown: &'a toml::Table,
+    unknown_entries: &'a IndexMap<Uuid, toml::Table>,
+}
+
+impl serde::Serialize for RegistryOut<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+
+        let mut map = serializer.serialize_map(None)?;
+        if let Some(current) = &self.file.current {
+            map.serialize_entry("current", current)?;
+        }
+        for (key, value) in self.unknown {
+            if !TOP_LEVEL_KEYS.contains(&key.as_str()) {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        if !self.file.workspaces.is_empty() {
+            let workspaces: Vec<EntryOut<'_>> = self
+                .file
+                .workspaces
+                .iter()
+                .map(|file| EntryOut {
+                    // Looked up by id rather than by position, so one workspace's retained keys
+                    // can never be attached to another.
+                    unknown: self.unknown_entries.get(&file.id),
+                    file,
+                })
+                .collect();
+            map.serialize_entry("workspace", &workspaces)?;
+        }
+        map.end()
+    }
+}
+
+/// One `[[workspace]]` table, written the same way: known keys, then retained unknown ones.
+struct EntryOut<'a> {
+    file: &'a EntryFile,
+    unknown: Option<&'a toml::Table>,
+}
+
+impl serde::Serialize for EntryOut<'_> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("id", &self.file.id)?;
+        map.serialize_entry("path", &self.file.path)?;
+        map.serialize_entry("name", &self.file.name)?;
+        map.serialize_entry("last_opened", &self.file.last_opened)?;
+        for (key, value) in self.unknown.into_iter().flatten() {
+            if !ENTRY_KEYS.contains(&key.as_str()) {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+/// The top-level keys `RegistryFile` models. Anything else in the file belongs to a version of jot
+/// that is not this one.
+const TOP_LEVEL_KEYS: [&str; 2] = ["current", "workspace"];
+
+/// The keys one `[[workspace]]` table models.
+const ENTRY_KEYS: [&str; 4] = ["id", "path", "name", "last_opened"];
+
+/// Every key of `table` that is not in `known`, cloned. Sorted, because `toml::Table` is: see the
+/// module docs on why the file's original key order is not recoverable here.
+fn unknown_keys(table: &toml::Table, known: &[&str]) -> toml::Table {
+    table
+        .iter()
+        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+/// The unknown keys of every `[[workspace]]` table, keyed by the entry's id.
+///
+/// Entries whose `id` is unreadable are skipped: without an id there is nothing to attach the keys
+/// to on the way out, and such an entry did not survive [`Registry::from_file`] either. Duplicate
+/// ids collapse to the last, matching the entry map itself.
+fn unknown_entry_keys(table: &toml::Table) -> IndexMap<Uuid, toml::Table> {
+    let mut out = IndexMap::new();
+    let Some(toml::Value::Array(workspaces)) = table.get("workspace") else {
+        return out;
+    };
+    for item in workspaces {
+        let Some(entry) = item.as_table() else {
+            continue;
+        };
+        let Some(id) = entry
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+        else {
+            continue;
+        };
+        let unknown = unknown_keys(entry, &ENTRY_KEYS);
+        if !unknown.is_empty() {
+            out.insert(id, unknown);
+        }
+    }
+    out
 }
 
 /// The on-disk shape of `workspaces.toml`. Private: callers only ever see [`Registry`] and
 /// [`Entry`], which carry typed, validated data.
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+/// Deserialize only: the document is written through [`RegistryOut`], which knows about the
+/// unknown keys this shape by definition does not.
+#[derive(Debug, Default, serde::Deserialize)]
 struct RegistryFile {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     current: Option<Uuid>,
-    #[serde(default, rename = "workspace", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, rename = "workspace")]
     workspaces: Vec<EntryFile>,
 }
 
 /// The on-disk shape of one `[[workspace]]` table. `last_opened` is a `String`, not a
 /// `DateTime<Utc>` — see the module docs' "the timestamp trap" section for why.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct EntryFile {
     id: Uuid,
     path: PathBuf,
@@ -461,10 +651,17 @@ mod tests {
             components.iter().any(|c| c == "jot"),
             "path should live under a `jot` config directory: {path:?}"
         );
-        assert!(
-            components.iter().any(|c| c == "danjolabs"),
-            "path should live under the `danjolabs` qualifier/organization: {path:?}"
-        );
+        // The organization component is a *platform convention*, not a property of the triple:
+        // `directories` puts it in the path on Windows (`%APPDATA%\danjolabs\jot\config`) and
+        // macOS, and XDG deliberately leaves it out, so on Linux the answer is `~/.config/jot`.
+        // Asserting it unconditionally asserted a Windows implementation detail — found by the
+        // first run of this suite on Linux, which is the only platform that could have found it.
+        if cfg!(any(target_os = "windows", target_os = "macos")) {
+            assert!(
+                components.iter().any(|c| c == "danjolabs"),
+                "path should live under the `danjolabs` qualifier/organization: {path:?}"
+            );
+        }
     }
 
     // ---------------------------------------------------------------- totality: load
@@ -683,6 +880,287 @@ mod tests {
             .expect("last_opened line");
         assert!(line.ends_with("Z\""), "{line}");
         assert!(!line.contains('.'), "subsecond precision leaked: {line}");
+    }
+
+    // ---------------------------------------------------------------- forward compatibility
+
+    /// A newer jot writes a key this build has never heard of; this build runs one command that
+    /// saves. Without preservation the newer settings are gone, silently, with the user's only
+    /// clue being that their newer install has forgotten something.
+    #[test]
+    fn unknown_keys_survive_a_load_save_cycle_both_top_level_and_per_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "current = \"{A}\"\n\
+                 theme = \"dark\"\n\n\
+                 [[workspace]]\n\
+                 id = \"{A}\"\n\
+                 path = 'one'\n\
+                 name = \"One\"\n\
+                 last_opened = \"2026-08-30T07:08:43Z\"\n\
+                 color = \"red\"\n\
+                 pinned = true\n"
+            ),
+        )
+        .unwrap();
+
+        let registry = Registry::load_from(&path).expect("load is total");
+        assert!(
+            registry.recovered().is_none(),
+            "an unknown key is not corruption"
+        );
+        registry.save_to(&path).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("theme = \"dark\""), "{after}");
+        assert!(after.contains("color = \"red\""), "{after}");
+        assert!(after.contains("pinned = true"), "{after}");
+        // And the keys this build does own are still exactly right.
+        assert!(after.contains(&format!("current = \"{A}\"")), "{after}");
+        assert!(
+            after.contains("last_opened = \"2026-08-30T07:08:43Z\""),
+            "{after}"
+        );
+
+        let reloaded = Registry::load_from(&path).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded.get(uuid(A)).unwrap().name(), "One");
+    }
+
+    /// Preservation must survive the mutations a real session performs, not just an untouched
+    /// load-save. A `jot use` stamps `last_opened` and rewrites the file.
+    #[test]
+    fn unknown_keys_survive_a_mutation_of_the_entry_that_carries_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[[workspace]]\nid = \"{A}\"\npath = 'one'\nname = \"One\"\nlast_opened = \"2026-08-30T07:08:43Z\"\ncolor = \"red\"\n"
+            ),
+        )
+        .unwrap();
+
+        let mut registry = Registry::load_from(&path).unwrap();
+        let mut entry = registry.get(uuid(A)).unwrap().clone();
+        entry.touch(ts("2026-09-01T00:00:00Z"));
+        entry.set_name("Renamed");
+        registry.upsert(entry);
+        registry.set_current(uuid(A));
+        registry.save_to(&path).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("color = \"red\""), "{after}");
+        assert!(after.contains("name = \"Renamed\""), "{after}");
+        assert!(
+            after.contains("last_opened = \"2026-09-01T00:00:00Z\""),
+            "{after}"
+        );
+    }
+
+    /// TOML types that a `#[serde(flatten)]`-based implementation mangles — a bare datetime, a
+    /// nested table, an array — must come back the way they went in. This is why the load path
+    /// parses to a `toml::Table` first instead of flattening into the struct.
+    #[test]
+    fn unknown_keys_of_every_toml_type_round_trip_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "last_synced = 2026-08-30T07:08:43Z\n\
+                 recents = [\"a\", \"b\"]\n\n\
+                 [[workspace]]\n\
+                 id = \"{A}\"\n\
+                 path = 'one'\n\
+                 name = \"One\"\n\
+                 last_opened = \"2026-08-30T07:08:43Z\"\n\
+                 depth = 3\n\n\
+                 [ui]\n\
+                 density = \"compact\"\n"
+            ),
+        )
+        .unwrap();
+
+        let before: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        Registry::load_from(&path).unwrap().save_to(&path).unwrap();
+        let after: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        for key in ["last_synced", "recents", "ui"] {
+            assert_eq!(after.get(key), before.get(key), "top-level `{key}` changed");
+        }
+        let entry_of = |t: &toml::Table| t["workspace"].as_array().unwrap()[0].clone();
+        assert_eq!(
+            entry_of(&after)["depth"],
+            entry_of(&before)["depth"],
+            "per-entry `depth` changed"
+        );
+    }
+
+    /// Save -> load -> save is still a fixed point once unknown keys are in play, so a registry
+    /// carrying them does not churn its own file on every command.
+    #[test]
+    fn a_registry_with_unknown_keys_is_still_a_save_load_save_fixed_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "theme = \"dark\"\n\n[[workspace]]\nid = \"{A}\"\npath = 'one'\nname = \"One\"\nlast_opened = \"2026-08-30T07:08:43Z\"\ncolor = \"red\"\n"
+            ),
+        )
+        .unwrap();
+
+        Registry::load_from(&path).unwrap().save_to(&path).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        Registry::load_from(&path).unwrap().save_to(&path).unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second, "unknown keys must not churn the file");
+    }
+
+    /// Unregistering a workspace takes its unknown keys with it. The alternative is a registry
+    /// that quietly accumulates settings for vaults the user removed, and resurrects them if the
+    /// same id is ever re-added.
+    #[test]
+    fn removing_an_entry_drops_the_unknown_keys_that_belonged_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[[workspace]]\nid = \"{A}\"\npath = 'one'\nname = \"One\"\nlast_opened = \"2026-08-30T07:08:43Z\"\ncolor = \"red\"\n"
+            ),
+        )
+        .unwrap();
+
+        let mut registry = Registry::load_from(&path).unwrap();
+        assert!(registry.remove(uuid(A)).is_some());
+        registry.upsert(Entry::new(
+            uuid(A),
+            dir.path().join("two"),
+            "Two",
+            ts("2026-09-01T00:00:00Z"),
+        ));
+        registry.save_to(&path).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("color"), "{after}");
+    }
+
+    /// Preserving unknown keys must not loosen the load path. The obvious one-parse implementation
+    /// — deserialize `RegistryFile` out of the `toml::Table` instead of out of the text — silently
+    /// does: `toml::Value`'s deserializer renders a native TOML datetime as a string, so an
+    /// unquoted `last_opened` would start loading instead of recovering as corrupt. That is a
+    /// strictness decision belonging to U5, not to forward compatibility.
+    #[test]
+    fn an_unquoted_last_opened_still_recovers_rather_than_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[[workspace]]\nid = \"{A}\"\npath = 'one'\nname = \"One\"\nlast_opened = 2026-08-30T07:08:43Z\n"
+            ),
+        )
+        .unwrap();
+
+        let registry = Registry::load_from(&path).expect("load is total");
+        assert!(registry.is_empty(), "a bare TOML datetime is not a string");
+        let err = registry.recovered().expect("and it must say why");
+        assert!(matches!(err, Error::RegistryCorrupt { .. }), "{err:?}");
+    }
+
+    /// The emitted document, pinned literally — the module docs' worked example, byte for byte,
+    /// plus what an unknown key does to it.
+    ///
+    /// `workspaces.toml` is a file users open and edit. Routing the document through a
+    /// `toml::Table` to merge the unknown keys in would still round-trip, would still be a fixed
+    /// point, and would still pass every other test here, while re-alphabetizing every entry to
+    /// `id, last_opened, name, path` and scattering the retained keys among the known ones. This
+    /// is the only place that notices.
+    #[test]
+    fn the_emitted_registry_looks_exactly_like_the_documented_shape() {
+        let mut registry = Registry::new();
+        registry.upsert(Entry::new(
+            uuid(A),
+            PathBuf::from(r"C:\Users\jun\notes"),
+            "Thoughts",
+            ts("2026-08-30T07:08:43Z"),
+        ));
+        registry.upsert(Entry::new(
+            uuid(B),
+            PathBuf::from(r"C:\Users\jun\work-notes"),
+            "Work",
+            ts("2026-08-29T12:00:00Z"),
+        ));
+        registry.set_current(uuid(A));
+
+        assert_eq!(
+            registry.to_toml_string().unwrap(),
+            "\
+current = \"01a03d20-a54c-7977-a1f4-1a88b38855dd\"
+
+[[workspace]]
+id = \"01a03d20-a54c-7977-a1f4-1a88b38855dd\"
+path = 'C:\\Users\\jun\\notes'
+name = \"Thoughts\"
+last_opened = \"2026-08-30T07:08:43Z\"
+
+[[workspace]]
+id = \"01a03d30-2b6b-7c22-9def-abcdef123456\"
+path = 'C:\\Users\\jun\\work-notes'
+name = \"Work\"
+last_opened = \"2026-08-29T12:00:00Z\"
+"
+        );
+
+        // And with retained keys: known keys keep their order, the rest follow.
+        registry
+            .unknown
+            .insert("theme".into(), toml::Value::String("dark".into()));
+        registry.unknown_entries.insert(uuid(A), {
+            let mut unknown = toml::Table::new();
+            unknown.insert("color".into(), toml::Value::String("red".into()));
+            unknown
+        });
+
+        let text = registry.to_toml_string().unwrap();
+        assert!(
+            text.starts_with(
+                "current = \"01a03d20-a54c-7977-a1f4-1a88b38855dd\"\ntheme = \"dark\"\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("last_opened = \"2026-08-30T07:08:43Z\"\ncolor = \"red\"\n"),
+            "a retained entry key follows the four known ones:\n{text}"
+        );
+        assert!(
+            !text.contains("color = \"red\"\n\nlast_opened = \"2026-08-29T12:00:00Z\""),
+            "and lands on the entry it came from, not the next one:\n{text}"
+        );
+    }
+
+    /// A retained unknown key must never shadow a key this build owns. Reachable only if a future
+    /// version of this module forgets to list one of its own keys as known, which is exactly the
+    /// mistake that would otherwise silently pin `current` to whatever the file said last.
+    #[test]
+    fn a_known_key_always_wins_over_a_retained_unknown_one() {
+        let mut registry = Registry::new();
+        registry.set_current(uuid(A));
+        registry
+            .unknown
+            .insert("current".into(), toml::Value::String(B.into()));
+
+        let text = registry.to_toml_string().unwrap();
+        assert!(text.contains(&format!("current = \"{A}\"")), "{text}");
+        assert!(
+            !text.contains(B),
+            "the unknown key must not shadow it: {text}"
+        );
     }
 
     // ---------------------------------------------------------------- keying and mutation
