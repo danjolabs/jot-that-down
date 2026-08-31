@@ -1,5 +1,11 @@
 # Stage 1b — Declared frontmatter schema
 
+> **Implemented 2026-08-31** on `stage/1b-declared-frontmatter-schema`. The run is in
+> [`runs/stage1b/`](runs/stage1b/log.md): what was ratified, where the implementation deviated from
+> this document and why, the per-criterion verdict, and an eleven-mutation spot-check. Two sections
+> below carry inline corrections marked **Corrected at implementation**; the Open questions section
+> records what was settled.
+
 **Goal.** The note format stops carrying what the index can hold, and `workspace.toml` declares what
 frontmatter looks like. One write path, ordered by the schema.
 
@@ -102,6 +108,12 @@ doc[start..end]  the fenced block, both fences included
 doc[end..]       the body, byte-for-byte
 ```
 
+**Corrected at implementation.** The reported span stops at the last character of the closing fence
+and **before its line terminator**, so `doc[end..]` would begin with that newline and every note's
+body would gain a leading blank line — fatally so for `01a03d56…`, whose body starts on the very
+next line. The block is extended over the terminator, and the adjustment is pinned by a test that
+asserts the crate's raw span alongside it. See `runs/stage1b/markdown-crate.md`.
+
 The body is a slice of the original text and never passes through a markdown emitter, so "plain
 markdown, untouched" is structural rather than earned — the same shape of guarantee byte-replay used
 to give, obtained from an offset instead of from a retained copy. This is why an AST crate is safe
@@ -120,11 +132,17 @@ interior is still `yaml_serde`'s, so the unknown-key problem below is untouched 
 section, not this one, is where the stage's risk lives.
 
 **What it costs.** markdown-rs reports *no frontmatter node* for both "no fence" and "unterminated
-fence", where §U10 wants two distinct errors. The distinction is recoverable — an unterminated `---`
-parses as a `ThematicBreak` at offset 0, a file with no fence does not — but that is an inference
-about the parser's output rather than something the parser reports, so it needs a test that pins it
-rather than a comment that asserts it. Because the block is always present, both cases are hard
-errors on a malformed file; neither is a path a well-formed vault takes.
+fence", where §U10 wants two distinct errors. Because the block is always present, both cases are
+hard errors on a malformed file; neither is a path a well-formed vault takes.
+
+**Corrected at implementation.** The recovery proposed here — "an unterminated `---` parses as a
+`ThematicBreak` at offset 0, a file with no fence does not" — is **unsound**. An *indented* `  ---`
+also parses as a `ThematicBreak` at offset 0, and it is not an unterminated fence; stage 1's
+`split_fences` called it "no fence", correctly. The implementation therefore does not infer the
+distinction from the AST at all: it reads the source's first line, skipping at most one BOM, and
+asks whether it trims to exactly `---`. That reproduces stage 1 on every case its tests covered and
+is a decision the code makes rather than a guess about someone else's parser. The test this section
+asked for exists and asserts both halves — identical AST shape, two different errors.
 
 **Stage 3 is the reason to prefer this crate over `pulldown-cmark`.** `stage3.md` already requires a
 markdown parser for `[[uuid]]` extraction, so the dependency was arriving regardless. In markdown-rs's
@@ -171,6 +189,21 @@ Byte-replay gave "verbatim" for free. Rendering gives it only if unknown keys ar
   stated premise was that byte-replay made emitter fidelity irrelevant to the choice. This stage
   removes that premise, so the decision is genuinely live again rather than merely revisitable — but
   it is a heavier change than the problem currently justifies.
+
+**Implemented: the first option, plus a guard the mechanism needs.** The line-range capture is
+roughly what is described here. What is added is that the slicer's limits are **checked rather than
+hoped**: the keys the line pass found are compared against the keys `yaml_serde` found, and a
+disagreement raises `Error::UnpreservableFrontmatter` naming the file. Stage 1 could afford not to
+notice — byte-replay preserved a block whether or not it understood it — and rendering cannot.
+
+One of the exotica listed above turned out not to need the guard. **Anchors and aliases round-trip
+fine**, because an alias resolves as long as its anchor is emitted first and unknown keys keep their
+relative order. What the guard actually catches is a non-string top-level key, a key the slicer
+missed, and a key it invented; a duplicated key is caught earlier still, by `yaml_serde`.
+
+**Preservation is keyed on what jot interprets, not on the schema.** The four keys above become
+typed fields; every other key is preserved. The schema governs order and nothing else — which is
+what makes the ratified answer to the schema-validation question below non-lossy.
 
 A `strict = true` opt-in that drops unlisted keys may be offered later. It is **not** the default and is out of scope here.
 
@@ -220,10 +253,14 @@ instead of containing it.
 - A note whose `relation:root` was deleted externally has it recomputed on open; one whose
   `relation:reply_to` was deleted becomes top-level and is not written back as empty.
 - `sync()` and `rebuild()` over a clean vault write nothing — `git status` stays empty.
+  *(**Deferred to stage 2** — neither function exists yet, by this stage's own "Not in this stage".
+  What is closed here is the property they inherit: a full read pass over the corpus changes no
+  byte, and repair lives on `open_note`, one file and one user action, deliberately not in any
+  vault-wide path.)*
 - Two notes created in the same millisecond get distinct filenames and distinct identities.
 - `created_at` recovered from a note's filename UUID equals the creation time it was minted with.
-- A workspace whose `schema.frontmatter` omits a relation key is rejected at `open`, naming what is
-  missing. *(Contingent — see Open questions.)*
+- ~~A workspace whose `schema.frontmatter` omits a relation key is rejected at `open`, naming what
+  is missing.~~ **Ratified the other way: it warns and opens.** See Open questions.
 - For every fixture note, the three slices the parse path cuts — BOM prefix, fenced block, body —
   concatenate back to the original file byte-for-byte. This is the structural property the "body
   untouched" guarantee rests on; if it fails, no later criterion can hold.
@@ -234,26 +271,37 @@ instead of containing it.
 
 ## Open questions
 
-- **Schema validation for `jot` workspaces.** If `schema.frontmatter` may omit `relation:root`, new
-  notes stop carrying it and the vault stops being rebuildable from markdown, contradicting the
-  source-of-truth decision. Recommended: `init`/`open` reject a `jot` schema missing any relation
-  key. Not yet ratified — the last acceptance criterion above depends on it.
-- **Concurrent edit.** A surface holding a note while an external editor writes it. Needs a re-stat
-  and hash comparison before write, or jot clobbers the external edit. Mechanism unspecified.
+- ~~**Schema validation for `jot` workspaces.**~~ **Settled 2026-08-31: warn, do not reject.**
+  `init`/`open` collect a `Warning::SchemaMissingRelationKeys` and open normally.
+
+  The recommendation to reject rested on "new notes stop carrying it and the vault stops being
+  rebuildable from markdown". That premise is false under this stage's own rendering rule: the write
+  path emits, after the declared keys, any *interpreted* key the schema omits that the note actually
+  carries. A vault with a thin schema still writes `relation:reply_to` on every reply. The omission
+  costs diff shape, never thread structure — so refusing to open would lock the user out of their
+  notes over a config line, for no safety.
+
+  It is the one case where emitted order is not exactly the schema's, and it cannot arise for a
+  schema declaring all four interpreted keys.
+- **Concurrent edit.** *(Promoted to `overview.md`'s open questions — it is no longer specific to
+  this stage.)* `Workspace::open_note` is the first writer with the problem: it reads, renders and
+  writes without re-stat'ing, so an external editor writing in between is clobbered. Stage 2's
+  `files` table (size, mtime, hash) is the first place with the machinery to fix it.
 - **Ordering churn.** jot writes in schema order; another editor writes in its own. Alternating edits
   produce diff noise in a git-tracked vault. Probably acceptable; worth measuring before deciding.
 - **Externally deleted file** — not moved to `.jot/.trash/`, just gone. Not trashed, not purged. The
-  index row drops on sync with no tombstone. Confirm that is wanted.
-- **Is `title` required, or merely always present in practice?** "The block is always present, at
-  minimum a `title`" settles that a note always has frontmatter. It does not settle whether a note
-  *without* a `title` key is malformed. The repair table above still reads "absent means untitled",
-  which assumes optional. If `title` becomes required, that row changes and a new validation error
-  joins the parse path. Left as written until ratified.
-- **Where the markdown-crate decision is recorded.** `runs/stage1/` is a sealed audit trail and this
-  is a stage-1b decision, so it does not belong there. Either fold it into `yaml-crate.md` as a dated
-  addendum — its title already covers "the stage-1 dependency set" — or open `runs/stage1b/` early.
-  Until then this section is the only record, and `Cargo.toml` carries no `markdown` entry yet.
-- **Whether the crate swap lands before 1b.** It is confined to `frontmatter.rs` and is independent
-  of the identity change, so it can go in first as a behaviour-preserving refactor gated by the
-  existing `split_fences` tests — which are currently the only thing pinning those edge cases. Doing
-  it inside 1b means swapping the parser and the format in one diff.
+  index row drops on sync with no tombstone. Confirm that is wanted. *(Promoted to `overview.md` —
+  there is no index in this stage for the question to be about.)*
+- ~~**Is `title` required, or merely always present in practice?**~~ **Settled: optional**, by
+  taking "left as written" at its word. A note with no `title` is untitled; an empty block is an
+  untitled top-level note; neither is an error. This is the one place stage 1b *reverses* a stage-1
+  behaviour rather than deleting it — `---\n---\n` used to be `FrontmatterNotAMapping`, because an
+  empty block had no `id`.
+- ~~**Where the markdown-crate decision is recorded.**~~ **Settled: `runs/stage1b/` was opened
+  early.** [`runs/stage1b/markdown-crate.md`](runs/stage1b/markdown-crate.md) carries the decision,
+  the verification table, the weight (`markdown v1.0.0` plus `unicode-id`), and the two behaviours
+  this document got slightly wrong. `Cargo.toml` points at it.
+- ~~**Whether the crate swap lands before 1b.**~~ **Settled: inside 1b, one diff.** The mitigation
+  for losing the attribution a separate commit would have given: the crate was verified empirically,
+  against every case the old `split_fences` tests covered, *before* any implementation code was
+  written. That pass is `runs/stage1b/markdown-crate.md`.

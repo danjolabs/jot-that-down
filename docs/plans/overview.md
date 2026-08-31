@@ -5,9 +5,9 @@ Read this file first; each `stage<#>.md` is self-contained once you have the con
 
 ## The product in one paragraph
 
-A personal capture tool over a directory of markdown files. Every note is a `<uuid>.md` file whose
-frontmatter carries its own identity and relations; SQLite is a rebuildable index that makes querying
-titles, dates, and relations fast. The interface is a micro-blog — notes reply to notes and quote
+A personal capture tool over a directory of markdown files. Every note is a `<uuid>[_slug].md` file
+whose **filename is its identity** and whose frontmatter carries its title and its relations; SQLite
+is a rebuildable index that makes querying titles, dates, and relations fast. The interface is a micro-blog — notes reply to notes and quote
 notes — because that lets an idea grow a structure *while it is being written*, instead of demanding
 a folder decision before the thought is finished. Three surfaces over one core: CLI, TUI, desktop.
 
@@ -19,9 +19,9 @@ Carried in from `docs/conversation.md`; stages assume these without re-arguing t
 | --- | --- |
 | Source of truth | Markdown files. SQLite is derived and disposable. |
 | Identity | UUIDv7, in the filename only. Moved from "filename **and** frontmatter" during stage 1b — see [stage1b.md](stage1b.md). |
-| Thread storage | Adjacency: `reply_to` + denormalized `root`. Paths (form 1) and segments (form 2) are computed at render time, never stored. |
-| Quote | Single nullable reference. Cross-tree: never changes `root`, never joins the quoted note's thread. |
-| Trash | Move the file into `.jot/.trash/`, stamp `trashed_at`. Location on disk *is* the state. |
+| Thread storage | Adjacency: `relation:reply_to` + denormalized `relation:root`. Paths (form 1) and segments (form 2) are computed at render time, never stored. |
+| Quote | Single nullable `relation:quote`. Cross-tree: never changes the root, never joins the quoted note's thread. |
+| Trash | Move the file into `.jot/.trash/`. Location on disk *is* the state — the frontmatter stamp is gone (stage 1b); the index's `trashed_at` is a mirrored column, derived like everything else. |
 | Trashing a parent | Replies stay live and render a trashed-parent placeholder. Trash is never cascading. |
 | Index scope | Title, dates, relations, links. Note bodies are not stored in the index. |
 | Search | Title and metadata only. Full-text deferred — see `docs/sidenote.md`. |
@@ -116,7 +116,7 @@ impl Workspace {
 | 4 | [CLI](stage4.md) | `jot` — daily-usable capture and retrieval | 3 |
 | 5 | [TUI](stage5.md) | Timeline, thread, file+reader, search, trash | 4 |
 | 6 | [Desktop](stage6.md) | Tauri app, capture overlay, `jot://` deep links | 5 |
-| 7 | [Schema and plain workspaces](stage7.md) | Declared frontmatter schema, `plain` workspace type | 6 |
+| 7 | [Schema and plain workspaces](stage7.md) | User-declared *extra* fields with types and defaults, `plain` workspace type, rename detection | 6 |
 
 [`orchestration.md`](orchestration.md) covers how these stages get executed and verified — the agent
 roles, the model routing, the three gates, and the criteria no orchestrator can close.
@@ -131,8 +131,12 @@ use reorder everything after it.
 
 - **Errors** — `thiserror` enums in `jot-core`, `anyhow` in the binaries. Core errors name the file
   or note involved; a message that says only "parse error" is a bug.
-- **Time** — RFC 3339, UTC, stored as TEXT. Frontmatter is authoritative; filesystem mtime is only
-  ever used as a change *hint*, never as a fact about a note.
+- **Time** — RFC 3339, UTC, stored as TEXT. No note timestamp is stored in a file: `created_at` is
+  **decoded from the note's UUIDv7 identity**, and `edited_at` is index-only, from filesystem mtime
+  at scan time (stage 1b). Outside that one field, mtime remains a change *hint* and never a fact
+  about a note — `edited_at` is the deliberate, isolated exception, and the rebuild invariant below
+  exempts it explicitly rather than letting it spread. A note whose id is not a v7 UUID has no
+  recoverable `created_at`, which is a real state and reads as `NULL` rather than as an invention.
 - **Paths in the index** — relative to the workspace root, forward slashes, so the DB survives moving
   the vault between machines and platforms.
 - **Tests** — one `tests/fixtures/vault/` used by every stage. Add to it, never fork it. Property
@@ -145,7 +149,11 @@ use reorder everything after it.
   rather than being satisfied by making rebuild write mtime everywhere, which would spread the
   lossiness instead of containing it.
 - **Frontmatter forward-compat** — unknown keys are preserved verbatim on every write, from stage 1.
-  Stage 7's schema feature is impossible if any earlier stage drops keys it doesn't recognize.
+  Stage 7's schema feature is impossible if any earlier stage drops keys it doesn't recognize. Stage
+  1b deleted byte-replay, which had given this for free, so the guarantee is now carried by slicing
+  each top-level key's *source lines* and re-splicing them. A block whose keys the slicer and the
+  YAML parser disagree about is **refused**, not written: failing loudly on a block jot cannot
+  reproduce is the only option consistent with not touching the user's bytes.
 - **No cascading anything** — no cascading trash, no cascading purge, no `ON DELETE CASCADE`.
   Dangling references are a designed-for state, not corruption.
 
@@ -171,6 +179,12 @@ use reorder everything after it.
 - **DB filename.** `docs/conversation.md` says `{data,index}.db`. This plan assumes a single
   `.jot/index.db`, on the grounds that naming it `data.db` invites treating it as source of truth.
   Confirm, or say what the second file would hold.
+- **Concurrent edit.** A surface holding a note while an external editor writes it. Needs a re-stat
+  and hash comparison before write, or jot clobbers the external edit. Raised in stage 1b and left
+  open there; `Workspace::open_note` is the first writer with the problem, and stage 2's `files`
+  table (size, mtime, hash) is the first place with the machinery to solve it.
+- **Externally deleted file** — not moved to `.jot/.trash/`, just gone. Not trashed, not purged. The
+  index row drops on sync with no tombstone. Raised in stage 1b; stage 2 is where it becomes real.
 - ~~**Filename slug.**~~ **Settled in [stage 1b](stage1b.md).** The `[notes] filename` knob is gone.
   The slug was always decorative and always ignored by the reader, so the knob governed nothing the
   reader cared about; it is replaced by a creation-time option for whether a new note's filename gets

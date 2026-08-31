@@ -30,9 +30,9 @@ CREATE TABLE notes (
   quoted_id   TEXT,
   title       TEXT,
   state       TEXT NOT NULL CHECK (state IN ('active', 'trashed')),
-  created_at  TEXT NOT NULL,
-  edited_at   TEXT,
-  trashed_at  TEXT
+  created_at  TEXT,                -- decoded from the id's UUIDv7 timestamp; NULL if not v7
+  edited_at   TEXT,                -- filesystem mtime at scan time; exempt from the rebuild check
+  trashed_at  TEXT                 -- mtime of the file inside `.jot/.trash/`
 );
 
 CREATE INDEX notes_root     ON notes(root_id, id);
@@ -79,13 +79,25 @@ a migration if `WITHOUT ROWID` was chosen here for no reason.
 - [ ] Deletion detection: a `files` row whose path no longer exists → remove the note row. Its
       children keep their now-dangling `reply_to_id`, which is exactly the "Deleted" state.
 - [ ] State from location: found in the root → `active`; found in `.jot/.trash/` → `trashed`. The
-      directory decides; `trashed_at` is read from the frontmatter for the timestamp only.
+      directory decides, and from stage 1b it is the *only* thing that decides — there is no
+      `trashed_at` key in the file to read a timestamp from. Mirror the trashed file's mtime.
 - [ ] **Read the whole file, store only the metadata.** Link extraction (stage 3) needs the body, so
       the earlier "read only up to the frontmatter fence" idea does not survive contact with links.
       The user-facing decision is unchanged — bodies are never *stored* in the index — and at personal
       scale reading a few MB of markdown costs nothing.
 - [ ] Report: `SyncReport { added, updated, removed, unchanged, problems }` where `problems` carries
-      per-file parse failures, id/filename disagreements, and duplicate ids.
+      per-file parse failures and duplicate ids. **No id/filename disagreements**: stage 1b made the
+      filename the identity, so there is nothing left to disagree. What replaces that problem is two
+      *files* whose names carry one UUID — see `probe_b_two_files_claiming_one_identity_...`, which
+      pins that stage 1b does not detect it and stage 2 inherits it.
+
+Three things stage 1b changed under this stage's feet, none of them optional:
+
+- **`sync()` and `rebuild()` are strictly read-only.** A vault scan must not produce a diff. Repair
+  of missing schema fields happens on `Workspace::open_note`, which is one file and one user action.
+- **`created_at` is not parsed.** It is decoded from the note id; the scanner never looks for it.
+- **`edited_at` is exempt from the rebuild invariant.** See `overview.md`. The tempting "fix" is to
+  make rebuild write mtime everywhere, which spreads the lossiness instead of containing it.
 
 ### Rebuild
 
@@ -143,7 +155,8 @@ Enough to prove the schema; the surfaces come later.
   the source of what gets written.
 - **`sync()` on a WAL database in a synced folder.** Not solved here — mitigated by `.gitignore`,
   documented sync exclusion, and the fact that the file is disposable. Revisit only if it actually bites.
-- **Duplicate `id` across two files.** Possible via copy-paste of a note. Report it as a problem and
+- **Duplicate id across two files.** From stage 1b this means two *filenames* carrying one UUID —
+  `<uuid>.md` beside `<uuid>_a_slug.md`, which a copy-paste or a sync client produces. Report it as a problem and
   keep the lexicographically-first path; do not silently pick one.
 - **mtime granularity** differs across filesystems. The hash fallback covers it; never make mtime alone
   authoritative.
