@@ -40,7 +40,7 @@ Finding that out before three implementers are running is worth the delay.
    renamed under you mid-scan, a UUID that appears twice.
 3. **Mutation spot-check.** In a throwaway worktree, deliberately break each behavior the stage
    claims — invert a comparison, drop a field on write, skip the hash check — and confirm the
-   acceptance test *fails*.
+   acceptance test _fails_.
 
 Step 3 is the one that is tempting to skip and the one that matters most. A test that stays green
 against a broken implementation is worth less than no test, because it manufactures confidence.
@@ -53,17 +53,21 @@ Write `docs/plans/runs/stage<N>/verification.md`:
 # Stage <N> verification
 
 ## Criteria
+
 | Criterion (from stage<N>.md) | Verdict | Evidence |
-| --- | --- | --- |
+| ---------------------------- | ------- | -------- |
 
 ## Beyond the criteria
+
 What you probed, and what it found.
 
 ## Mutation results
+
 | Behavior broken | Test that caught it | Caught? |
-| --- | --- | --- |
+| --------------- | ------------------- | ------- |
 
 ## Verdict
+
 PASS or FAIL, and for FAIL, what specifically must change.
 ```
 

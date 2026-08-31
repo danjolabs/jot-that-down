@@ -25,23 +25,29 @@ Write `docs/plans/runs/stage<N>/log.md` from the artifacts in that directory —
 # Stage <N> log
 
 ## What shipped
+
 One paragraph. What the stage actually delivered.
 
 ## Waves
+
 | Wave | Task | Agent | Model | Outcome |
-| --- | --- | --- | --- | --- |
+| ---- | ---- | ----- | ----- | ------- |
 
 ## Deviations
+
 Where the work diverged from `stage<N>.md`, and why. This is the most valuable section — write it
 even when it is uncomfortable.
 
 ## Fix rounds
+
 What failed the gate, how many rounds it took, what the fix was.
 
 ## Human checkpoints
+
 Which criteria the orchestrator could not close, and their status.
 
 ## Timings
+
 Wall-clock per wave, and the measured numbers the stage doc asked to be recorded.
 ```
 
