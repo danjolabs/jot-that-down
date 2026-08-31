@@ -266,12 +266,24 @@ re-litigating settled ground. Write it as you go, not at the end.
 
 ## Attribution
 
-The per-commit half of the audit trail, and in this repo the **only** attribution in the history:
-`.claude/settings.local.json` sets `attribution.commit` to `""`, so no `Co-Authored-By` trailer is
-generated. Nothing else in a commit says a machine was involved.
+The per-commit half of the audit trail. Two trailers appear in this repo's history: `Assisted-by:`,
+described below, and `Claude-Session:`, which the user has chosen to have added to every commit,
+anchoring it to the Claude Code session that produced it. `.claude/settings.local.json` sets
+`attribution.commit` to `""`, so the one trailer genuinely absent from this repo's history is
+`Co-Authored-By`.
+
+**One `Assisted-by:` per commit, and it records the orchestrator.** Subagents do not commit — they
+hand work back and Fable lands it — so the trailer describes the tool and configuration of whoever
+actually created the commit object. Which agent did the underlying work is
+`runs/stage<N>/dispatch.md`'s job, and it does that job better than a trailer can.
+
+This is not merely a tidiness rule. An agent can report its own model and effort with certainty; it
+can only ever *guess* another agent's. A per-agent trailer therefore invites exactly the confident
+wrong attribution this section warns against, and multiplies it by the number of agents on the
+commit. A single self-reported line is the only part of the trailer that is honest by construction.
 
 Claude Code's attribution setting has no variables for model, effort, or thinking, so the trailer is
-written by the agent itself at commit time.
+written by the orchestrator itself at commit time.
 
 ```text
 Assisted-by: <tool> <model-id>:<effort>[ thinking]
@@ -316,15 +328,23 @@ to read than an inferred one.
 
 ### What the trailer is and isn't
 
-An agent's account of its own configuration is **not verifiable from git**. Nothing stops a
-mis-dispatched sonnet agent from writing `claude-opus-5`, and no hook can catch it. With
-`attribution.commit` empty there is no harness-generated trailer to cross-check against either, so
+An agent's account of its own configuration is **not verifiable from git**. With
+`attribution.commit` empty there is no harness-generated trailer to cross-check against, so
 everything git knows about who did the work is self-reported.
 
-So: `runs/stage<N>/dispatch.md` is authoritative, because Fable writes it at dispatch time from what
-it actually passed to the `Agent` call. The trailer is a convenience that puts the same fact where
-`git log` can see it. **When the two disagree, dispatch.md wins**, and the disagreement is worth
-investigating — it usually means a re-dispatch went out with the wrong model.
+The single-trailer rule narrows what is being claimed rather than fixing this. The orchestrator
+reports only itself, which is the one configuration it actually knows — but nothing stops it
+misreporting that either, and no hook can catch it.
+
+So: `runs/stage<N>/dispatch.md` is authoritative for **who did the work**, because Fable writes it at
+dispatch time from what it actually passed to the `Agent` call. The trailer answers a narrower
+question — **who committed** — and the two are deliberately different facts. A commit whose trailer
+says `claude-opus-5` may contain work from three sonnet implementers; that is not a contradiction,
+and dispatch.md is where you go to find out.
+
+**The trailer can no longer disagree with dispatch.md**, because after this change they no longer
+describe the same thing. What replaces that cross-check is weaker and worth naming: a dispatch-log
+row written at seal rather than at dispatch time cannot be validated against anything.
 
 If an agent genuinely doesn't know its own effort or thinking state, it omits the trailer. It does
 not guess. A confident wrong attribution is worse than an absent one, for the same reason "tests
@@ -332,8 +352,12 @@ pass" without a platform is not a fact.
 
 ### Mechanics
 
-- Trailers repeat. A commit touched by an implementer and then a fixer round carries one
-  `Assisted-by:` line per agent, in the order they worked.
+- **Exactly one `Assisted-by:` line per commit.** A commit touched by an implementer, a fixer round
+  and a verifier still carries one — the orchestrator's — because the orchestrator is what made the
+  commit. Do not repeat the trailer per agent.
+- Stage 1's history predates this rule and carries several commits with one line per contributing
+  agent. Those are left as they are; rewriting merged history to satisfy a documentation change
+  would cost more than the inconsistency does.
 - This does **not** stack with `Co-Authored-By:`. That trailer is disabled by
   `.claude/settings.local.json`, which is a deliberate choice worth keeping: `Co-Authored-By` claims
   authorship and lights up GitHub's contributor UI, while `Assisted-by:` records a tool and its
@@ -343,7 +367,7 @@ pass" without a platform is not a fact.
 
   ```bash
   git commit -m "stage 1: frontmatter round-trip" \
-    --trailer "Assisted-by: implementer claude-opus-5:high thinking"
+    --trailer "Assisted-by: claude-code claude-opus-5:high thinking"
   ```
 
 - Audit a stage's history:
@@ -388,23 +412,36 @@ they are not a schedule to be defended.
 
 ## First dispatch, concretely
 
-Stage 1, wave by wave, as a worked example of the shape:
+Stage 1, wave by wave, as it was actually run — corrected at seal from an earlier sketch that put
+the verifier at wave 0, before the cargo workspace existed. That could not have worked:
+`crates/jot-acceptance` is a crate in a workspace nothing had created yet, and phase A's tests need
+module paths — `jot_core::note::NoteId`, and so on — that nobody had fixed. Phase A moves to wave 2,
+concurrent with the crate-error-taxonomy work, once wave 1's scaffold gives it a crate to `use`
+against. The rule phase A protects — no implementer of *behavior under test* runs before the tests
+exist — still holds either way: wave 1 and the rest of wave 2 land no stage-1 behavior, only
+scaffolding, manifests, and an error taxonomy.
 
 ```text
-wave 0   verifier (opus)     phase A: acceptance tests from stage1.md
-                             owns crates/jot-acceptance/
-
 wave 1   implementer (sonnet) cargo workspace, rust-toolchain, CI matrix
                              owns Cargo.toml, .github/, rust-toolchain.toml
                              ── alone: it owns the manifests ──
 
-wave 2   implementer (opus)   NoteId, Note, NoteMeta, frontmatter types
+wave 2   implementer (opus)   deps, YAML/time crate decision, error taxonomy
+                             owns Cargo.toml, Cargo.lock, crates/jot-core/src/error.rs
+         verifier (opus)     phase A: acceptance tests from stage1.md
+                             owns crates/jot-acceptance/
+                             ── parallel: disjoint ownership; phase A is expected to fail to
+                                compile regardless of what the other task lands ──
+
+wave 3   implementer (opus)   NoteId, Note, NoteMeta, frontmatter types
                              owns crates/jot-core/src/{note,frontmatter}.rs
          implementer (opus)   atomic write, filename parsing, enumeration
                              owns crates/jot-core/src/fs.rs
-                             ── parallel: disjoint, no new deps ──
+         implementer (sonnet) workspace registry
+                             owns crates/jot-core/src/registry.rs
+                             ── parallel: disjoint, no new deps; error.rs is frozen after wave 2 ──
 
-wave 3   implementer (opus)   init / open / discover, workspace.toml, registry
+wave 4   implementer (opus)   init / open / discover, workspace.toml
                              owns crates/jot-core/src/workspace.rs
 
 gate     integrator (sonnet)  fmt, clippy -D warnings, cargo test

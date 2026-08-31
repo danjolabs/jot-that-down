@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+  # `jot-acceptance` is excluded from `default-members`, so the main `test` job above never builds
+  # it and this is the only place the suite runs. It was `continue-on-error: true` from wave 2 —
+  # the suite is red by design until wave 4 lands — and is now **blocking**, per dispatch.md U8's
+  # "flipped to blocking at seal". A regression that breaks an acceptance criterion fails CI.
+  acceptance:
+    name: acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `criteria.rs`, `probes.rs` and `phase_b.rs` are `#![cfg(feature = "stage1")]`, so the
+      # `test` job's `cargo clippy --workspace --all-targets -- -D warnings` compiles them to
+      # nothing and the acceptance crate's own code is linted nowhere. This is that lint, and it
+      # denies warnings: the nine it used to carry were resolved in the phase B fixer round.
+      - name: cargo clippy -p jot-acceptance --features stage1
+        run: cargo clippy -p jot-acceptance --features stage1 --all-targets -- -D warnings
+
+      - name: cargo test -p jot-acceptance --features stage1
+        run: cargo test -p jot-acceptance --features stage1

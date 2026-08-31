@@ -1,0 +1,4 @@
+# Force LF line endings on the fixture corpus so a Windows checkout (core.autocrlf=true) cannot
+# alter fixture bytes before a single line of parser code exists. The byte-identical round-trip
+# gate (stage1.md) depends on these files being exactly what was committed.
+tests/fixtures/** text eol=lf

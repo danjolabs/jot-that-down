@@ -19,6 +19,13 @@ implicit here gets reimplemented three times, slightly differently.
 | `restore` | move back to root | `state = 'active'` | `trashed_at` removed |
 | `purge` | delete the file | delete the row | — |
 
+Stage 1 phase B found a hazard on `edit`'s write: mutating `Note`'s public fields and then calling the
+byte-preserving `to_bytes()` silently discarded the edit, because that path replayed retained bytes
+rather than rendering current state. Stage 1b removes the hazard at the source rather than leaving it
+for `edit` to guard against — the two-path serializer is gone, there is one write path that always
+renders from typed state, and the impossible state (a write method that ignores the fields you just
+set) no longer exists. `edit` has nothing to enforce here beyond calling the one render path there is.
+
 Rules that follow from the locked decisions and must be enforced in one place:
 
 - **Trash never cascades.** Trashing a note with replies moves exactly one file. The replies stay

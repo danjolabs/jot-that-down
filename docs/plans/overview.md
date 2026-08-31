@@ -18,7 +18,7 @@ Carried in from `docs/conversation.md`; stages assume these without re-arguing t
 | Area | Decision |
 | --- | --- |
 | Source of truth | Markdown files. SQLite is derived and disposable. |
-| Identity | UUIDv7, in the filename **and** the frontmatter. |
+| Identity | UUIDv7, in the filename only. Moved from "filename **and** frontmatter" during stage 1b — see [stage1b.md](stage1b.md). |
 | Thread storage | Adjacency: `reply_to` + denormalized `root`. Paths (form 1) and segments (form 2) are computed at render time, never stored. |
 | Quote | Single nullable reference. Cross-tree: never changes `root`, never joins the quoted note's thread. |
 | Trash | Move the file into `.jot/.trash/`, stamp `trashed_at`. Location on disk *is* the state. |
@@ -110,7 +110,8 @@ impl Workspace {
 | # | Stage | Delivers | Depends on |
 | --- | --- | --- | --- |
 | 1 | [Vault foundations](stage1.md) | Workspace on disk, frontmatter round-trip, atomic writes | — |
-| 2 | [Index and rebuild](stage2.md) | SQLite schema, scanner, deterministic rebuild | 1 |
+| 1b | [Declared frontmatter schema](stage1b.md) | Filename-only identity, schema-declared frontmatter, single write path | 1 |
+| 2 | [Index and rebuild](stage2.md) | SQLite schema, scanner, deterministic rebuild | 1b |
 | 3 | [Notes and threads](stage3.md) | Full note lifecycle, thread algebra, links | 2 |
 | 4 | [CLI](stage4.md) | `jot` — daily-usable capture and retrieval | 3 |
 | 5 | [TUI](stage5.md) | Timeline, thread, file+reader, search, trash | 4 |
@@ -137,7 +138,12 @@ use reorder everything after it.
 - **Tests** — one `tests/fixtures/vault/` used by every stage. Add to it, never fork it. Property
   tests for the thread algebra; snapshot tests (`insta`) for rendered output; `assert_cmd` for CLI.
 - **The rebuild invariant** — a full rebuild of the index must produce the same logical content as an
-  incremental sync. This is a CI check from stage 2 onward, not a manual belief.
+  incremental sync. This is a CI check from stage 2 onward, not a manual belief. **Exception:
+  `edited_at`.** From stage 1b onward it is index-only, populated from filesystem mtime at scan time,
+  and mtime is not reproducible content — a rebuild and an incremental sync are not guaranteed to
+  observe the same mtime for an untouched file across two scans. The check must exempt this one field
+  rather than being satisfied by making rebuild write mtime everywhere, which would spread the
+  lossiness instead of containing it.
 - **Frontmatter forward-compat** — unknown keys are preserved verbatim on every write, from stage 1.
   Stage 7's schema feature is impossible if any earlier stage drops keys it doesn't recognize.
 - **No cascading anything** — no cascading trash, no cascading purge, no `ON DELETE CASCADE`.
@@ -155,7 +161,7 @@ use reorder everything after it.
 | Risk | Mitigation |
 | --- | --- |
 | SQLite in a synced vault corrupts | `.jot/.gitignore` excludes `index.db*`; document that `.jot/` should be excluded from Dropbox/iCloud/OneDrive sync; keep `--db-path` as an escape hatch. The DB being disposable is the real protection. |
-| Windows atomic rename over an existing file | `std::fs::rename` fails on Windows when the target exists. Verify the chosen crate uses `MOVEFILE_REPLACE_EXISTING`; test on Windows explicitly (stage 1). |
+| Windows atomic rename over an existing file | **Verified, stage 1: not a risk in the form stated.** `std::fs::rename` already maps to `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` and replaces an existing target with no third-party crate needed — confirmed by `fs.rs`'s `std_rename_replaces_an_existing_file_on_this_platform`, run on Windows 11 (build 26200) / `1.97.1-x86_64-pc-windows-msvc`, 2026-08-30. This is a finding about *replacement*, not that renames never fail: a read-only target, or another process holding the file without `FILE_SHARE_DELETE`, still fails the rename — and in both cases the target is left byte-intact, which is the property that actually matters. |
 | External edits desync the index | Every command calls `sync()` first; stage 5 adds a watcher. `mtime`+size fast path, content hash on mismatch. |
 | Three surfaces drift apart | The seam. Surfaces contain no domain logic — if a surface needs a new rule, the rule goes in core. |
 | Scope creep into an Obsidian clone | Tags, backlinks-as-graph, FTS, and collections are all deliberately deferred. The premise is capture, not curation. |
@@ -165,8 +171,11 @@ use reorder everything after it.
 - **DB filename.** `docs/conversation.md` says `{data,index}.db`. This plan assumes a single
   `.jot/index.db`, on the grounds that naming it `data.db` invites treating it as source of truth.
   Confirm, or say what the second file would hold.
-- **Filename slug.** Deferred by you; stage 1 makes it a `workspace.toml` knob defaulting to bare
-  UUID, so the decision can be made later without a migration.
+- ~~**Filename slug.**~~ **Settled in [stage 1b](stage1b.md).** The `[notes] filename` knob is gone.
+  The slug was always decorative and always ignored by the reader, so the knob governed nothing the
+  reader cared about; it is replaced by a creation-time option for whether a new note's filename gets
+  a slug derived from its title. Because identity is the filename's UUID and the reader ignores
+  everything after it, re-slugging on a title change does not move the note.
 - **Desktop frontend framework** (React / Svelte / Solid) — not needed until stage 6.
 - **`plain` workspace depth** — is it a real editor, or just a reader plus external `$EDITOR`
   handoff? Stage 7 assumes the latter until told otherwise.

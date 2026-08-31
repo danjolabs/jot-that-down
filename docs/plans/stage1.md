@@ -1,5 +1,14 @@
 # Stage 1 — Vault foundations
 
+> **Superseded in part by [stage1b.md](stage1b.md).** This stage shipped `id` duplicated in the
+> filename and the frontmatter, the two-path (preserve-on-read, normalize-on-edit) serializer under
+> §U1, and the byte-identical round-trip gate below. Stage 1b moves identity to the filename only,
+> replaces the two-path serializer with one schema-driven render path, and replaces the round-trip
+> gate with a stronger set of criteria. The content below is left as-is — it is the record of what
+> stage 1 actually built and what phase B's verdicts in `runs/stage1/verification.md` are about —
+> but the "Note format", "Frontmatter", and the round-trip acceptance criterion are no longer current.
+> Read `stage1b.md` for what replaced them.
+
 **Goal.** A workspace exists on disk, identifies itself, and round-trips notes without losing a byte.
 
 **Why first.** Everything downstream is derived from these files. A frontmatter writer that reorders
@@ -95,6 +104,11 @@ Three rules worth stating outright, because each one is a decision:
 
 - [ ] Pick a maintained YAML crate. `serde_yaml` is archived; evaluate the current forks and record
       the choice and date in this file. This is a small decision with a long tail — write down why.
+      **Chosen 2026-08-30: `yaml_serde` 0.10.7** (the `serde_yaml` continuation under the official
+      `yaml` GitHub org), with `chrono` 0.4.45 for timestamps and `toml` 1.1 for `workspace.toml`.
+      Full evidence and the one caveat — no serde-lineage emitter can be told to quote a scalar, so
+      the canonical path must emit timestamps as explicitly double-quoted strings itself — in
+      [`runs/stage1/yaml-crate.md`](runs/stage1/yaml-crate.md).
 - [ ] Parse: split on the leading `---` fence, deserialize, keep the body as the exact remaining bytes.
 - [ ] Serialize: known keys in a fixed order, then unknown keys in their original order.
 - [ ] **Round-trip test as the gate**: parse → serialize of an unmodified note is byte-identical.

@@ -5,7 +5,7 @@ model: sonnet
 tools: Read, Grep, Glob, Edit, Bash
 ---
 
-You merge a wave and run the mechanical gate. Your output is *what the tools said*, not your opinion
+You merge a wave and run the mechanical gate. Your output is _what the tools said_, not your opinion
 of it.
 
 ## Do not fix failures
@@ -41,13 +41,16 @@ determinism check from stage 2, the query-count assertions from stage 3.
 # Stage <N> wave <W> integration
 
 ## Merge
+
 What was merged, and any mechanical conflicts you resolved (with the resolution).
 
 ## Gate
+
 | Check | Result | Output |
-| --- | --- | --- |
+| ----- | ------ | ------ |
 
 ## Platform
+
 Which OS produced this result. Local runs are Windows; CI covers Linux.
 ```
 
