@@ -242,3 +242,24 @@ Two notes from T2.1 that bear on the shape:
 | 2 | T2.1 deps, crate decisions, error taxonomy | implementer | claude-opus-5 | high | worktree | done, merged 7b3d52a |
 | 2 | T2.2 phase A acceptance suite | verifier | claude-opus-5 | high | worktree | done, merged 7b96d51, correctly red |
 | 2 | wave 2 merge + mechanical gate | integrator | claude-sonnet-5 | high | in place | done, gates 1-3 green, gate 4 red as designed |
+| 3 | T3.1 NoteId, Frontmatter, Note, dual serialization | implementer | claude-opus-5 | high | worktree | done, merged fba8102 |
+| 3 | T3.2 atomic write, filename parsing, enumeration | implementer | claude-opus-5 | high | worktree | done, merged 2d0fe1d |
+| 3 | T3.3 workspace registry | implementer | claude-sonnet-5 | high | worktree | done, merged f441228; blocked on T3.2 mid-wave, validated in a scratch project |
+| 3 | acceptance suite name reconciliation | verifier | claude-opus-5 | high | worktree | done, merged 857bb2e |
+| 3 | wave 3 merge + mechanical gate | integrator | claude-sonnet-5 | high | in place | done, 113 tests green, gate 4 red only on `workspace` |
+| 4 | T4.1 init / open / discover / manifest | implementer | claude-opus-5 | high | in place | done, 53cb57a |
+| gate | F1 fix — note::load and fs::parse_note_filename agree | implementer | claude-opus-5 | high | in place | done, c293114 |
+| gate | phase B, mutation spot-check, suite gap closure | verifier | claude-opus-5 | high | in place | done, 989458c |
+| gate | code review findings F3-F7 | implementer | claude-opus-5 | high | in place | done, 7ea4ab0 |
+| gate | F5/F6 round close, M43 symmetry | verifier | claude-opus-5 | high | in place | done, bdef74d |
+| seal | run log + plan-doc write-backs | scribe | claude-sonnet-5 | high | in place | done |
+
+**Audit-trail gaps, recorded rather than reconstructed.**
+
+- `review.md` was never written. The code review happened — `c293114` and `7ea4ab0` fix F1 and F3-F7
+  — but no artifact records its findings or dispositions. Reconstructing it after the fact would
+  manufacture a record, which is worse than an honest gap.
+- The rows above for waves 3, 4 and the fix rounds were written **at seal, not at dispatch time**,
+  contrary to this file's own rule. Model and isolation are recovered from the `Agent` calls; commit
+  SHAs from `git log`. They are accurate but they are not contemporaneous, and a row written after
+  the fact cannot cross-check a trailer the way one written at dispatch can.

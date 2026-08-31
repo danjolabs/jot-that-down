@@ -132,6 +132,15 @@ Enough to prove the schema; the surfaces come later.
 
 ## Risks
 
+- **A write must never originate from an index row.** Stage 1 phase B confirmed the mechanism:
+  `NoteMeta` reconstructed field-by-field (as a row from `notes` would be) carries an empty unknown-key
+  map, so writing it back destroys every frontmatter key the file had that the index doesn't track —
+  the exact "expensive failure" this project's frontmatter forward-compat rule exists to prevent, just
+  displaced from stage 1 into whichever stage writes from a query result. This stage only reads and
+  never writes a note file, so it cannot trigger the hazard itself, but its `notes` rows are what a
+  later write path (stage 3's `edit`) will be tempted to build a write from. The rule for that stage:
+  a write is always `load(path)` → mutate → write; the index is used only to find the path, never as
+  the source of what gets written.
 - **`sync()` on a WAL database in a synced folder.** Not solved here — mitigated by `.gitignore`,
   documented sync exclusion, and the fact that the file is disposable. Revisit only if it actually bites.
 - **Duplicate `id` across two files.** Possible via copy-paste of a note. Report it as a problem and

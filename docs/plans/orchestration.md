@@ -266,9 +266,11 @@ re-litigating settled ground. Write it as you go, not at the end.
 
 ## Attribution
 
-The per-commit half of the audit trail, and in this repo the **only** attribution in the history:
-`.claude/settings.local.json` sets `attribution.commit` to `""`, so no `Co-Authored-By` trailer is
-generated. Nothing else in a commit says a machine was involved.
+The per-commit half of the audit trail. Two trailers appear in this repo's history: `Assisted-by:`,
+described below, and `Claude-Session:`, which the user has chosen to have added to every commit,
+anchoring it to the Claude Code session that produced it. `.claude/settings.local.json` sets
+`attribution.commit` to `""`, so the one trailer genuinely absent from this repo's history is
+`Co-Authored-By`.
 
 Claude Code's attribution setting has no variables for model, effort, or thinking, so the trailer is
 written by the agent itself at commit time.
@@ -388,23 +390,36 @@ they are not a schedule to be defended.
 
 ## First dispatch, concretely
 
-Stage 1, wave by wave, as a worked example of the shape:
+Stage 1, wave by wave, as it was actually run — corrected at seal from an earlier sketch that put
+the verifier at wave 0, before the cargo workspace existed. That could not have worked:
+`crates/jot-acceptance` is a crate in a workspace nothing had created yet, and phase A's tests need
+module paths — `jot_core::note::NoteId`, and so on — that nobody had fixed. Phase A moves to wave 2,
+concurrent with the crate-error-taxonomy work, once wave 1's scaffold gives it a crate to `use`
+against. The rule phase A protects — no implementer of *behavior under test* runs before the tests
+exist — still holds either way: wave 1 and the rest of wave 2 land no stage-1 behavior, only
+scaffolding, manifests, and an error taxonomy.
 
 ```text
-wave 0   verifier (opus)     phase A: acceptance tests from stage1.md
-                             owns crates/jot-acceptance/
-
 wave 1   implementer (sonnet) cargo workspace, rust-toolchain, CI matrix
                              owns Cargo.toml, .github/, rust-toolchain.toml
                              ── alone: it owns the manifests ──
 
-wave 2   implementer (opus)   NoteId, Note, NoteMeta, frontmatter types
+wave 2   implementer (opus)   deps, YAML/time crate decision, error taxonomy
+                             owns Cargo.toml, Cargo.lock, crates/jot-core/src/error.rs
+         verifier (opus)     phase A: acceptance tests from stage1.md
+                             owns crates/jot-acceptance/
+                             ── parallel: disjoint ownership; phase A is expected to fail to
+                                compile regardless of what the other task lands ──
+
+wave 3   implementer (opus)   NoteId, Note, NoteMeta, frontmatter types
                              owns crates/jot-core/src/{note,frontmatter}.rs
          implementer (opus)   atomic write, filename parsing, enumeration
                              owns crates/jot-core/src/fs.rs
-                             ── parallel: disjoint, no new deps ──
+         implementer (sonnet) workspace registry
+                             owns crates/jot-core/src/registry.rs
+                             ── parallel: disjoint, no new deps; error.rs is frozen after wave 2 ──
 
-wave 3   implementer (opus)   init / open / discover, workspace.toml, registry
+wave 4   implementer (opus)   init / open / discover, workspace.toml
                              owns crates/jot-core/src/workspace.rs
 
 gate     integrator (sonnet)  fmt, clippy -D warnings, cargo test

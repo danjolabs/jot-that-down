@@ -1,5 +1,14 @@
 # Stage 1 — Vault foundations
 
+> **Superseded in part by [stage1b.md](stage1b.md).** This stage shipped `id` duplicated in the
+> filename and the frontmatter, the two-path (preserve-on-read, normalize-on-edit) serializer under
+> §U1, and the byte-identical round-trip gate below. Stage 1b moves identity to the filename only,
+> replaces the two-path serializer with one schema-driven render path, and replaces the round-trip
+> gate with a stronger set of criteria. The content below is left as-is — it is the record of what
+> stage 1 actually built and what phase B's verdicts in `runs/stage1/verification.md` are about —
+> but the "Note format", "Frontmatter", and the round-trip acceptance criterion are no longer current.
+> Read `stage1b.md` for what replaced them.
+
 **Goal.** A workspace exists on disk, identifies itself, and round-trips notes without losing a byte.
 
 **Why first.** Everything downstream is derived from these files. A frontmatter writer that reorders
