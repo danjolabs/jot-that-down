@@ -5,5 +5,5 @@ id   = "01a03d4c-3680-7c70-aade-6c016dd177d2"
 kind = "jot"
 name = "Fixture Vault"
 
-[notes]
-filename = "uuid"
+[schema]
+frontmatter = [ "title", "relation:root", "relation:reply_to", "relation:quote" ]

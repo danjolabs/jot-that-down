@@ -13,13 +13,13 @@ path = "src/lib.rs"
 
 # `jot-core` is optional so that the crate still compiles (to nothing) when the stage feature is
 # off. `cargo clippy --workspace --all-targets` in CI builds this crate with default features and
-# must stay clean; the red suite lives entirely behind `--features stage1`.
+# must stay clean; the red suite lives entirely behind `--features stage1b`.
 [dependencies]
 jot-core = { path = "../jot-core", optional = true }
 
 [features]
 default = []
-stage1 = ["dep:jot-core"]
+stage1b = ["dep:jot-core"]
 
 # Assertion tools only — no type from them ever crosses into a `jot-core` signature. They still go
 # through the workspace aliases: pinning `toml` directly here resolved a second `toml` major into

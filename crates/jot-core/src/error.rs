@@ -118,19 +118,6 @@ pub enum Error {
     #[error("`{path}` is not a note filename (expected `<uuid>.md` or `<uuid>_<slug>.md`)")]
     InvalidNoteFilename { path: PathBuf },
 
-    /// The UUID in the filename disagrees with the frontmatter `id`.
-    ///
-    /// The frontmatter wins as a matter of format — see U9 — but loading *from a path* reports the
-    /// disagreement rather than silently resolving it, so both ids are carried.
-    #[error(
-        "`{path}`: filename id `{filename_id}` disagrees with frontmatter id `{frontmatter_id}`"
-    )]
-    NoteIdMismatch {
-        path: PathBuf,
-        filename_id: Uuid,
-        frontmatter_id: Uuid,
-    },
-
     // -------------------------------------------------------------- frontmatter
     /// The file does not open with a `---` fence.
     #[error("`{path}` has no frontmatter: expected a `---` fence on the first line")]
@@ -150,18 +137,15 @@ pub enum Error {
     #[error("`{path}`: frontmatter must be a YAML mapping")]
     FrontmatterNotAMapping { path: PathBuf },
 
-    /// The required `id` key is absent.
-    #[error("`{path}` is missing the required frontmatter key `id`")]
-    MissingId { path: PathBuf },
-
-    /// The required `created_at` key is absent.
-    #[error("`{path}` is missing the required frontmatter key `created_at`")]
-    MissingCreatedAt { path: PathBuf },
-
-    /// The required `root` key is absent. A top-level note's `root` is its own `id`; a note written
-    /// by hand without one cannot be loaded (U10).
-    #[error("`{path}` is missing the required frontmatter key `root`")]
-    MissingRoot { path: PathBuf },
+    /// The frontmatter block uses YAML this version cannot slice into per-key source spans, so an
+    /// unknown key's bytes could not be carried through a write.
+    ///
+    /// Stage 1's byte-replay path preserved such a block whether or not it understood it. One
+    /// rendering write path cannot, so this is refused rather than mangled: explicit `?` keys,
+    /// anchors and aliases, a flow collection continuing at column zero, a non-string key, and a
+    /// duplicated key all land here.
+    #[error("`{path}`: frontmatter cannot be preserved through a write: {message}")]
+    UnpreservableFrontmatter { path: PathBuf, message: String },
 
     /// A known frontmatter key holds a value of the wrong YAML shape — `title` as a sequence, say.
     #[error("`{path}`: frontmatter key `{field}` has the wrong type: {message}")]
@@ -171,8 +155,8 @@ pub enum Error {
         message: String,
     },
 
-    /// A known id-bearing frontmatter key (`id`, `reply_to`, `root`, `quote`) holds something that
-    /// is not a UUID.
+    /// A relation key (`relation:root`, `relation:reply_to`, `relation:quote`) holds something
+    /// that is not a UUID.
     #[error("`{path}`: frontmatter key `{field}` is not a UUID: `{value}`")]
     InvalidNoteIdValue {
         path: PathBuf,
@@ -180,18 +164,16 @@ pub enum Error {
         value: String,
     },
 
-    /// A known timestamp key (`created_at`, `edited_at`, `trashed_at`) is not RFC 3339.
-    #[error("`{path}`: frontmatter key `{field}` is not an RFC 3339 timestamp: `{value}`")]
-    InvalidTimestamp {
-        path: PathBuf,
-        field: &'static str,
-        value: String,
-    },
+    /// A frontmatter key could not be emitted as YAML. `key` rather than a note id or a path,
+    /// because rendering runs on a `Frontmatter` that knows neither — the identity is the
+    /// filename's, and a note being created has an id before it has a filename.
+    #[error("cannot serialize frontmatter key `{key}`: {message}")]
+    SerializeFrontmatter { key: String, message: String },
 
-    /// A note's frontmatter could not be emitted on the canonical path. The note is identified by
-    /// id rather than by path because a note being created has an id before it has a filename.
-    #[error("cannot serialize frontmatter for note `{id}`: {message}")]
-    SerializeFrontmatter { id: Uuid, message: String },
+    /// Recomputing `relation:root` walked `relation:reply_to` upward and came back to a note it
+    /// had already visited. Dangling references are a designed state; a cycle is not.
+    #[error("`{path}`: reply chain cycles back to note `{id}`")]
+    ReplyCycle { path: PathBuf, id: Uuid },
 
     // ---------------------------------------------------------------- workspace
     /// The path is not a workspace: it has no `.jot/` directory.
@@ -259,9 +241,9 @@ pub enum Error {
 impl Error {
     /// The filesystem path this error is about, if it is about one.
     ///
-    /// `None` for exactly two variants: [`Error::SerializeFrontmatter`], which identifies a note
-    /// that may not have a filename yet, and [`Error::ConfigDirUnavailable`], which fires precisely
-    /// because there is no path to name.
+    /// `None` for exactly two variants: [`Error::SerializeFrontmatter`], which names a frontmatter
+    /// key on a block that may never have had a file, and [`Error::ConfigDirUnavailable`], which
+    /// fires precisely because there is no path to name.
     ///
     /// For [`Error::Rename`] this is the *target* — the file the caller was trying to produce.
     pub fn path(&self) -> Option<&Path> {
@@ -273,17 +255,14 @@ impl Error {
             | Error::Remove { path, .. }
             | Error::NotUtf8 { path }
             | Error::InvalidNoteFilename { path }
-            | Error::NoteIdMismatch { path, .. }
             | Error::MissingFrontmatterFence { path }
             | Error::UnterminatedFrontmatter { path }
             | Error::MalformedYaml { path, .. }
             | Error::FrontmatterNotAMapping { path }
-            | Error::MissingId { path }
-            | Error::MissingCreatedAt { path }
-            | Error::MissingRoot { path }
+            | Error::UnpreservableFrontmatter { path, .. }
             | Error::InvalidFrontmatterField { path, .. }
             | Error::InvalidNoteIdValue { path, .. }
-            | Error::InvalidTimestamp { path, .. }
+            | Error::ReplyCycle { path, .. }
             | Error::NotAWorkspace { path }
             | Error::WorkspaceExists { path }
             | Error::ManifestParse { path, .. }
@@ -324,12 +303,7 @@ mod tests {
         std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access is denied")
     }
 
-    const A: &str = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5";
     const B: &str = "01a03d51-4b48-72e2-9f30-f180030c06ab";
-
-    fn uuid_a() -> Uuid {
-        Uuid::parse_str(A).unwrap()
-    }
 
     fn uuid_b() -> Uuid {
         Uuid::parse_str(B).unwrap()
@@ -370,11 +344,6 @@ mod tests {
             Error::InvalidNoteFilename {
                 path: "notes/README.md".into(),
             },
-            Error::NoteIdMismatch {
-                path: "notes/e.md".into(),
-                filename_id: uuid_a(),
-                frontmatter_id: uuid_b(),
-            },
             Error::MissingFrontmatterFence {
                 path: "notes/f.md".into(),
             },
@@ -388,14 +357,9 @@ mod tests {
             Error::FrontmatterNotAMapping {
                 path: "notes/i.md".into(),
             },
-            Error::MissingId {
+            Error::UnpreservableFrontmatter {
                 path: "notes/j.md".into(),
-            },
-            Error::MissingCreatedAt {
-                path: "notes/k.md".into(),
-            },
-            Error::MissingRoot {
-                path: "notes/l.md".into(),
+                message: "top-level key is a number, not a string".into(),
             },
             Error::InvalidFrontmatterField {
                 path: "notes/m.md".into(),
@@ -404,16 +368,15 @@ mod tests {
             },
             Error::InvalidNoteIdValue {
                 path: "notes/n.md".into(),
-                field: "reply_to",
+                field: "relation:reply_to",
                 value: "not-a-uuid".into(),
             },
-            Error::InvalidTimestamp {
+            Error::ReplyCycle {
                 path: "notes/o.md".into(),
-                field: "created_at",
-                value: "yesterday".into(),
+                id: uuid_b(),
             },
             Error::SerializeFrontmatter {
-                id: uuid_a(),
+                key: "title".into(),
                 message: "recursion limit exceeded".into(),
             },
             Error::NotAWorkspace {
@@ -486,11 +449,14 @@ mod tests {
             samples.len(),
             "every_variant() has a duplicate or missing variant: {discriminants:?}"
         );
-        // Bump deliberately when the taxonomy grows; stage 1 froze it at 32.
+        // Bump deliberately when the taxonomy changes. Stage 1 froze it at 32; stage 1b
+        // removed five (`NoteIdMismatch`, `MissingId`, `MissingCreatedAt`, `MissingRoot`,
+        // `InvalidTimestamp` — all of them about keys the format no longer carries) and
+        // added two (`UnpreservableFrontmatter`, `ReplyCycle`).
         assert_eq!(
             samples.len(),
-            32,
-            "the stage-1 error taxonomy has 32 variants"
+            29,
+            "the stage-1b error taxonomy has 29 variants"
         );
     }
 
@@ -513,11 +479,11 @@ mod tests {
     #[test]
     fn pathless_variants_still_identify_their_subject() {
         let e = Error::SerializeFrontmatter {
-            id: uuid_a(),
+            key: "title".into(),
             message: "boom".into(),
         };
         assert!(e.path().is_none());
-        assert!(e.to_string().contains(A), "{e}");
+        assert!(e.to_string().contains("title"), "{e}");
 
         let e = Error::ConfigDirUnavailable {
             application: "danjolabs/jot".into(),
@@ -536,21 +502,31 @@ mod tests {
         }
     }
 
-    /// The mismatch error is the one place the doc names both ids explicitly; losing either makes
-    /// it unactionable.
+    /// A refused block must say which file and what about it jot could not carry through a write,
+    /// or the user has no way to fix the note.
     #[test]
-    fn note_id_mismatch_names_the_path_and_both_ids() {
-        let e = Error::NoteIdMismatch {
+    fn unpreservable_frontmatter_names_the_path_and_the_reason() {
+        let e = Error::UnpreservableFrontmatter {
             path: "vault/01a03d50-bac0-7851-bd56-683ef65923cd.md".into(),
-            filename_id: uuid_a(),
-            frontmatter_id: uuid_b(),
+            message: "key `summary` is not in the parsed mapping".into(),
         };
         let shown = e.to_string();
         assert!(
             shown.contains("01a03d50-bac0-7851-bd56-683ef65923cd.md"),
             "{shown}"
         );
-        assert!(shown.contains(A), "{shown}");
+        assert!(shown.contains("summary"), "{shown}");
+    }
+
+    /// A reply cycle must name both the file it was found from and the note it cycles back to.
+    #[test]
+    fn reply_cycle_names_the_path_and_the_note() {
+        let e = Error::ReplyCycle {
+            path: "vault/a.md".into(),
+            id: uuid_b(),
+        };
+        let shown = e.to_string();
+        assert!(shown.contains("vault/a.md"), "{shown}");
         assert!(shown.contains(B), "{shown}");
     }
 
@@ -567,24 +543,6 @@ mod tests {
         assert!(shown.contains('7'), "{shown}");
         assert!(shown.contains('1'), "{shown}");
         assert!(shown.contains("newer version"), "{shown}");
-    }
-
-    /// The three required-key failures must be distinguishable, not one variant with a field name.
-    #[test]
-    fn each_required_key_has_its_own_variant() {
-        let p = PathBuf::from("v/a.md");
-        let msgs = [
-            Error::MissingId { path: p.clone() }.to_string(),
-            Error::MissingCreatedAt { path: p.clone() }.to_string(),
-            Error::MissingRoot { path: p }.to_string(),
-        ];
-        assert!(msgs[0].contains("`id`"), "{}", msgs[0]);
-        assert!(msgs[1].contains("`created_at`"), "{}", msgs[1]);
-        assert!(msgs[2].contains("`root`"), "{}", msgs[2]);
-        let mut sorted = msgs.to_vec();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(sorted.len(), 3, "required-key messages are not distinct");
     }
 
     /// The three fence/YAML failures must likewise be distinguishable.

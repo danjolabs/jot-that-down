@@ -39,8 +39,12 @@ language.
 
 ### Rules
 
-- **Built-in fields are reserved.** `id`, `created_at`, `edited_at`, `reply_to`, `root`, `quote`,
-  `trashed_at`, `title` cannot be redeclared or overridden.
+- **Built-in fields are reserved.** After stage 1b there are four: `title`, `relation:root`,
+  `relation:reply_to`, `relation:quote` — `jot_core::frontmatter::INTERPRETED_KEYS`. They cannot be
+  redeclared with a different meaning or overridden. They *are* already declared in
+  `[schema] frontmatter`, which is what fixes their emitted order, and a schema may name them in
+  any order or omit one (a `jot` workspace warns, and the write path still emits an omitted
+  relation a note carries).
 - **Defaults apply at creation only.** Applying them retroactively would rewrite every file in the
   vault on a config change — a change to the schema must never touch existing notes.
 - **Validation is advisory, never destructive.** A note that violates the schema is still a note: it

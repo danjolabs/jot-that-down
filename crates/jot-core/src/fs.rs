@@ -212,6 +212,89 @@ pub fn parse_note_filename(path: &Path) -> Result<Uuid> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Filename construction
+// ---------------------------------------------------------------------------------------------
+
+/// Whether a new note's filename carries a slug derived from its title.
+///
+/// This is the **creation-time option** that replaced `workspace.toml`'s `[notes] filename` knob in
+/// stage 1b. The knob governed nothing the reader cared about: [`parse_note_filename`] has always
+/// accepted both forms and always ignored the slug, so declaring a vault-wide style controlled
+/// only what `create` happened to emit — which is a per-creation decision, not a property of the
+/// vault.
+///
+/// Because the reader ignores everything after the UUID, **re-slugging on a title change is safe**:
+/// the identity is the UUID and it does not move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FilenameSlug {
+    /// `<uuid>.md`. The default.
+    #[default]
+    None,
+    /// `<uuid>_<slug>.md`, when the title yields a non-empty slug.
+    FromTitle,
+}
+
+/// The longest slug [`note_filename`] will append.
+///
+/// Path length is the constraint, not aesthetics: Windows' traditional `MAX_PATH` is 260, a
+/// hyphenated UUID plus `_` plus `.md` already costs 40, and a vault living several directories
+/// deep inside a synced folder spends the rest quickly.
+const MAX_SLUG_LEN: usize = 60;
+
+/// The filename a note with this id and title takes.
+///
+/// `title` is consulted only when `slug` is [`FilenameSlug::FromTitle`]; a title that slugifies to
+/// nothing — punctuation, emoji, an empty string — yields the bare `<uuid>.md` form rather than a
+/// trailing separator, which [`parse_note_filename`] rejects as a truncated name.
+#[must_use]
+pub fn note_filename(id: Uuid, title: Option<&str>, slug: FilenameSlug) -> String {
+    let hyphenated = id.hyphenated().to_string();
+    let slug = match (slug, title) {
+        (FilenameSlug::FromTitle, Some(title)) => slugify(title),
+        _ => String::new(),
+    };
+    if slug.is_empty() {
+        format!("{hyphenated}{NOTE_EXTENSION}")
+    } else {
+        format!("{hyphenated}{SLUG_SEPARATOR}{slug}{NOTE_EXTENSION}")
+    }
+}
+
+/// A filename-safe slug: lowercase ASCII alphanumerics, runs of anything else collapsed to a
+/// single `_`, trimmed, and capped at [`MAX_SLUG_LEN`].
+///
+/// Deliberately narrow. The slug is decorative and never read back, so the only properties that
+/// matter are that it is legal on every platform jot runs on and that it does not confuse
+/// [`parse_note_filename`] — which means no leading or trailing separator and no characters
+/// Windows refuses (`<>:"/\|?*`, control characters, a trailing dot or space). Dropping non-ASCII
+/// costs a Korean or Japanese title its slug and keeps the UUID, which is the part that matters;
+/// transliteration would be a dependency and a set of judgement calls for a decoration.
+#[must_use]
+pub fn slugify(title: &str) -> String {
+    let mut out = String::with_capacity(title.len().min(MAX_SLUG_LEN));
+    let mut pending_separator = false;
+    for c in title.chars() {
+        if !c.is_ascii_alphanumeric() {
+            pending_separator = true;
+            continue;
+        }
+        // The separator and the character are budgeted together, so the cap can never be reached
+        // *on* a separator — a slug ending in `_` is exactly the truncated name
+        // `parse_note_filename` rejects.
+        let separator = usize::from(pending_separator && !out.is_empty());
+        if out.len() + separator + 1 > MAX_SLUG_LEN {
+            break;
+        }
+        if separator == 1 {
+            out.push(SLUG_SEPARATOR);
+        }
+        pending_separator = false;
+        out.push(c.to_ascii_lowercase());
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------------------------
 // Enumeration
 // ---------------------------------------------------------------------------------------------
 
@@ -1020,5 +1103,118 @@ mod tests {
         let live = live_note_paths(&f.vault).unwrap();
         assert_eq!(live.len(), 1, "{live:?}");
         assert_eq!(parse_note_filename(&live[0]).unwrap(), id);
+    }
+
+    // -------------------------------------------------------------- filename construction
+
+    fn uuid() -> Uuid {
+        Uuid::parse_str("01a03d21-7c11-7a02-b3de-9f0e21c4a771").unwrap()
+    }
+
+    #[test]
+    fn the_default_filename_is_the_bare_uuid() {
+        assert_eq!(
+            note_filename(uuid(), Some("A Title"), FilenameSlug::None),
+            "01a03d21-7c11-7a02-b3de-9f0e21c4a771.md"
+        );
+        assert_eq!(FilenameSlug::default(), FilenameSlug::None);
+    }
+
+    #[test]
+    fn a_slugged_filename_carries_the_title_after_the_uuid() {
+        assert_eq!(
+            note_filename(uuid(), Some("First Thoughts!"), FilenameSlug::FromTitle),
+            "01a03d21-7c11-7a02-b3de-9f0e21c4a771_first_thoughts.md"
+        );
+    }
+
+    /// Every filename this module builds must be one it can read back, or a note created by jot
+    /// is a note jot cannot enumerate.
+    #[test]
+    fn every_constructed_filename_parses_back_to_its_id() {
+        let long = "a".repeat(400);
+        let wordy = "word ".repeat(80);
+        let titles = [
+            None,
+            Some(""),
+            Some("   "),
+            Some("!!!"),
+            Some("한국어 제목"),
+            Some("_leading and trailing_"),
+            Some("--- dashes ---"),
+            Some("A"),
+            Some("Mixed CASE and 123"),
+            Some(long.as_str()),
+            Some(wordy.as_str()),
+        ];
+        for slug in [FilenameSlug::None, FilenameSlug::FromTitle] {
+            for title in titles {
+                let name = note_filename(uuid(), title, slug);
+                let parsed = parse_note_filename(Path::new(&name))
+                    .unwrap_or_else(|e| panic!("{name:?} ({slug:?}) does not parse back: {e}"));
+                assert_eq!(parsed, uuid(), "{name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_title_that_slugifies_to_nothing_falls_back_to_the_bare_form() {
+        for title in ["", "   ", "!!!", "한국어", "___"] {
+            assert_eq!(
+                note_filename(uuid(), Some(title), FilenameSlug::FromTitle),
+                "01a03d21-7c11-7a02-b3de-9f0e21c4a771.md",
+                "{title:?} must not produce a trailing separator"
+            );
+        }
+    }
+
+    #[test]
+    fn slugify_collapses_runs_and_never_leaves_a_separator_at_either_end() {
+        assert_eq!(slugify("Hello, World!"), "hello_world");
+        assert_eq!(slugify("  spaced   out  "), "spaced_out");
+        assert_eq!(slugify("a---b___c"), "a_b_c");
+        assert_eq!(slugify("한국어 mixed 제목 text"), "mixed_text");
+        assert_eq!(slugify("2026: the year"), "2026_the_year");
+        assert_eq!(slugify(""), "");
+    }
+
+    #[test]
+    fn a_slug_is_capped_and_the_cap_never_lands_on_a_separator() {
+        for title in [
+            "x".repeat(300),
+            "word ".repeat(100),
+            format!("{} tail", "y".repeat(MAX_SLUG_LEN - 1)),
+            format!("{} tail", "y".repeat(MAX_SLUG_LEN)),
+        ] {
+            let slug = slugify(&title);
+            assert!(
+                slug.len() <= MAX_SLUG_LEN,
+                "{slug:?} is {} long",
+                slug.len()
+            );
+            assert!(
+                !slug.ends_with(SLUG_SEPARATOR),
+                "{slug:?} ends with a separator"
+            );
+            assert!(
+                !slug.starts_with(SLUG_SEPARATOR),
+                "{slug:?} starts with one"
+            );
+        }
+    }
+
+    /// The slug goes into a path on Windows, macOS and Linux, so it may contain nothing any of
+    /// them reserve. Narrowing to ASCII alphanumerics and `_` is what makes that true by
+    /// construction rather than by a blocklist that will miss something.
+    #[test]
+    fn a_slug_holds_nothing_any_platform_reserves() {
+        let hostile = "a<b>c:d\"e/f\\g|h?i*j\0k\tl.m ";
+        let slug = slugify(hostile);
+        assert!(
+            slug.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "{slug:?}"
+        );
+        assert_eq!(slug, "a_b_c_d_e_f_g_h_i_j_k_l_m");
     }
 }

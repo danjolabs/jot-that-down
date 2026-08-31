@@ -19,6 +19,10 @@ chrono = { version = "0.4.45", default-features = false, features = [
 ] }
 directories = "6.0.0"
 indexmap = { version = "2.14", features = ["serde"] }
+# markdown-rs. Chosen in docs/plans/runs/stage1b/markdown-crate.md (2026-08-31): it is an AST
+# parser, never a renderer, so the body stays a slice of the original bytes. Stage 3 needs it
+# anyway for `[[uuid]]` extraction.
+markdown = "1.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 toml = "1.1"

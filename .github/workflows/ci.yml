@@ -55,12 +55,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # `criteria.rs`, `probes.rs` and `phase_b.rs` are `#![cfg(feature = "stage1")]`, so the
+      # `criteria.rs`, `probes.rs` and `phase_b.rs` are `#![cfg(feature = "stage1b")]`, so the
       # `test` job's `cargo clippy --workspace --all-targets -- -D warnings` compiles them to
       # nothing and the acceptance crate's own code is linted nowhere. This is that lint, and it
       # denies warnings: the nine it used to carry were resolved in the phase B fixer round.
-      - name: cargo clippy -p jot-acceptance --features stage1
-        run: cargo clippy -p jot-acceptance --features stage1 --all-targets -- -D warnings
+      - name: cargo clippy -p jot-acceptance --features stage1b
+        run: cargo clippy -p jot-acceptance --features stage1b --all-targets -- -D warnings
 
-      - name: cargo test -p jot-acceptance --features stage1
-        run: cargo test -p jot-acceptance --features stage1
+      - name: cargo test -p jot-acceptance --features stage1b
+        run: cargo test -p jot-acceptance --features stage1b

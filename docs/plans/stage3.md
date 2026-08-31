@@ -13,10 +13,10 @@ implicit here gets reimplemented three times, slightly differently.
 
 | Operation | Filesystem | Index | Frontmatter |
 | --- | --- | --- | --- |
-| `create` | write `<uuid>.md` in root | insert | `id`, `created_at`, `root`, and any relation |
-| `edit` | rewrite in place | update | `edited_at` bumped |
-| `trash` | move to `.jot/.trash/` | `state = 'trashed'` | `trashed_at` stamped |
-| `restore` | move back to root | `state = 'active'` | `trashed_at` removed |
+| `create` | write `<uuid>[_slug].md` in root | insert | `relation:root`, and any other relation |
+| `edit` | rewrite in place | update | nothing new in the file; `edited_at` follows mtime |
+| `trash` | move to `.jot/.trash/` | `state = 'trashed'` | nothing — the directory is the state |
+| `restore` | move back to root | `state = 'active'` | nothing |
 | `purge` | delete the file | delete the row | — |
 
 Stage 1 phase B found a hazard on `edit`'s write: mutating `Note`'s public fields and then calling the
@@ -31,7 +31,11 @@ Rules that follow from the locked decisions and must be enforced in one place:
 - **Trash never cascades.** Trashing a note with replies moves exactly one file. The replies stay
   live and render a trashed-parent placeholder — your call, and it is also the only behavior that
   survives a rebuild without extra bookkeeping.
-- **`root` is assigned once, at creation**, copied from the parent (or set to the note's own id for a
+- **The frontmatter column carries only what stage 1b left in the file.** `id` and `created_at`
+  are the filename's; `edited_at` and `trashed_at` are index-only. `create` mints the id, and the
+  creation-time `FilenameSlug` option decides whether the filename gets a slug from the title.
+  Re-slugging on a title change is safe: the identity is the UUID and it does not move.
+- **`relation:root` is assigned once, at creation**, copied from the parent (or set to the note's own id for a
   root). It is never recomputed, so purging a middle note leaves the subtree grouped.
 - **Re-parenting is not supported.** Nothing in the design needs it, and it would be the one operation
   requiring a subtree rewrite. If it is ever wanted, it arrives as an explicit `reparent` that
@@ -132,7 +136,8 @@ call the renderer.
 
 - [ ] `Draft { body, title, reply_to, quote }` → `create`. Reject a `reply_to` that does not resolve
       to a `Present` or `Trashed` note; permit replying to a trashed note (it is still a real note).
-- [ ] `Edit { body, title }` → `edit`, bumping `edited_at` only when content actually changed.
+- [ ] `Edit { body, title }` → `edit`. `edited_at` is not written — it is mtime, so it moves only
+      when the file does, which is exactly "only when content actually changed" for free.
 - [ ] `trash` / `restore` / `purge`, each a filesystem move plus a single index update, in that order,
       so an interruption leaves the index stale rather than the vault wrong. Stale is recoverable by
       `sync()`; wrong is not.
@@ -163,5 +168,9 @@ call the renderer.
 - **The N+1 in list rendering.** Every timeline row wants its parent's state and its reply count.
   Batch both, and add a test that asserts the query count for a 50-row page is constant.
 - **Cycles and self-reference** come from hand-edited files, not from the app. They are a normal input.
-- **`edited_at` churn.** Bumping it on a no-op save makes every note look recently touched and
+- ~~**`edited_at` churn.**~~ **Largely settled by stage 1b**, which made `edited_at` mtime rather
+  than a written field: a no-op save that writes identical bytes still touches mtime, so the guard
+  moves from "do not bump the field" to "do not write the file when the bytes are unchanged" —
+  which `Workspace::open_note` already does. The original concern, kept for the shape of it:
+  bumping it on a no-op save makes every note look recently touched and
   poisons the "recently edited" sort in stage 5. Compare content before writing.

@@ -1,44 +1,50 @@
 //! `NoteId`, `Note`, and `NoteMeta` — the domain types every list view is built from.
 //!
-//! # Identity
+//! # Identity is the filename
 //!
-//! A note's id lives in two places: its filename and its frontmatter. **The frontmatter wins**, and
-//! per `dispatch.md` §U9 that is a property of the format rather than a conflict-resolution step:
+//! Stage 1 duplicated `id` into the frontmatter and made the frontmatter authoritative. Stage 1b
+//! reverses that: **the filename's UUID is the note's identity, and there is no copy in the file.**
 //!
-//! - [`Note::parse`] works from bytes and **never** consults a filename. The frontmatter `id` is
-//!   the identity, unconditionally.
-//! - [`Note::load`] works from a path, so it can see both. It parses first, then compares, and
-//!   returns [`Error::NoteIdMismatch`] on a disagreement — "reported by the scanner, not silently
-//!   resolved".
+//! The accepted cost is stated plainly in `stage1b.md`: a rename that mangles the UUID produces a
+//! new note and orphans the old index row, so the note's history forks silently. Stage 7's rename
+//! detection is the eventual mitigation; until then it is a known, chosen hazard.
 //!
-//! # Two ways to write a note
+//! What follows from it in this module:
 //!
-//! [`Note::to_bytes`] is the preserving path and [`Note::to_canonical_bytes`] the canonical one;
-//! see [`crate::frontmatter`] for what each guarantees and why there are two.
+//! - [`Note::parse`] takes the id from its caller, because bytes alone no longer carry one.
+//! - [`Note::parse_at`] and [`Note::load`] take it from the filename, via
+//!   [`crate::fs::parse_note_filename`] — the crate's only parser of note filenames.
+//! - There is no mismatch to report, so `Error::NoteIdMismatch` is gone with the rule that needed
+//!   it.
+//!
+//! # `created_at` is not stored
+//!
+//! A UUIDv7 encodes a 48-bit millisecond timestamp, so a note's creation time is recoverable from
+//! its identity with no external state — see [`NoteId::created_at`]. This is the removal that made
+//! the others thinkable: dropping `id` costs a filename convention, but dropping `created_at`
+//! would have cost information if the id did not already carry it.
+//!
+//! `edited_at` is neither here nor in the file. It is index-only from stage 1b onward, populated
+//! from filesystem mtime at scan time, and is the one field a rebuild cannot reproduce faithfully
+//! — see `overview.md`'s rebuild-invariant exemption.
+//!
+//! # One way to write a note
+//!
+//! [`Note::to_bytes`] renders from typed state in schema order, then splices the preserved unknown
+//! keys and the body. There is no second method that ignores the fields, which is what makes
+//! stage 1's F2 hazard — mutate a `pub` field, watch the edit vanish into a replayed byte buffer —
+//! an impossible state rather than a documented one.
 
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
-use crate::frontmatter::{Frontmatter, IN_MEMORY_PATH};
-
-/// Everything about a note except its body.
-///
-/// This is an alias for [`Frontmatter`], not a separate struct, and that is deliberate: "everything
-/// except the body" *is* the frontmatter, and defining the eight known fields twice would create
-/// exactly one thing — an opportunity for the two definitions to drift. The two names exist
-/// because they answer different questions: `Frontmatter` is the file format, `NoteMeta` is the
-/// row a list view renders.
-///
-/// The alias survives stage 2 because [`Frontmatter::verbatim`] is optional: a `NoteMeta`
-/// reconstructed from the SQLite index simply has no retained block, which is already a legal
-/// state. If stage 2 needs a field the file format does not have (a path, an index rowid), that is
-/// the point to promote this into a struct that owns a `Frontmatter`.
-pub type NoteMeta = Frontmatter;
+use crate::frontmatter::{Frontmatter, FrontmatterSchema, IN_MEMORY_PATH};
 
 /// A note's identity: a UUID, minted as v7 so that ids sort by creation time.
 ///
@@ -64,6 +70,9 @@ impl NoteId {
     /// millisecond and incremented within it, so the default *is* monotonic, across threads too.
     /// No explicit `ContextV7` is needed here. The unit test `ids_minted_earlier_compare_less` is
     /// what keeps that true across a future `uuid` upgrade.
+    ///
+    /// From stage 1b this call also mints the note's creation time, because [`NoteId::created_at`]
+    /// reads it back out of the id.
     pub fn new() -> Self {
         NoteId(Uuid::now_v7())
     }
@@ -71,6 +80,19 @@ impl NoteId {
     /// The underlying UUID, for the [`Error`] variants that carry one.
     pub fn as_uuid(&self) -> Uuid {
         self.0
+    }
+
+    /// The creation time this id encodes, to millisecond precision.
+    ///
+    /// `None` for an id that is not a UUIDv7 — a v4 name carried in from an import, say. Stage 1b
+    /// defines `created_at` as *derived from the identity*, so a note whose identity encodes no
+    /// time genuinely has none, and reporting `None` beats inventing one from a file's mtime.
+    ///
+    /// Millisecond precision is the format's, not this function's: v7 stores 48 bits of
+    /// milliseconds since the Unix epoch.
+    pub fn created_at(&self) -> Option<DateTime<Utc>> {
+        let (secs, nanos) = self.0.get_timestamp()?.to_unix();
+        DateTime::from_timestamp(i64::try_from(secs).ok()?, nanos)
     }
 
     /// The 8-character prefix of the hyphenated form, for git-style short ids in surfaces.
@@ -112,8 +134,8 @@ impl FromStr for NoteId {
 
     /// Accepts every form `uuid` accepts — hyphenated, simple, braced, URN — because a hand-written
     /// vault is a supported input and rejecting a valid UUID on formatting grounds buys nothing.
-    /// [`fmt::Display`] normalizes to hyphenated, so a note that reaches the canonical writer is
-    /// rewritten into the standard form.
+    /// [`fmt::Display`] normalizes to hyphenated, so a relation that reaches the writer is written
+    /// back in the standard form.
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Uuid::parse_str(s).map(NoteId)
     }
@@ -135,108 +157,144 @@ impl<'de> Deserialize<'de> for NoteId {
     }
 }
 
-/// A note: its metadata and its body, which is the exact text that followed the closing fence.
-#[derive(Debug, Clone, PartialEq)]
+/// Everything about a note except its body: the row a list view renders.
+///
+/// A struct rather than stage 1's alias for `Frontmatter`, and that is the identity change showing
+/// up in the type system. `id` and `created_at` are no longer *in* the frontmatter, so the type
+/// that answers "what does a list view show" can no longer be the type that answers "what is in
+/// the file".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteMeta {
+    /// From the filename.
+    pub id: NoteId,
+    /// Decoded from `id`. `None` when the id is not a UUIDv7.
+    pub created_at: Option<DateTime<Utc>>,
+    /// Display title. `None` means untitled.
+    pub title: Option<String>,
+    /// Denormalized thread root.
+    pub root: Option<NoteId>,
+    /// The note this one replies to. `None` means top-level.
+    pub reply_to: Option<NoteId>,
+    /// A single cross-tree quote.
+    pub quote: Option<NoteId>,
+}
+
+/// A note: its identity, its frontmatter, and its body — the exact text that followed the closing
+/// fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Note {
-    pub meta: NoteMeta,
+    /// The filename's UUID. The identity, and the only copy of it.
+    pub id: NoteId,
+    /// The parsed block.
+    pub frontmatter: Frontmatter,
+    /// Everything after the closing fence, byte-for-byte.
     pub body: String,
 }
 
 impl Note {
-    /// Assemble a note from parts. Carries no verbatim block, so it writes canonically.
-    pub fn new(meta: NoteMeta, body: String) -> Self {
-        Note { meta, body }
+    /// Assemble a note from parts.
+    #[must_use]
+    pub fn new(id: NoteId, frontmatter: Frontmatter, body: String) -> Self {
+        Note {
+            id,
+            frontmatter,
+            body,
+        }
     }
 
-    /// Parse a note from bytes.
-    ///
-    /// The frontmatter `id` is the identity, unconditionally — nothing here knows about filenames
-    /// (§U9). The body is the exact remaining bytes after the closing fence, including the blank
-    /// line that conventionally follows it.
-    pub fn parse(bytes: &[u8]) -> Result<Note> {
-        Note::parse_at(Path::new(IN_MEMORY_PATH), bytes)
+    /// The creation time `id` encodes. See [`NoteId::created_at`].
+    #[must_use]
+    pub fn created_at(&self) -> Option<DateTime<Utc>> {
+        self.id.created_at()
     }
 
-    /// [`Note::parse`], naming `path` in any error it raises.
-    ///
-    /// For a caller that already holds the bytes — a scanner that read the file to hash it, say —
-    /// and wants errors that name the file anyway. `path` is used for error messages only; it is
-    /// never compared against the frontmatter. Use [`Note::load`] for that.
-    pub fn parse_at(path: &Path, bytes: &[u8]) -> Result<Note> {
-        let (meta, body) = Frontmatter::parse_document(path, bytes)?;
-        Ok(Note { meta, body })
+    /// The list-view row for this note.
+    #[must_use]
+    pub fn meta(&self) -> NoteMeta {
+        NoteMeta {
+            id: self.id,
+            created_at: self.created_at(),
+            title: self.frontmatter.title.clone(),
+            root: self.frontmatter.root,
+            reply_to: self.frontmatter.reply_to,
+            quote: self.frontmatter.quote,
+        }
     }
 
-    /// Read and parse a note from disk, and check the filename against the frontmatter.
+    /// Parse a note whose identity the caller already knows.
     ///
-    /// Parsing happens first, so a malformed file reports what is actually wrong with it rather
-    /// than an id mismatch it could not have checked. Then the filename's UUID is compared with the
-    /// frontmatter `id`, and a disagreement is [`Error::NoteIdMismatch`] carrying the path and both
-    /// ids (§U9).
+    /// The bytes carry no id — that is stage 1b's identity change — so one is supplied. Errors name
+    /// [`IN_MEMORY_PATH`], since there is no file to name.
     ///
     /// # Errors
     ///
-    /// Two filename failures, and they are deliberately distinct:
+    /// Whatever [`Frontmatter::parse_document`] raises.
+    pub fn parse(id: NoteId, bytes: &[u8]) -> Result<Note> {
+        Note::parse_with_id(id, Path::new(IN_MEMORY_PATH), bytes)
+    }
+
+    /// Parse a note from bytes read from `path`, taking the identity from `path`'s filename.
     ///
-    /// - [`Error::InvalidNoteFilename`] — the name is not a note filename at all, so there is no
-    ///   id to compare. Raised by [`crate::fs::parse_note_filename`], which is the *only* parser of
-    ///   note filenames in this crate: a file that [`crate::fs::live_note_paths`] enumerates and
-    ///   that parser rejects must not then load cleanly here, or enumeration and the scanner
-    ///   disagree about what a note is.
-    /// - [`Error::NoteIdMismatch`] — the name is a well-formed note filename whose id is not the
-    ///   frontmatter's.
+    /// For a caller that already holds the bytes — a scanner that read the file to hash it, say.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidNoteFilename`] if `path` is not a note filename, plus whatever
+    /// [`Frontmatter::parse_document`] raises. The filename is parsed **first**: without a
+    /// well-formed name there is no identity for the parsed bytes to belong to. This is also why
+    /// `parse_note_filename` is the only filename parser in the crate — a file
+    /// [`crate::fs::live_note_paths`] enumerates and that parser rejects must not load cleanly
+    /// here, or enumeration and the scanner disagree about what a note is.
+    pub fn parse_at(path: &Path, bytes: &[u8]) -> Result<Note> {
+        let id = NoteId::from(crate::fs::parse_note_filename(path)?);
+        Note::parse_with_id(id, path, bytes)
+    }
+
+    fn parse_with_id(id: NoteId, path: &Path, bytes: &[u8]) -> Result<Note> {
+        let (frontmatter, body) = Frontmatter::parse_document(path, bytes)?;
+        Ok(Note {
+            id,
+            frontmatter,
+            body,
+        })
+    }
+
+    /// Read and parse a note from disk.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Read`], plus whatever [`Note::parse_at`] raises.
     pub fn load(path: &Path) -> Result<Note> {
         let bytes = std::fs::read(path).map_err(|source| Error::Read {
             path: path.to_path_buf(),
             source,
         })?;
-        let note = Note::parse_at(path, &bytes)?;
-
-        let filename_id = crate::fs::parse_note_filename(path)?;
-        if filename_id != note.meta.id.as_uuid() {
-            return Err(Error::NoteIdMismatch {
-                path: path.to_path_buf(),
-                filename_id,
-                frontmatter_id: note.meta.id.as_uuid(),
-            });
-        }
-        Ok(note)
+        Note::parse_at(path, &bytes)
     }
 
-    /// The preserving path (§U1): the frontmatter exactly as it was read, plus the body exactly as
-    /// it was read.
+    /// The note's bytes: the block rendered in `schema` order, then the body untouched.
     ///
-    /// Byte-identity here is structural, not earned: a parse of any note followed by `to_bytes` is
-    /// the original file, whatever its key order, indentation, comments, or scalar styles, because
-    /// no YAML emitter runs. A note that was constructed rather than parsed has nothing to
-    /// preserve and falls back to [`Note::to_canonical_bytes`].
-    ///
-    /// This does not re-derive the frontmatter from [`Note::meta`]'s fields. After mutating one,
-    /// call [`Frontmatter::forget_verbatim`] or write through the canonical path — §U1 is "preserve
-    /// on read, **normalize on edit**".
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = self.meta.to_preserved_string().into_bytes();
-        out.extend_from_slice(self.body.as_bytes());
-        out
-    }
-
-    /// The canonical path (§U1): known keys in [`crate::frontmatter::KNOWN_KEYS`] order, then
-    /// unknown keys in their original relative order. The body is untouched.
+    /// The body is the string this note was parsed with and is copied, never re-emitted — no
+    /// markdown renderer is in this path, which is why list markers, emphasis characters and
+    /// hard-break spacing survive an edit unchanged.
     ///
     /// # Panics
     ///
-    /// See [`Frontmatter::to_canonical_string`]; use [`Note::try_to_canonical_bytes`] for the
-    /// fallible form.
-    pub fn to_canonical_bytes(&self) -> Vec<u8> {
-        let mut out = self.meta.to_canonical_string().into_bytes();
+    /// See [`Frontmatter::render`]; use [`Note::try_to_bytes`] for the fallible form.
+    #[must_use]
+    pub fn to_bytes(&self, schema: &FrontmatterSchema) -> Vec<u8> {
+        let mut out = self.frontmatter.render(schema).into_bytes();
         out.extend_from_slice(self.body.as_bytes());
         out
     }
 
-    /// [`Note::to_canonical_bytes`], returning [`Error::SerializeFrontmatter`] instead of
-    /// panicking.
-    pub fn try_to_canonical_bytes(&self) -> Result<Vec<u8>> {
-        let mut out = self.meta.try_to_canonical_string()?.into_bytes();
+    /// [`Note::to_bytes`], returning [`Error::SerializeFrontmatter`] instead of panicking.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::SerializeFrontmatter`] if the title cannot be emitted as YAML.
+    pub fn try_to_bytes(&self, schema: &FrontmatterSchema) -> Result<Vec<u8>> {
+        let mut out = self.frontmatter.try_render(schema)?.into_bytes();
         out.extend_from_slice(self.body.as_bytes());
         Ok(out)
     }
@@ -245,6 +303,7 @@ impl Note {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frontmatter::Newline;
     use std::collections::HashSet;
 
     // ------------------------------------------------------------------------------- NoteId
@@ -300,6 +359,63 @@ mod tests {
         );
     }
 
+    /// Stage 1b acceptance: "Two notes created in the same millisecond get distinct filenames and
+    /// distinct identities."
+    ///
+    /// Distinct *identities* is what the two tests above establish. This one closes the other
+    /// half, which the identity change put in play: the filename is now the only copy of the id,
+    /// so two ids that differ but produce one filename would silently merge two notes into one
+    /// file. The slug makes that reachable — both notes here carry the same title.
+    #[test]
+    fn notes_created_in_one_millisecond_get_distinct_filenames() {
+        use crate::fs::{FilenameSlug, note_filename};
+
+        let ids: Vec<NoteId> = (0..2_000).map(|_| NoteId::new()).collect();
+        let one_ms = ids
+            .windows(2)
+            .any(|p| p[0].created_at() == p[1].created_at());
+        assert!(one_ms, "the loop was too slow to land two mints in one ms");
+
+        for slug in [FilenameSlug::None, FilenameSlug::FromTitle] {
+            let names: HashSet<String> = ids
+                .iter()
+                .map(|id| note_filename(id.as_uuid(), Some("the same title"), slug))
+                .collect();
+            assert_eq!(names.len(), ids.len(), "{slug:?} produced a filename clash");
+        }
+    }
+
+    /// Stage 1b acceptance: "`created_at` recovered from a note's filename UUID equals the
+    /// creation time it was minted with."
+    #[test]
+    fn created_at_recovered_from_the_id_is_the_mint_time() {
+        let before = Utc::now();
+        let id = NoteId::new();
+        let after = Utc::now();
+
+        let recovered = id.created_at().expect("a v7 id encodes its mint time");
+        // v7 stores milliseconds, so the recovered instant can be up to one ms before `before`.
+        assert!(
+            recovered >= before - chrono::TimeDelta::milliseconds(1) && recovered <= after,
+            "recovered {recovered} is outside the mint window {before}..={after}"
+        );
+
+        // And it is decoded, not approximated: this literal id's 48-bit prefix is 0x01a03d4cc708.
+        let fixture: NoteId = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5".parse().unwrap();
+        assert_eq!(
+            fixture.created_at().unwrap().to_rfc3339(),
+            "2026-08-26T09:00:37+00:00"
+        );
+    }
+
+    #[test]
+    fn a_non_v7_id_has_no_creation_time() {
+        // Stage 1b defines `created_at` as derived from the identity. An id that encodes no time
+        // genuinely has none, and saying so beats inventing one.
+        let v4: NoteId = "3f1a9c2e-7b4d-4e8a-9f11-2c3d4e5f6a7b".parse().unwrap();
+        assert_eq!(v4.created_at(), None);
+    }
+
     #[test]
     fn ordering_follows_the_uuidv7_timestamp_not_the_random_tail() {
         // Same millisecond prefix impossible to arrange by minting, so these are literals: the
@@ -308,6 +424,7 @@ mod tests {
         let later: NoteId = "01a03d52-6c58-75de-81f8-1b3940ecc38b".parse().unwrap();
         assert!(earlier < later);
         assert!(!(later < earlier));
+        assert!(earlier.created_at() < later.created_at());
     }
 
     #[test]
@@ -320,7 +437,7 @@ mod tests {
 
     #[test]
     fn uppercase_and_unhyphenated_input_normalizes_on_display() {
-        // A hand-written vault is a supported input; the canonical writer is what standardizes it.
+        // A hand-written vault is a supported input; the writer is what standardizes it.
         for text in [
             "01A03D21-7C11-7A02-B3DE-9F0E21C4A771",
             "01a03d217c117a02b3de9f0e21c4a771",
@@ -380,87 +497,156 @@ mod tests {
 
     // -------------------------------------------------------------------------------- Note
 
+    const MINIMAL_ID: &str = "01a03d21-7c11-7a02-b3de-9f0e21c4a771";
+
     const MINIMAL: &str = "\
 ---
-id: 01a03d21-7c11-7a02-b3de-9f0e21c4a771
-created_at: 2026-08-26T09:00:00Z
-root: 01a03d21-7c11-7a02-b3de-9f0e21c4a771
+title: A note
+relation:root: 01a03d21-7c11-7a02-b3de-9f0e21c4a771
 ---
 
 Body.
 ";
 
+    fn id() -> NoteId {
+        MINIMAL_ID.parse().unwrap()
+    }
+
+    fn schema() -> FrontmatterSchema {
+        FrontmatterSchema::jot_default()
+    }
+
     #[test]
-    fn parse_never_consults_a_filename() {
-        // §U9 as a property of the format: from bytes there *is* no filename, so the frontmatter
-        // id is the identity unconditionally.
-        let note = Note::parse(MINIMAL.as_bytes()).unwrap();
-        assert_eq!(
-            note.meta.id.to_string(),
-            "01a03d21-7c11-7a02-b3de-9f0e21c4a771"
-        );
+    fn parse_takes_the_id_from_its_caller_not_from_the_bytes() {
+        // The identity change, stated as a test: nothing in the block carries an id, so the one
+        // the caller supplies is the one that comes back — even a fresh, unrelated one.
+        let mine = NoteId::new();
+        let note = Note::parse(mine, MINIMAL.as_bytes()).unwrap();
+        assert_eq!(note.id, mine);
+        assert_eq!(note.frontmatter.title.as_deref(), Some("A note"));
         assert_eq!(note.body, "\nBody.\n");
     }
 
     #[test]
-    fn parse_then_to_bytes_is_byte_identical() {
-        let note = Note::parse(MINIMAL.as_bytes()).unwrap();
-        assert_eq!(note.to_bytes(), MINIMAL.as_bytes());
+    fn an_id_key_in_the_block_is_just_an_unknown_key() {
+        // A note carried over from stage 1 still has `id:` in it. It is not identity any more, and
+        // it is not an error either — it is a key this version does not interpret, preserved like
+        // any other. The note's identity remains the filename's.
+        let doc = format!("---\nid: {MINIMAL_ID}\ntitle: x\n---\n\nB.\n");
+        let mine = NoteId::new();
+        let note = Note::parse(mine, doc.as_bytes()).unwrap();
+        assert_eq!(note.id, mine);
+        assert_eq!(
+            note.frontmatter.unknown_source("id"),
+            Some(&*format!("id: {MINIMAL_ID}\n"))
+        );
+        let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
+        assert!(written.contains(&format!("id: {MINIMAL_ID}")), "{written}");
     }
 
     #[test]
     fn parse_errors_name_something_even_without_a_path() {
-        // Every Error variant carries a path; parsing from memory has none, so it names itself
-        // rather than reporting an empty path.
-        let err = Note::parse(b"no fence here\n").unwrap_err();
-        assert!(err.to_string().contains(IN_MEMORY_PATH), "{err}");
+        let e = Note::parse(id(), b"no fence at all\n").unwrap_err();
+        assert_eq!(e.path().unwrap().to_str().unwrap(), IN_MEMORY_PATH);
+        assert!(e.to_string().contains(IN_MEMORY_PATH), "{e}");
     }
 
     #[test]
-    fn load_reports_a_filename_frontmatter_disagreement() {
-        let tmp = tempfile::tempdir().unwrap();
-        // The file is named for a different id than its frontmatter carries.
-        let path = tmp.path().join("01a03d99-0000-7000-8000-000000000000.md");
-        std::fs::write(&path, MINIMAL).unwrap();
+    fn parse_then_render_is_a_fixed_point() {
+        let note = Note::parse(id(), MINIMAL.as_bytes()).unwrap();
+        let once = note.to_bytes(&schema());
+        assert_eq!(once, MINIMAL.as_bytes());
+        let twice = Note::parse(id(), &once).unwrap().to_bytes(&schema());
+        assert_eq!(once, twice);
+    }
 
-        let err = Note::load(&path).unwrap_err();
-        match err {
-            Error::NoteIdMismatch {
-                path: reported,
-                filename_id,
-                frontmatter_id,
-            } => {
-                assert_eq!(reported, path);
-                assert_eq!(
-                    filename_id.to_string(),
-                    "01a03d99-0000-7000-8000-000000000000"
-                );
-                assert_eq!(
-                    frontmatter_id.to_string(),
-                    "01a03d21-7c11-7a02-b3de-9f0e21c4a771"
-                );
-            }
-            other => panic!("expected a mismatch, got {other:?}"),
+    #[test]
+    fn mutating_a_field_changes_the_bytes() {
+        // Stage 1's F2, made unrepresentable. Under byte replay this wrote the pre-edit block;
+        // with one rendering path there is no second method that could.
+        let mut note = Note::parse(id(), MINIMAL.as_bytes()).unwrap();
+        note.frontmatter.title = Some("Edited".into());
+        let text = String::from_utf8(note.to_bytes(&schema())).unwrap();
+        assert!(text.contains("title: Edited"), "{text}");
+        assert!(!text.contains("A note"), "{text}");
+    }
+
+    #[test]
+    fn the_write_path_leaves_the_body_alone() {
+        let body = "\n* a\n+ b\n\n_em_ and __strong__\n\ntrailing spaces:  \nnext\n";
+        let doc = format!("---\ntitle: x\n---{body}");
+        let mut note = Note::parse(id(), doc.as_bytes()).unwrap();
+        note.frontmatter.title = Some("y".into());
+        let out = String::from_utf8(note.to_bytes(&schema())).unwrap();
+        assert!(out.ends_with(body), "body was rewritten:\n{out}");
+    }
+
+    #[test]
+    fn an_empty_body_and_a_body_that_is_only_a_fence_line_both_round_trip() {
+        for body in ["", "\n", "\n---\n", "---\n"] {
+            let doc = format!("---\ntitle: x\n---\n{body}");
+            let note = Note::parse(id(), doc.as_bytes()).unwrap();
+            assert_eq!(note.body, body, "body mismatch for {body:?}");
+            assert_eq!(note.to_bytes(&schema()), doc.as_bytes(), "for {body:?}");
         }
     }
 
+    /// The one normalization the write path makes to a *body*: a file that ends at the closing
+    /// fence with no line terminator gains one.
+    ///
+    /// It is not a byte-preservation failure, because there is no body to preserve — the file ends
+    /// inside the block. Rendering always terminates the closing fence so that the body, whatever
+    /// it is, begins at a line start; the alternative is retaining one more piece of lexical state
+    /// to reproduce a file with no content after its frontmatter. The property that matters,
+    /// render → parse → render being a fixed point, is unaffected, and this pins that.
     #[test]
-    fn load_accepts_the_slug_form_without_comparing_the_slug() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp
-            .path()
-            .join("01a03d21-7c11-7a02-b3de-9f0e21c4a771_anything_at_all.md");
-        std::fs::write(&path, MINIMAL).unwrap();
-        let note = Note::load(&path).expect("the slug is decorative");
+    fn a_file_ending_at_the_closing_fence_gains_a_terminator() {
+        let doc = "---\ntitle: x\n---";
+        let note = Note::parse(id(), doc.as_bytes()).unwrap();
+        assert_eq!(note.body, "");
+
+        let once = note.to_bytes(&schema());
         assert_eq!(
-            note.meta.id.to_string(),
-            "01a03d21-7c11-7a02-b3de-9f0e21c4a771"
+            String::from_utf8(once.clone()).unwrap(),
+            "---\ntitle: x\n---\n"
+        );
+        let twice = Note::parse(id(), &once).unwrap().to_bytes(&schema());
+        assert_eq!(once, twice, "render is still a fixed point");
+    }
+
+    #[test]
+    fn a_crlf_note_stays_crlf() {
+        // `.gitattributes` pins the fixture corpus to LF, so CRLF is exercised here rather than by
+        // a fixture. Mixing an LF-rendered known key with a CRLF unknown key's preserved bytes
+        // would produce a block nobody would have written.
+        let doc = "---\r\ntitle: x\r\nsummary: |\r\n  kept\r\n---\r\n\r\nBody.\r\n";
+        let note = Note::parse(id(), doc.as_bytes()).unwrap();
+        assert_eq!(note.frontmatter.newline(), Newline::Crlf);
+        assert_eq!(note.to_bytes(&schema()), doc.as_bytes());
+    }
+
+    #[test]
+    fn try_to_bytes_agrees_with_the_panicking_form() {
+        let note = Note::parse(id(), MINIMAL.as_bytes()).unwrap();
+        assert_eq!(
+            note.to_bytes(&schema()),
+            note.try_to_bytes(&schema()).unwrap()
         );
     }
 
-    // --------------------------------------------------------------- load and the filename
+    #[test]
+    fn meta_derives_created_at_and_copies_the_relations() {
+        let note = Note::parse(id(), MINIMAL.as_bytes()).unwrap();
+        let meta = note.meta();
+        assert_eq!(meta.id, id());
+        assert_eq!(meta.created_at, id().created_at());
+        assert_eq!(meta.title.as_deref(), Some("A note"));
+        assert_eq!(meta.root, Some(id()));
+        assert_eq!(meta.reply_to, None);
+        assert_eq!(meta.quote, None);
+    }
 
-    const MINIMAL_ID: &str = "01a03d21-7c11-7a02-b3de-9f0e21c4a771";
+    // --------------------------------------------------------------- load and the filename
 
     /// Stages [`MINIMAL`] under `name`, so the only thing under test is what `load` makes of the
     /// filename: every case here has identical, valid contents.
@@ -483,9 +669,8 @@ Body.
         ]
     }
 
-    /// Filenames it rejects. The first five are the shapes the deleted private `filename_id` used
-    /// to accept and `fs` did not — three of them end in `.md`, so `live_note_paths` returns them
-    /// and the disagreement was reachable from a real vault.
+    /// Filenames it rejects. Three of them end in `.md`, so `live_note_paths` returns them and a
+    /// disagreement between the two parsers would be reachable from a real vault.
     fn rejected_filenames() -> Vec<String> {
         vec![
             format!("{MINIMAL_ID}_.md"),
@@ -501,12 +686,19 @@ Body.
     }
 
     #[test]
-    fn load_accepts_every_filename_shape_fs_accepts() {
+    fn load_takes_the_identity_from_the_filename() {
         for name in accepted_filenames() {
             let (_tmp, _path, result) = load_named(&name);
             let note = result.unwrap_or_else(|e| panic!("{name} must load: {e}"));
-            assert_eq!(note.meta.id.to_string(), MINIMAL_ID);
+            assert_eq!(note.id.to_string(), MINIMAL_ID, "{name}");
         }
+    }
+
+    #[test]
+    fn load_of_a_slug_filename_ignores_the_slug() {
+        let name = format!("{MINIMAL_ID}_anything_at_all_even_a_stale_title.md");
+        let (_tmp, _p, result) = load_named(&name);
+        assert_eq!(result.unwrap().id.to_string(), MINIMAL_ID);
     }
 
     #[test]
@@ -523,10 +715,9 @@ Body.
 
     #[test]
     fn load_and_fs_parse_note_filename_never_disagree() {
-        // The regression test for the defect this replaced: `load` used to run its own private
-        // filename parser, which accepted a strict superset. Two components disagreeing about
-        // whether a file is a note is worse than either answer, so this asserts agreement rather
-        // than a particular verdict — a future change to `fs`'s rules stays green here for free.
+        // Two components disagreeing about whether a file is a note is worse than either answer,
+        // so this asserts agreement rather than a particular verdict — a future change to `fs`'s
+        // rules stays green here for free.
         let mut divergent = Vec::new();
         for name in accepted_filenames().into_iter().chain(rejected_filenames()) {
             let (_tmp, path, result) = load_named(&name);
@@ -546,441 +737,25 @@ Body.
     }
 
     #[test]
-    fn a_filename_that_is_not_a_note_and_one_that_is_the_wrong_note_are_different_errors() {
-        // `InvalidNoteFilename` says "this file is not a note"; `NoteIdMismatch` says "this note
-        // is filed under the wrong name" and carries both ids. Collapsing them would lose the
-        // distinction acceptance criterion 4 rests on.
-        let (_a, _, not_a_note) = load_named("README.md");
-        let (_b, _, wrong_note) = load_named("01a03d99-0000-7000-8000-000000000000.md");
-        let not_a_note = not_a_note.unwrap_err();
-        let wrong_note = wrong_note.unwrap_err();
-
-        assert!(
-            matches!(not_a_note, Error::InvalidNoteFilename { .. }),
-            "{not_a_note:?}"
-        );
-        assert!(
-            matches!(wrong_note, Error::NoteIdMismatch { .. }),
-            "{wrong_note:?}"
-        );
-        assert_ne!(
-            std::mem::discriminant(&not_a_note),
-            std::mem::discriminant(&wrong_note)
-        );
-    }
-
-    #[test]
-    fn load_reports_a_parse_failure_before_an_id_mismatch() {
-        // A malformed file staged under an unrelated filename must say what is wrong with the
-        // file, not report a mismatch it had no way to evaluate.
+    fn load_reports_a_bad_filename_before_a_parse_failure() {
+        // The identity is the filename, so without a usable one there is no note for a parse
+        // error to be about. This is the reverse of stage 1's ordering, and deliberately so:
+        // stage 1 parsed first because the frontmatter carried the identity.
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("01a03d99-0000-7000-8000-000000000000.md");
+        let path = tmp.path().join("README.md");
         std::fs::write(&path, "no fence at all\n").unwrap();
         assert!(matches!(
             Note::load(&path).unwrap_err(),
-            Error::MissingFrontmatterFence { .. }
+            Error::InvalidNoteFilename { .. }
         ));
     }
 
     #[test]
     fn load_of_a_missing_file_names_the_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("01a03d21-7c11-7a02-b3de-9f0e21c4a771.md");
-        let err = Note::load(&path).unwrap_err();
-        assert!(matches!(err, Error::Read { .. }), "{err:?}");
-        assert!(err.to_string().contains("01a03d21"), "{err}");
-    }
-
-    #[test]
-    fn an_empty_body_and_a_body_that_is_only_a_fence_line_both_round_trip() {
-        for text in [
-            "---\nid: 01a03d21-7c11-7a02-b3de-9f0e21c4a771\ncreated_at: 2026-08-26T09:00:00Z\nroot: 01a03d21-7c11-7a02-b3de-9f0e21c4a771\n---\n",
-            "---\nid: 01a03d21-7c11-7a02-b3de-9f0e21c4a771\ncreated_at: 2026-08-26T09:00:00Z\nroot: 01a03d21-7c11-7a02-b3de-9f0e21c4a771\n---\n\n---\n",
-        ] {
-            let note = Note::parse(text.as_bytes()).unwrap();
-            assert_eq!(note.to_bytes(), text.as_bytes());
-        }
-    }
-
-    #[test]
-    fn the_canonical_path_leaves_the_body_alone() {
-        let text = "---\nroot: 01a03d21-7c11-7a02-b3de-9f0e21c4a771\ncreated_at: 2026-08-26T09:00:00Z\nid: 01a03d21-7c11-7a02-b3de-9f0e21c4a771\n---\n\nintro\n\n---\n\noutro\n";
-        let note = Note::parse(text.as_bytes()).unwrap();
-        let canonical = String::from_utf8(note.to_canonical_bytes()).unwrap();
-        assert!(canonical.ends_with("\nintro\n\n---\n\noutro\n"));
-
-        let reparsed = Note::parse(canonical.as_bytes()).unwrap();
-        assert_eq!(reparsed.body, note.body);
-        // ...and the horizontal rule in the body did not become a fence on the way back.
-        assert_eq!(reparsed.to_canonical_bytes(), canonical.as_bytes());
-    }
-
-    #[test]
-    fn a_constructed_note_writes_canonically_on_both_paths() {
-        let id = NoteId::new();
-        let created = chrono::Utc::now();
-        let note = Note::new(NoteMeta::new(id, created, id), "\nHello.\n".to_string());
-        assert_eq!(note.to_bytes(), note.to_canonical_bytes());
-        assert_eq!(Note::parse(&note.to_bytes()).unwrap().meta.id, id);
-    }
-
-    #[test]
-    fn try_to_canonical_bytes_agrees_with_the_panicking_form() {
-        let note = Note::parse(MINIMAL.as_bytes()).unwrap();
-        assert_eq!(
-            note.try_to_canonical_bytes().unwrap(),
-            note.to_canonical_bytes()
-        );
-    }
-}
-
-/// The shared fixture corpus, walked in full.
-///
-/// `tests/fixtures/` at the repo root is shared by `jot-core` and `jot-acceptance` (see
-/// `breakdown.md`, Shared contracts), reached from either crate via `CARGO_MANIFEST_DIR` and a
-/// `../..` hop. Add to it; never fork it.
-///
-/// The round-trip half of this gate cannot fail if byte retention is implemented at all, so on its
-/// own it proves little. The canonical half is where a weak writer would hide, and it is run over
-/// every fixture here rather than over the three the acceptance suite names.
-#[cfg(test)]
-mod corpus {
-    use super::*;
-    use crate::frontmatter::KNOWN_KEYS;
-    use std::path::PathBuf;
-
-    fn fixtures() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("tests")
-            .join("fixtures")
-    }
-
-    /// Every `.md` file anywhere under the fixture vault, including `.jot/.trash/`, sorted so a
-    /// failure names the same file every run.
-    fn vault_notes() -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        collect_md(&fixtures().join("vault"), &mut out);
-        out.sort();
-        // A tripwire against a fixture being deleted, not a cap. Bump it deliberately when the
-        // corpus grows; a shrinking corpus makes every gate below quietly weaker.
-        assert!(
-            out.len() >= 13,
-            "the shared corpus has at least thirteen notes; found {} under {} — a missing corpus \
-             would make this gate vacuously green",
-            out.len(),
-            fixtures().join("vault").display()
-        );
-        out
-    }
-
-    fn collect_md(dir: &Path, out: &mut Vec<PathBuf>) {
-        let entries =
-            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_md(&path, out);
-            } else if path.extension().is_some_and(|e| e == "md") {
-                out.push(path);
-            }
-        }
-    }
-
-    fn read(path: &Path) -> Vec<u8> {
-        std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-    }
-
-    /// Top-level mapping keys of a frontmatter block, in order, found by a deliberately naive line
-    /// scan. Not by the YAML crate under test: a bug in that crate must not be invisible to the
-    /// thing checking it.
-    fn top_level_keys(bytes: &[u8]) -> Vec<String> {
-        let text = std::str::from_utf8(bytes).expect("fixtures are utf-8");
-        let mut lines = text.lines();
-        assert_eq!(lines.next().map(str::trim_end), Some("---"));
-        let mut keys = Vec::new();
-        for line in lines {
-            if line.trim_end() == "---" {
-                return keys;
-            }
-            if line.starts_with(' ') || line.starts_with('\t') || line.starts_with('#') {
-                continue;
-            }
-            let trimmed = line.trim_end();
-            if trimmed.is_empty() || trimmed.starts_with('-') {
-                continue;
-            }
-            if let Some((k, _)) = trimmed.split_once(':') {
-                keys.push(k.trim().to_string());
-            }
-        }
-        panic!("no closing fence in:\n{text}");
-    }
-
-    fn unknown_keys(bytes: &[u8]) -> Vec<String> {
-        top_level_keys(bytes)
-            .into_iter()
-            .filter(|k| !KNOWN_KEYS.contains(&k.as_str()))
-            .collect()
-    }
-
-    /// The gate `stage1.md` calls "the only real defense" against silent frontmatter mangling.
-    #[test]
-    fn every_fixture_round_trips_byte_identically_on_the_preserving_path() {
-        for path in vault_notes() {
-            let original = read(&path);
-            let note = Note::parse(&original)
-                .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()));
-            let round_tripped = note.to_bytes();
-            assert_eq!(
-                round_tripped,
-                original,
-                "parse -> to_bytes moved a byte in {}\n--- got ---\n{}\n--- want ---\n{}",
-                path.display(),
-                String::from_utf8_lossy(&round_tripped),
-                String::from_utf8_lossy(&original),
-            );
-        }
-    }
-
-    #[test]
-    fn every_fixture_loads_from_its_path_except_the_deliberate_mismatch() {
-        const MISMATCH: &str = "01a03d50-bac0-7851-bd56-683ef65923cd.md";
-        let mut saw_mismatch = false;
-        for path in vault_notes() {
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            match Note::load(&path) {
-                Ok(note) => assert_ne!(
-                    name, MISMATCH,
-                    "{MISMATCH} is the deliberate mismatch and must not load; got {}",
-                    note.meta.id
-                ),
-                Err(e) => {
-                    assert_eq!(name, MISMATCH, "{name} must load from its path: {e}");
-                    assert!(matches!(e, Error::NoteIdMismatch { .. }), "{e:?}");
-                    saw_mismatch = true;
-                }
-            }
-        }
-        assert!(
-            saw_mismatch,
-            "the mismatch fixture {MISMATCH} has gone missing from the corpus"
-        );
-    }
-
-    /// The canonical writer over the whole corpus, not just the three notes the acceptance suite
-    /// names. This is the half the round-trip walk cannot see.
-    #[test]
-    fn every_fixture_canonicalizes_losslessly_and_reaches_a_fixed_point() {
-        for path in vault_notes() {
-            let original = read(&path);
-            let note = Note::parse(&original).unwrap();
-            let canonical = note.to_canonical_bytes();
-            let name = path.display();
-
-            let reparsed = Note::parse(&canonical).unwrap_or_else(|e| {
-                panic!(
-                    "{name}: canonical output does not parse back: {e}\n{}",
-                    String::from_utf8_lossy(&canonical)
-                )
-            });
-
-            // Nothing about the note changed except the layout of its frontmatter.
-            assert_eq!(reparsed.body, note.body, "{name}: body was touched");
-            assert_eq!(reparsed.meta.id, note.meta.id, "{name}: id changed");
-            assert_eq!(
-                reparsed.meta.title, note.meta.title,
-                "{name}: title changed"
-            );
-            assert_eq!(
-                reparsed.meta.created_at, note.meta.created_at,
-                "{name}: created_at changed"
-            );
-            assert_eq!(
-                reparsed.meta.edited_at, note.meta.edited_at,
-                "{name}: edited_at changed"
-            );
-            assert_eq!(
-                reparsed.meta.reply_to, note.meta.reply_to,
-                "{name}: reply_to changed"
-            );
-            assert_eq!(reparsed.meta.root, note.meta.root, "{name}: root changed");
-            assert_eq!(
-                reparsed.meta.quote, note.meta.quote,
-                "{name}: quote changed"
-            );
-            assert_eq!(
-                reparsed.meta.trashed_at, note.meta.trashed_at,
-                "{name}: trashed_at changed"
-            );
-            assert_eq!(
-                reparsed.meta.unknown(),
-                note.meta.unknown(),
-                "{name}: an unknown key changed value or order"
-            );
-
-            // Canonicalizing twice equals canonicalizing once, or every write churns the file.
-            assert_eq!(
-                reparsed.to_canonical_bytes(),
-                canonical,
-                "{name}: canonical form is not a fixed point"
-            );
-            // And once the canonical bytes have been parsed, the preserving path emits them back.
-            assert_eq!(
-                reparsed.to_bytes(),
-                canonical,
-                "{name}: preserving path disagrees with the bytes it was parsed from"
-            );
-        }
-    }
-
-    #[test]
-    fn canonicalizing_puts_known_keys_in_order_and_leaves_unknown_ones_in_theirs() {
-        for path in vault_notes() {
-            let original = read(&path);
-            let canonical = Note::parse(&original).unwrap().to_canonical_bytes();
-            let name = path.display();
-
-            let keys = top_level_keys(&canonical);
-            let known: Vec<&String> = keys
-                .iter()
-                .filter(|k| KNOWN_KEYS.contains(&k.as_str()))
-                .collect();
-            let expected_known: Vec<&str> = KNOWN_KEYS
-                .iter()
-                .copied()
-                .filter(|k| keys.iter().any(|got| got == k))
-                .collect();
-            assert_eq!(
-                known.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
-                expected_known,
-                "{name}: known keys are not in canonical order"
-            );
-
-            // Every known key present on input is still present, and none was invented.
-            let original_known: Vec<&str> = KNOWN_KEYS
-                .iter()
-                .copied()
-                .filter(|k| top_level_keys(&original).iter().any(|got| got == k))
-                .collect();
-            assert_eq!(
-                expected_known, original_known,
-                "{name}: the canonical writer added or dropped a known key"
-            );
-
-            // Unknown keys follow, in their original relative order, none dropped.
-            assert_eq!(
-                unknown_keys(&canonical),
-                unknown_keys(&original),
-                "{name}: unknown keys were dropped, added, or reordered"
-            );
-            let first_unknown = keys.iter().position(|k| !KNOWN_KEYS.contains(&k.as_str()));
-            if let Some(i) = first_unknown {
-                assert!(
-                    keys[i..].iter().all(|k| !KNOWN_KEYS.contains(&k.as_str())),
-                    "{name}: a known key was emitted after an unknown one: {keys:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn canonical_timestamps_are_quoted_for_every_fixture_that_has_one() {
-        let mut checked = 0usize;
-        for path in vault_notes() {
-            let canonical = Note::parse(&read(&path)).unwrap().to_canonical_bytes();
-            let text = String::from_utf8(canonical).unwrap();
-            for key in ["created_at", "edited_at", "trashed_at"] {
-                // `skip(1)` steps over the opening fence, so the `---` that ends the loop is the
-                // closing one and the scan cannot run on into the body.
-                for line in text.lines().skip(1) {
-                    if line.trim_end() == "---" {
-                        break;
-                    }
-                    if let Some(value) = line.strip_prefix(&format!("{key}: ")) {
-                        assert!(
-                            value.starts_with('"') && value.ends_with('"'),
-                            "{}: `{key}` must be double-quoted (U2), got {line:?}",
-                            path.display()
-                        );
-                        assert!(
-                            value.ends_with("Z\""),
-                            "{line:?} must be UTC with a Z suffix"
-                        );
-                        checked += 1;
-                    }
-                }
-            }
-        }
-        assert!(
-            checked >= 11,
-            "expected at least eleven timestamps across the corpus, checked {checked} — a \
-             corpus that lost its timestamps would make this vacuous"
-        );
-    }
-
-    // ------------------------------------------------------------------ the invalid specimens
-
-    /// Copies an invalid specimen under a filename whose UUID matches its own frontmatter id,
-    /// where it has one, so a filename mismatch cannot fire and mask the error under test.
-    fn load_invalid(fixture: &str, uuid: &str) -> Error {
-        let tmp = tempfile::tempdir().unwrap();
-        let dest = tmp.path().join(format!("{uuid}.md"));
-        std::fs::copy(fixtures().join("invalid").join(fixture), &dest).unwrap();
-        match Note::load(&dest) {
-            Ok(_) => panic!("{fixture} must be rejected, not parsed"),
-            Err(e) => {
-                assert!(
-                    e.to_string().contains(uuid),
-                    "the error must name the path: {e}"
-                );
-                e
-            }
-        }
-    }
-
-    #[test]
-    fn the_four_invalid_specimens_produce_four_distinct_errors_each_naming_the_path() {
-        let no_fence = load_invalid("no_fence.md", "01a03d53-1de8-70c1-8f16-8a5a6f6a7f10");
-        let unterminated = load_invalid(
-            "unterminated_fence.md",
-            "01a03d53-ae70-7b52-a1c0-2c9c4c1c6a2e",
-        );
-        let malformed = load_invalid("malformed_yaml.md", "01a03d54-3ef8-750b-8dbb-3e6c2f4d5b9a");
-        let missing_id = load_invalid("missing_id.md", "01a03d54-cf80-7c22-9d17-4f2a5b6c7d8e");
-
-        assert!(
-            matches!(no_fence, Error::MissingFrontmatterFence { .. }),
-            "{no_fence:?}"
-        );
-        assert!(
-            matches!(unterminated, Error::UnterminatedFrontmatter { .. }),
-            "{unterminated:?}"
-        );
-        assert!(
-            matches!(malformed, Error::MalformedYaml { .. }),
-            "{malformed:?}"
-        );
-        assert!(
-            matches!(missing_id, Error::MissingId { .. }),
-            "{missing_id:?}"
-        );
-
-        // Deliberately also asserted name-free: "distinct" is the property, and a taxonomy that
-        // collapsed two of these into one variant would still pass the four matches above if
-        // someone updated them to match.
-        let all = [&no_fence, &unterminated, &malformed, &missing_id];
-        for i in 0..all.len() {
-            for j in (i + 1)..all.len() {
-                assert_ne!(
-                    std::mem::discriminant(all[i]),
-                    std::mem::discriminant(all[j]),
-                    "{:?} and {:?} are the same variant",
-                    all[i],
-                    all[j]
-                );
-            }
-        }
+        let path = tmp.path().join(format!("{MINIMAL_ID}.md"));
+        let e = Note::load(&path).unwrap_err();
+        assert!(matches!(e, Error::Read { .. }), "{e:?}");
+        assert_eq!(e.path(), Some(path.as_path()));
     }
 }
