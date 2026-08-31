@@ -862,7 +862,8 @@ fn probe_registry_load_from_a_missing_path_is_an_empty_registry_not_an_error() {
     assert_eq!(registry.current(), None, "and nothing current");
     assert!(
         registry.recovered().is_none(),
-        "a registry file that has never been written is not a degraded state (U5); it must carry          no recovered-from signal, or a fresh install is indistinguishable from a corrupt one"
+        "a registry file that has never been written is not a degraded state (U5); it must carry \
+         no recovered-from signal, or a fresh install is indistinguishable from a corrupt one"
     );
 }
 
@@ -872,9 +873,29 @@ fn probe_registry_load_from_a_corrupt_file_is_total_and_never_propagates() {
     let path = tmp.path().join("workspaces.toml");
     std::fs::write(&path, b"this is not toml [ = = =\n\x00\x01 [[[").unwrap();
 
-    Registry::load_from(&path).expect(
+    let registry = Registry::load_from(&path).expect(
         "U5: a corrupt registry costs one re-add, never data; it must never surface as an error \
          to a caller trying to open a workspace",
+    );
+
+    // The other half of M43, and the half the missing-file probe above cannot reach. A
+    // `recovered()` that returned `None` unconditionally would satisfy that probe and leave
+    // corruption entirely silent — the user would lose their workspace list and be told nothing.
+    // Distinguishing the two states is the whole content of the ruling, so both directions are
+    // pinned rather than just the one the mutation happened to hit.
+    assert!(registry.is_empty(), "nothing is salvageable from garbage");
+    let err = registry
+        .recovered()
+        .expect("a corrupt registry must say that it was corrupt");
+    assert!(
+        err.is_registry_recoverable(),
+        "the signal must be one of the two swallowable read failures, not some other error that \
+         happened to be stored: {err:?}"
+    );
+    assert_eq!(
+        err.path(),
+        Some(path.as_path()),
+        "and it must name the registry it could not read: {err}"
     );
 }
 
@@ -886,8 +907,12 @@ fn probe_registry_load_from_a_directory_is_still_total() {
     let path = tmp.path().join("workspaces.toml");
     std::fs::create_dir(&path).unwrap();
 
-    Registry::load_from(&path)
+    let registry = Registry::load_from(&path)
         .expect("an unreadable registry is recoverable (Error::is_registry_recoverable)");
+    let err = registry
+        .recovered()
+        .expect("an unreadable registry must say so too, not pass for a fresh install");
+    assert!(err.is_registry_recoverable(), "{err:?}");
 }
 
 #[test]

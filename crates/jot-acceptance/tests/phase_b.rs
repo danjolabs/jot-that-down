@@ -575,17 +575,129 @@ fn defect_note_load_and_fs_parse_note_filename_accept_the_same_filenames() {
 // 5. Inputs nobody wrote a criterion for
 // =============================================================================================
 
-/// A UTF-8 BOM is what Windows Notepad writes. The file visibly starts with `---`, so the error a
-/// user gets must not be actively misleading. Pinned as characterization: the *behavior* (reject) is
-/// defensible; the *message* is the finding.
+/// A UTF-8 BOM is what Windows Notepad and several sync clients write.
+///
+/// **This probe used to pin the opposite.** Phase B reported the BOM as finding F5: the file's first
+/// line is `---` in every editor the user owns, and the reader answered "expected a `---` fence on
+/// the first line". The behavior was defensible and the message was not, so it was pinned as a
+/// characterization rather than asserted as correct. A fixer round implemented F5, the implementer
+/// correctly refused to edit this crate and appealed, and the appeal was granted. What follows
+/// asserts the new truth.
+///
+/// The shape that matters is *where* the tolerance lives. `split_fences` strips at most one leading
+/// BOM **for the fence test only**; `verbatim` still begins at byte 0. §U1's byte retention
+/// therefore gets no exception — the preserving path re-emits the BOM along with everything else —
+/// and the canonical path normalizes it away, in the same category as anchors being expanded and
+/// `!!` tags being resolved.
 #[test]
-fn probe_b_a_utf8_bom_before_the_fence_is_rejected() {
-    let text = format!("\u{FEFF}{}", note_with(""));
-    let err = Note::parse(text.as_bytes()).expect_err("a BOM means line 1 is not `---`");
+fn probe_b_a_utf8_bom_before_the_fence_parses_and_survives_the_preserving_path() {
+    const BOM: &str = "\u{FEFF}";
+    let text = format!("{BOM}{}", note_with("title: Notepad wrote this\n"));
+
+    let note = Note::parse(text.as_bytes())
+        .expect("a BOM before the opening fence must not hide the fence");
+    assert_eq!(
+        note.meta.id.to_string(),
+        ID,
+        "the BOM must not reach the YAML parser"
+    );
+    assert_eq!(note.meta.title.as_deref(), Some("Notepad wrote this"));
+    assert_eq!(
+        note.body, "\nBody.\n",
+        "the BOM belongs to the retained frontmatter block, not to the body"
+    );
+
+    // The load-bearing half. If this ever fails, tolerating the BOM has cost a byte, and U1 is no
+    // longer a guarantee but a default.
+    assert_bytes_eq(
+        &note.to_bytes(),
+        text.as_bytes(),
+        "the preserving path must reproduce a BOM'd note byte-for-byte, BOM included — a note jot \
+         has only read must come back off disk exactly as it went on",
+    );
     assert!(
-        matches!(err, Error::MissingFrontmatterFence { .. }),
+        note.meta.verbatim().is_some_and(|v| v.starts_with(BOM)),
+        "the BOM must be retained *inside* the verbatim block. Stripping it there and re-adding it \
+         on write would round-trip this note and lose the BOM on any note that has none"
+    );
+
+    // And the canonical path drops it, deliberately and only once.
+    let canonical = note.to_canonical_bytes();
+    assert!(
+        !String::from_utf8_lossy(&canonical).contains(BOM),
+        "the canonical path must normalize the BOM away, like every other lexical choice it \
+         normalizes"
+    );
+    let reparsed = Note::parse(&canonical).expect("canonical output must parse");
+    assert_eq!(reparsed.meta.id, note.meta.id);
+    assert_eq!(reparsed.meta.title, note.meta.title);
+    assert_eq!(reparsed.body, note.body);
+    assert_bytes_eq(
+        &reparsed.to_canonical_bytes(),
+        &canonical,
+        "dropping the BOM must happen once, not on every write",
+    );
+
+    // The route this actually arrives by: an editor saved the file and the scanner loads the path.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join(format!("{ID}.md"));
+    std::fs::write(&path, &text).unwrap();
+    let loaded =
+        Note::load(&path).expect("a BOM'd note on disk must load, not report a missing fence");
+    assert_eq!(loaded.meta.id.to_string(), ID);
+    assert_bytes_eq(
+        &loaded.to_bytes(),
+        text.as_bytes(),
+        "load -> to_bytes is byte-identical for a BOM'd note too",
+    );
+}
+
+/// The other half of F5, and the half that keeps the tolerance from becoming a hole: it is exactly
+/// **one** BOM, exactly **before the opening fence**, and nowhere else. A reader that skipped BOMs
+/// generally would start finding fences inside bodies.
+#[test]
+fn probe_b_the_bom_tolerance_does_not_leak_past_the_opening_fence() {
+    const BOM: &str = "\u{FEFF}";
+
+    for (why, text) in [
+        ("two BOMs", format!("{BOM}{BOM}{}", note_with(""))),
+        (
+            "a BOM in front of something that is not a fence",
+            format!("{BOM}id: a\n---\n"),
+        ),
+    ] {
+        let err =
+            Note::parse(text.as_bytes()).expect_err(&format!("{why} must not parse as a note"));
+        assert!(
+            matches!(err, Error::MissingFrontmatterFence { .. }),
+            "{why}: got {err:?}"
+        );
+    }
+
+    // A BOM in front of the *closing* fence is content, so the block never closes.
+    let unterminated =
+        format!("---\nid: {ID}\ncreated_at: 2026-08-26T09:00:00Z\nroot: {ID}\n{BOM}---\n");
+    let err = Note::parse(unterminated.as_bytes())
+        .expect_err("a BOM'd closing fence is not a closing fence");
+    assert!(
+        matches!(err, Error::UnterminatedFrontmatter { .. }),
         "got {err:?}"
     );
+
+    // A BOM inside the body is an ordinary character and rides along untouched.
+    let in_body =
+        format!("---\nid: {ID}\ncreated_at: 2026-08-26T09:00:00Z\nroot: {ID}\n---\n\n{BOM}body\n");
+    let note = Note::parse(in_body.as_bytes()).expect("a BOM in the body is just a character");
+    assert!(note.body.contains(BOM), "the body keeps it verbatim");
+    assert_bytes_eq(&note.to_bytes(), in_body.as_bytes(), "body-BOM round trip");
+
+    // BOM + CRLF together, which is what a Windows editor actually emits.
+    let crlf = format!(
+        "{BOM}---\r\nid: {ID}\r\ncreated_at: 2026-08-26T09:00:00Z\r\nroot: {ID}\r\n---\r\n\r\nx\r\n"
+    );
+    let note = Note::parse(crlf.as_bytes()).expect("BOM + CRLF is the real-world Notepad output");
+    assert_eq!(note.meta.id.to_string(), ID);
+    assert_bytes_eq(&note.to_bytes(), crlf.as_bytes(), "BOM + CRLF round trip");
 }
 
 /// Two files in one vault whose frontmatter carries the same `id`. Nothing in stage 1 detects it;
@@ -763,19 +875,34 @@ fn probe_b_concurrent_minting_produces_unique_ids() {
 // 6. Registry probes beyond U5's letter
 // =============================================================================================
 
-/// **KNOWN HAZARD, pinned deliberately.** A per-entry key this build does not know is silently
-/// dropped on the next save. `workspace.toml` gets forward compatibility for free because `open`
-/// never writes; the registry *does* write, so it does not. Not a stage-1 criterion, but it is the
-/// same class of loss the note format goes to great lengths to avoid.
+/// **This probe used to pin the opposite.** Phase B reported finding F6: a registry key this build
+/// did not know was silently dropped on the next save. `workspace.toml` gets forward compatibility
+/// for free because `Workspace::open` never writes; the registry *does* write, so it had to do the
+/// work and did not. A fixer round implemented F6 and the appeal against this pin was granted.
+///
+/// **What is asserted here is survival, not order.** The implementation documents rather than hides
+/// its one limitation: retained keys come back *after* the keys this build owns, and among
+/// themselves in **sorted** order, not the file's original order — `toml::Table` is a sorted map, so
+/// document order is already gone by the time the parser hands the file over. This test is built so
+/// that sorted and original differ (`color` is written before `apple` and comes back after it),
+/// which is what stops it from silently asserting an ordering guarantee nobody makes.
 #[test]
-fn probe_b_known_hazard_registry_drops_unknown_entry_keys_on_save() {
+fn probe_b_registry_unknown_keys_survive_a_load_save_cycle() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("workspaces.toml");
-    let id = "01a03d20-a54c-7977-a1f4-1a88b38855dd";
+    let a = "01a03d20-a54c-7977-a1f4-1a88b38855dd";
+    let b = "01a03d30-2b6b-7c22-9def-abcdef123456";
+
+    // `theme` and `schema_hint` are top-level keys this build has never heard of; `color` and
+    // `apple` are per-entry ones, deliberately written in an order that is not sorted.
     std::fs::write(
         &path,
         format!(
-            "[[workspace]]\nid = \"{id}\"\npath = 'C:\\one'\nname = \"One\"\nlast_opened = \"2026-08-30T07:08:43Z\"\ncolor = \"red\"\n"
+            "schema_hint = 3\ncurrent = \"{a}\"\ntheme = \"dark\"\n\n\
+             [[workspace]]\nid = \"{a}\"\npath = 'one'\nname = \"One\"\n\
+             last_opened = \"2026-08-30T07:08:43Z\"\ncolor = \"red\"\napple = true\n\n\
+             [[workspace]]\nid = \"{b}\"\npath = 'two'\nname = \"Two\"\n\
+             last_opened = \"2026-08-29T12:00:00Z\"\n"
         ),
     )
     .unwrap();
@@ -783,15 +910,97 @@ fn probe_b_known_hazard_registry_drops_unknown_entry_keys_on_save() {
     let registry = Registry::load_from(&path).expect("load is total");
     assert!(
         registry.recovered().is_none(),
-        "an unknown key must not read as corruption"
+        "an unknown key is a newer version's business, not corruption"
     );
-    assert_eq!(registry.len(), 1);
+    assert_eq!(registry.len(), 2);
 
     registry.save_to(&path).unwrap();
     let after = std::fs::read_to_string(&path).unwrap();
+
+    // The point of the whole finding: an older build saving must not silently downgrade a newer
+    // build's file.
+    for survivor in ["schema_hint", "theme", "color", "apple"] {
+        assert!(
+            after.contains(survivor),
+            "unknown key `{survivor}` was dropped on save; an older jot must not silently discard \
+             a newer jot's settings\n{after}"
+        );
+    }
+
+    // Values, not just keys: a writer that kept the key and lost the value has still lost the data.
+    let parsed: toml::Value =
+        toml::from_str(&after).expect("what save_to wrote must be valid TOML");
+    assert_eq!(parsed["theme"].as_str(), Some("dark"));
+    assert_eq!(parsed["schema_hint"].as_integer(), Some(3));
+    let entry_a = parsed["workspace"]
+        .as_array()
+        .expect("[[workspace]] is an array of tables")
+        .iter()
+        .find(|w| w["id"].as_str() == Some(a))
+        .expect("entry a survives");
+    assert_eq!(entry_a["color"].as_str(), Some("red"));
+    assert_eq!(entry_a["apple"].as_bool(), Some(true));
+    // ...and the known keys are still this build's own values, not shadowed by a retained one.
+    assert_eq!(entry_a["name"].as_str(), Some("One"));
+    assert_eq!(
+        entry_a["last_opened"].as_str(),
+        Some("2026-08-30T07:08:43Z")
+    );
+
+    // Retained keys follow the known ones. Checked by line position, because the ordering claim is
+    // about the emitted document and `toml::Value` would have re-sorted it away.
+    let lines: Vec<&str> = after.lines().collect();
+    let at = |prefix: &str| {
+        lines
+            .iter()
+            .position(|l| l.trim_start().starts_with(prefix))
+            .unwrap_or_else(|| panic!("no line starting `{prefix}` in\n{after}"))
+    };
     assert!(
-        !after.contains("color"),
-        "the hazard has changed shape; re-read the fixer-wave note in verification.md\n{after}"
+        at("last_opened") < at("apple") && at("last_opened") < at("color"),
+        "retained keys must be emitted after the keys this build owns\n{after}"
+    );
+    // Sorted, not original: the file said `color` then `apple`. This is the documented limitation,
+    // asserted so that it stays a known cost rather than becoming an accidental guarantee.
+    assert!(
+        at("apple") < at("color"),
+        "retained keys come back in sorted order — `toml::Table` has already lost document order. \
+         If this ever reverses, the implementation gained an ordering guarantee and its doc comment \
+         needs updating\n{after}"
+    );
+
+    // Stable: save -> load -> save must not churn the file once unknown keys are in play.
+    let reloaded = Registry::load_from(&path).expect("what save_to wrote must load back");
+    reloaded.save_to(&path).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        after,
+        "a registry carrying unknown keys must still be a save -> load -> save fixed point"
+    );
+
+    // Unregistering a workspace takes that entry's unknown keys with it, and leaves the top-level
+    // ones alone. The alternative is a registry that accumulates keys for vaults nobody has.
+    let mut registry = Registry::load_from(&path).unwrap();
+    let a_id = registry
+        .entries()
+        .find(|e| e.name() == "One")
+        .expect("entry a is loaded")
+        .id();
+    registry.remove(a_id);
+    registry.save_to(&path).unwrap();
+
+    let after_remove = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !after_remove.contains("color") && !after_remove.contains("apple"),
+        "removing an entry must take its unknown keys with it\n{after_remove}"
+    );
+    assert!(
+        after_remove.contains("theme") && after_remove.contains("schema_hint"),
+        "but the top-level unknown keys describe the file, not the entry, and must survive\n{after_remove}"
+    );
+    assert!(
+        after_remove.contains(b),
+        "the other entry is untouched\n{after_remove}"
     );
 }
 
