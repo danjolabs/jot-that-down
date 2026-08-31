@@ -107,8 +107,22 @@ Creation order, from UUIDv7. No `position` column, no ordering metadata, nothing
 
 ## Links
 
-- [ ] Extract `[[<uuid>]]` and `[[<uuid>|label]]` from the body during scan, using a markdown parser
-      rather than a regex over raw text, so links inside fenced code blocks are not picked up.
+**The parser is already a dependency.** Stage 1b delegates frontmatter fence splitting to
+`markdown` 1.0.0 (markdown-rs), chosen partly *for* this stage — see `stage1b.md`, "The parse path".
+This stage adds no new crate and inherits the same rule: parse to an AST, read byte offsets, never
+call the renderer.
+
+- [ ] Extract `[[<uuid>]]` and `[[<uuid>|label]]` from the body during scan by walking the mdast,
+      not by regex over raw text, so links inside fenced code blocks are not picked up. The walk is
+      the whole implementation: collect `Node::Text`, skip `Node::Code` and `Node::InlineCode`, and
+      match the link syntax within each text node's value. Verified 2026-08-31 on the pinned crate —
+      a paragraph's `[[uuid|label]]` arrives as a *single* `Text` node with its byte span intact, so
+      no reassembly across events is needed. (`pulldown-cmark` splits the same link across eight
+      events; that is why it was not chosen.)
+- [ ] Inline code is excluded along with fenced blocks. `` `[[uuid]]` `` is a person writing *about*
+      a link, not making one. This is a decision, not a side effect of the walk — say so in a test.
+- [ ] Keep each link's byte offset from the extraction. Stage 5's reader wants to highlight a link in
+      place, and recovering the offset later means re-parsing.
 - [ ] Populate `links`; expose `backlinks(id)`.
 - [ ] **Workspace-scoped only** — a target id absent from this workspace resolves to `Deleted`, and
       never reaches into another workspace. Independence is the point of a workspace.
@@ -136,6 +150,10 @@ Creation order, from UUIDv7. No `position` column, no ordering metadata, nothing
   still grouped under the original `root_id`.
 - Purge the root itself: the surviving children appear in the timeline as orphan roots.
 - A hand-written cycle in `reply_to` produces an error naming both notes, and no hang.
+- A body containing the same `[[uuid]]` in prose, in a fenced code block, and in inline code yields
+  exactly one link — from the prose.
+- A link to a purged note still extracts, and resolves to `Deleted`; extraction never consults the
+  index.
 - Property tests pass over several thousand generated trees.
 - Killing the process between the file move and the index write leaves the vault correct and the
   index repaired by the next `sync()`.

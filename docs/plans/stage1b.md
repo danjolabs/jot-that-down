@@ -35,33 +35,6 @@ then this is a known, chosen hazard, not an oversight.
 What this deletes from stage 1: the "frontmatter wins" rule, acceptance criterion 4, and
 `Error::NoteIdMismatch` together with the fixture that exercises it.
 
-## The new note format
-
-```markdown
----
-title: Jot that down
-relation:root: 01a03d20-a54c-7977-a1f4-1a88b38855dd
-relation:reply_to: 01a03d20-a54c-7977-a1f4-1a88b38855dd
-relation:quote: 01a03d10-3f8a-7bb1-9c22-0e1d5a6b7c88
----
-
-The body. Plain markdown, untouched.
-```
-
-Four keys where there were seven. What left, and why it is safe:
-
-- **`id`** — the filename carries it. See the identity change above.
-- **`created_at`** — **derivable from the id, exactly.** UUIDv7 encodes a 48-bit millisecond
-  timestamp; the creation time is recoverable from the identity itself with no external state. This
-  is the strongest of the three removals and the reason the others became thinkable.
-- **`edited_at`** — index-only, populated from filesystem mtime at scan time. **This is the one field
-  a rebuild cannot reproduce faithfully**, and it is a deliberate, isolated exception to the rebuild
-  invariant. See "The rebuild invariant exemption" below.
-
-`relation:` prefixing is verified, not assumed: `relation:root` parses as a single key and
-round-trips byte-identically through `yaml_serde`, because a colon is only an indicator when
-followed by whitespace. Confirmed against the pinned crate on 2026-08-31.
-
 ### `workspace.toml`
 
 ```toml
@@ -82,6 +55,84 @@ creation-time option governing whether a new note's filename gets a slug derived
 Because the reader ignores everything after the UUID, re-slugging on a title change is safe — the
 identity is the UUID and it does not move.
 
+## The new note format
+
+```markdown
+---
+title: Jot that down
+relation:root: 01a03d20-a54c-7977-a1f4-1a88b38855dd
+relation:reply_to: 01a03d20-a54c-7977-a1f4-1a88b38855dd
+relation:quote: 01a03d10-3f8a-7bb1-9c22-0e1d5a6b7c88
+---
+
+The body. Plain markdown, untouched.
+```
+
+**The block is always present.** Every note carries frontmatter, at minimum a `title`. A file with no
+fence is a malformed note, not an untitled one — which makes the fence a hard parse boundary rather
+than an optional prelude, and is what lets the parse path below treat its absence as an error rather
+than as a state to represent.
+
+Four keys where there were seven. What left, and why it is safe:
+
+- **`id`** — the filename carries it. See the identity change above.
+- **`created_at`** — **derivable from the id, exactly.** UUIDv7 encodes a 48-bit millisecond
+  timestamp; the creation time is recoverable from the identity itself with no external state. This
+  is the strongest of the three removals and the reason the others became thinkable.
+- **`edited_at`** — index-only, populated from filesystem mtime at scan time. **This is the one field
+  a rebuild cannot reproduce faithfully**, and it is a deliberate, isolated exception to the rebuild
+  invariant. See "The rebuild invariant exemption" below.
+
+`relation:` prefixing is verified, not assumed: `relation:root` parses as a single key and round-trips byte-identically through `yaml_serde`, because a colon is only an indicator when followed by whitespace. Confirmed against the pinned crate on 2026-08-31.
+
+## The parse path
+
+**Fence splitting is delegated to `markdown` 1.0.0** (markdown-rs), replacing the hand-rolled
+`split_fences` in `frontmatter.rs`. The rule that makes a markdown crate safe in a tool whose whole
+premise is not touching the user's bytes:
+
+> **Parse with the crate, slice with your own offsets, never call its renderer.**
+
+`ParseOptions.constructs.frontmatter` yields a `Node::Yaml` whose `position` carries byte offsets into
+the source. Those offsets partition the file, and jot does the partitioning itself:
+
+```text
+doc[..start]     the BOM, if any
+doc[start..end]  the fenced block, both fences included
+doc[end..]       the body, byte-for-byte
+```
+
+The body is a slice of the original text and never passes through a markdown emitter, so "plain
+markdown, untouched" is structural rather than earned — the same shape of guarantee byte-replay used
+to give, obtained from an offset instead of from a retained copy. This is why an AST crate is safe
+here and a *rendering* crate would not be: comrak and friends will happily normalize list markers,
+emphasis characters and hard-break spacing on the way out.
+
+Verified against the pinned crate on 2026-08-31, on Windows 11, against every case the current
+`split_fences` tests cover: LF and CRLF; a leading BOM (reported as a three-byte prefix *outside* the
+span rather than silently consumed); no trailing newline; an empty block; a `---` rule in the body;
+a fence with trailing whitespace; an indented `---`, correctly not frontmatter; and a block holding
+both a block scalar and a nested mapping. In every case `doc[..start] + doc[start..end] + doc[end..]`
+reconstitutes the file exactly.
+
+**What it does not solve.** The crate hands back the block's outer boundary and nothing else. The
+interior is still `yaml_serde`'s, so the unknown-key problem below is untouched by this change. That
+section, not this one, is where the stage's risk lives.
+
+**What it costs.** markdown-rs reports *no frontmatter node* for both "no fence" and "unterminated
+fence", where §U10 wants two distinct errors. The distinction is recoverable — an unterminated `---`
+parses as a `ThematicBreak` at offset 0, a file with no fence does not — but that is an inference
+about the parser's output rather than something the parser reports, so it needs a test that pins it
+rather than a comment that asserts it. Because the block is always present, both cases are hard
+errors on a malformed file; neither is a path a well-formed vault takes.
+
+**Stage 3 is the reason to prefer this crate over `pulldown-cmark`.** `stage3.md` already requires a
+markdown parser for `[[uuid]]` extraction, so the dependency was arriving regardless. In markdown-rs's
+mdast a paragraph's `[[uuid|label]]` arrives as a single `Text` node with byte offsets, while fenced
+and inline code are distinct node kinds to skip; `pulldown-cmark` splits the same link across eight
+events and would need reassembly. One crate covers both stages. Weight is `markdown v1.0.0` plus one
+transitive crate, `unicode-id`.
+
 ## The write path
 
 **One path. Byte-replay is deleted.**
@@ -90,42 +141,38 @@ identity is the UUID and it does not move.
 render(schema.frontmatter, typed fields) ++ preserved unknown keys ++ body
 ```
 
-This supersedes ruling §U1 ("preserve on read, normalize on edit") and the two-path design it
-produced. The argument that retires it: byte-replay existed so that *some* write path could be
-byte-identical, and under this design **jot writes a note's bytes only when the user edits it.**
-Trash, restore and purge are file moves and deletes; `sync` and `rebuild` are read-only. The
-byte-identical replay path has no caller left.
+This supersedes ruling §U1 ("preserve on read, normalize on edit") and the two-path design it produced. The argument that retires it: byte-replay existed so that *some* write path could be byte-identical, and under this design **jot writes a note's bytes only when the user edits it.** Trash, restore and purge are file moves and deletes; `sync` and `rebuild` are read-only. The byte-identical replay path has no caller left.
 
 Consequences worth stating:
 
-- **Key order is declared, not hardcoded.** Order comes from `schema.frontmatter`, not from a
-  `KNOWN_KEYS` constant in Rust. Reordering frontmatter is a config edit.
-- **`Note::to_bytes` / `to_canonical_bytes` collapse to one function**, which resolves finding F2
-  structurally rather than guarding it. F2 was: mutate a `pub` field, call `to_bytes()`, watch the
-  edit vanish because the retained bytes were replayed instead. With one path that renders from
-  typed state, there is no second method that ignores the fields, so the hazard becomes an
-  impossible state rather than a documented one. `forget_verbatim()` disappears with it.
+- **Key order is declared, not hardcoded.** Order comes from `schema.frontmatter`, not from a `KNOWN_KEYS` constant in Rust. Reordering frontmatter is a config edit.
+- **`Note::to_bytes` / `to_canonical_bytes` collapse to one function**, which resolves finding F2 structurally rather than guarding it. F2 was: mutate a `pub` field, call `to_bytes()`, watch the edit vanish because the retained bytes were replayed instead. With one path that renders from typed state, there is no second method that ignores the fields, so the hazard becomes an impossible state rather than a documented one. `forget_verbatim()` disappears with it.
 - **The byte-identical acceptance criterion is replaced**, not weakened. Phase B established that the
-  old criterion was weak evidence by construction — under byte retention it could only fail if
-  retention was not implemented at all. The replacements are stronger: render→parse→render is a fixed
-  point, emitted key order equals the schema, and unknown keys survive byte-for-byte.
+  old criterion was weak evidence by construction — under byte retention it could only fail if retention was not implemented at all. The replacements are stronger: render→parse→render is a fixed point, emitted key order equals the schema, and unknown keys survive byte-for-byte.
 
 ### Unknown keys — the hard part
 
 `overview.md`'s forward-compat rule is unchanged and is the main technical problem of this stage.
 
-A key in the file but not in `schema.frontmatter` — `summary:` written by Obsidian, a field from a
-future version — is **preserved, never interpreted, never dropped.** jot does not read it, act on
-it, or validate it; every write carries it through unchanged, appended after the schema keys.
+A key in the file but not in `schema.frontmatter` — `summary:` written by Obsidian, a field from a future version — is **preserved, never interpreted, never dropped.** jot does not read it, act on it, or validate it; every write carries it through unchanged, appended after the schema keys.
 
-Byte-replay gave "verbatim" for free. Rendering gives it only if unknown keys are preserved as
-**their original text slices** rather than as parsed values re-emitted by the YAML crate. Simple
-scalars round-trip byte-identically through `yaml_serde`, but the fixture corpus already contains a
-block scalar and a nested mapping, where an emitter may legally reformat without losing data.
-Slicing and re-splicing that text is this stage's main implementation risk.
+Byte-replay gave "verbatim" for free. Rendering gives it only if unknown keys are preserved as **their original text slices** rather than as parsed values re-emitted by the YAML crate. Simple scalars round-trip byte-identically through `yaml_serde`, but the fixture corpus already contains a block scalar and a nested mapping, where an emitter may legally reformat without losing data. Slicing and re-splicing that text is this stage's main implementation risk.
 
-A `strict = true` opt-in that drops unlisted keys may be offered later. It is **not** the default and
-is out of scope here.
+**The markdown crate does not reach this.** It delimits the block; the keys inside it are still
+`yaml_serde`'s. Two mechanisms are available and the cheaper one is recommended:
+
+- **Capture each top-level key's source line range** in a pass over the block, before handing it to
+  `yaml_serde`. A top-level key is a line at indentation zero; its span runs to the next such line or
+  to the block's end. Block scalars, nested mappings and trailing comments then fall out for free as
+  continuation lines, which covers both of the hard cases named above. Roughly eighty lines, no new
+  dependency. Does not handle explicit `?` keys, anchors and aliases, or a flow collection continuing
+  at column zero — all exotic in frontmatter, and none of them handled today either.
+- **Move to a YAML parser that carries source spans.** This reopens `yaml-crate.md`'s decision, whose
+  stated premise was that byte-replay made emitter fidelity irrelevant to the choice. This stage
+  removes that premise, so the decision is genuinely live again rather than merely revisitable — but
+  it is a heavier change than the problem currently justifies.
+
+A `strict = true` opt-in that drops unlisted keys may be offered later. It is **not** the default and is out of scope here.
 
 ## Behavior against external edits
 
@@ -177,6 +224,13 @@ instead of containing it.
 - `created_at` recovered from a note's filename UUID equals the creation time it was minted with.
 - A workspace whose `schema.frontmatter` omits a relation key is rejected at `open`, naming what is
   missing. *(Contingent — see Open questions.)*
+- For every fixture note, the three slices the parse path cuts — BOM prefix, fenced block, body —
+  concatenate back to the original file byte-for-byte. This is the structural property the "body
+  untouched" guarantee rests on; if it fails, no later criterion can hold.
+- A file with no fence and a file with an unterminated fence produce two *different* errors, each
+  naming the path.
+- A note whose body contains list markers, emphasis, and hard line breaks survives a title edit with
+  every body byte unchanged — the check that no markdown renderer is in the write path.
 
 ## Open questions
 
@@ -190,3 +244,16 @@ instead of containing it.
   produce diff noise in a git-tracked vault. Probably acceptable; worth measuring before deciding.
 - **Externally deleted file** — not moved to `.jot/.trash/`, just gone. Not trashed, not purged. The
   index row drops on sync with no tombstone. Confirm that is wanted.
+- **Is `title` required, or merely always present in practice?** "The block is always present, at
+  minimum a `title`" settles that a note always has frontmatter. It does not settle whether a note
+  *without* a `title` key is malformed. The repair table above still reads "absent means untitled",
+  which assumes optional. If `title` becomes required, that row changes and a new validation error
+  joins the parse path. Left as written until ratified.
+- **Where the markdown-crate decision is recorded.** `runs/stage1/` is a sealed audit trail and this
+  is a stage-1b decision, so it does not belong there. Either fold it into `yaml-crate.md` as a dated
+  addendum — its title already covers "the stage-1 dependency set" — or open `runs/stage1b/` early.
+  Until then this section is the only record, and `Cargo.toml` carries no `markdown` entry yet.
+- **Whether the crate swap lands before 1b.** It is confined to `frontmatter.rs` and is independent
+  of the identity change, so it can go in first as a behaviour-preserving refactor gated by the
+  existing `split_fences` tests — which are currently the only thing pinning those edge cases. Doing
+  it inside 1b means swapping the parser and the format in one diff.
