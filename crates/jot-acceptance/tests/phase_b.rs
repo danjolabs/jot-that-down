@@ -1,515 +1,501 @@
-#![cfg(feature = "stage1")]
-//! Phase B probes: written *after* the implementation landed, against the shapes wave 3 chose.
+#![cfg(feature = "stage1b")]
+//! Adversarial probes, written *after* the implementation landed and aimed at the places the
+//! stage's own risk assessment names.
 //!
-//! `criteria.rs` and `probes.rs` were written blind, before `Frontmatter` existed, and
-//! `dispatch.md` ("Open shape T3.1 owns, and must report") records the consequence: phase A
-//! references `Frontmatter` nowhere, so every unknown-key claim is checked only through emitted
-//! bytes. This file closes that gap and attacks the three places the orchestrator judged the risk
-//! to be concentrated:
+//! `stage1b.md` says plainly where the risk is: "Slicing and re-splicing that text is this stage's
+//! main implementation risk", and, of the markdown crate, "That section, not this one, is where the
+//! stage's risk lives." So the weight here is on the unknown-key slicer and on the single write
+//! path, with the two `markdown`-crate behaviours the parse path depends on pinned alongside them.
 //!
-//! 1. **`to_canonical_bytes`.** §U1 made the preserving path byte-retention, which makes criterion
-//!    2 structurally unfailable and therefore nearly worthless as evidence. The canonical path is
-//!    the one stage 3's `Workspace::edit` will run over every note the user ever touches, and it is
-//!    the only one where an emitter can lose a byte. It gets the hostile inputs.
-//! 2. **The `forget_verbatim` footgun.** `Frontmatter`'s known fields are `pub`; mutating one and
-//!    calling `to_bytes()` writes the *pre-edit* bytes. Pinned here as a characterization test so
-//!    that a fixer wave changing it is visible rather than silent.
-//! 3. **`NoteMeta` with `verbatim: None`.** Stage 2 builds these from SQLite rows. Nothing may
-//!    panic or silently misbehave.
-//!
-//! Plus a differential test between the two independent note-filename parsers.
+//! Three things stage 1's version of this file pinned are gone with the rules that needed them:
+//! the `forget_verbatim` footgun (there is no second write path to forget anything for), the
+//! `NoteMeta`-with-no-verbatim probes (`NoteMeta` no longer carries a block), and byte-replay's
+//! hostile-input coverage — which moves here, onto the rendering path, where it now matters far
+//! more. Under byte retention a hostile value never reached an emitter; under one rendering path
+//! every note the user edits goes through it.
 //!
 //! Naming: `probe_b_*` for probes that pass and pin behavior, `defect_*` for a probe that is red
 //! because the implementation is wrong. A red `defect_*` is a finding, not a broken test.
 
 use jot_acceptance::*;
 use jot_core::error::Error;
+use jot_core::frontmatter::{Frontmatter, FrontmatterSchema, Newline};
 use jot_core::fs as jot_fs;
-use jot_core::note::{Note, NoteId, NoteMeta};
+use jot_core::note::{Note, NoteId};
 use jot_core::registry::Registry;
 use jot_core::workspace::{Workspace, WorkspaceKind};
 use std::path::Path;
 
 const ID: &str = "01a03d21-7c11-7a02-b3de-9f0e21c4a771";
 
-/// A minimal valid note with `extra` spliced into the frontmatter after the three required keys.
+fn id() -> NoteId {
+    ID.parse().unwrap()
+}
+
+fn schema() -> FrontmatterSchema {
+    FrontmatterSchema::jot_default()
+}
+
+/// A minimal note with `extra` spliced into its block.
 fn note_with(extra: &str) -> String {
-    format!("---\nid: {ID}\ncreated_at: 2026-08-26T09:00:00Z\nroot: {ID}\n{extra}---\n\nBody.\n")
+    format!("---\ntitle: A note\nrelation:root: {ID}\n{extra}---\n\nBody.\n")
 }
 
 // =============================================================================================
-// 1. Attacking the canonical writer
+// 1. The write path against hostile values
 // =============================================================================================
 
-/// The property that actually matters for stage 3: whatever a user or another tool wrote into the
-/// frontmatter, canonicalizing it must produce a document that (a) still parses, (b) carries every
-/// unknown key with the same value, and (c) is a fixed point. Each input below is a shape that has
-/// broken a hand-rolled YAML writer somewhere.
+/// Unknown values that a YAML emitter is free to reformat, and that the slicer must therefore
+/// carry as bytes rather than re-emit.
+///
+/// Every case here round-trips *and* keeps its exact source lines. The second half is the one that
+/// matters: a `Frontmatter` that parsed these into `Value`s and emitted them again would satisfy
+/// the round-trip and fail the byte comparison, and it is the byte comparison that the
+/// forward-compat rule actually asks for.
 #[test]
-fn probe_b_canonical_writer_survives_hostile_unknown_values() {
-    let cases: Vec<(&str, String)> = vec![
+fn probe_b_the_write_path_carries_hostile_unknown_values_as_bytes() {
+    let cases: [(&str, &str); 14] = [
+        ("plain scalar", "x: a plain value\n"),
+        ("empty value", "x:\n"),
+        ("explicit null", "x: null\n"),
+        ("literal block", "x: |\n  one\n  two\n"),
+        ("literal block, keep", "x: |+\n  one\n\n"),
+        ("literal block, strip", "x: |-\n  one\n"),
+        ("folded block", "x: >\n  one\n  two\n"),
+        ("nested mapping", "x:\n  a: 1\n  b:\n    c: 2\n"),
+        ("sequence", "x:\n  - one\n  - two\n"),
+        ("flow sequence", "x: [one, two]\n"),
+        ("flow mapping", "x: {a: 1, b: 2}\n"),
+        ("empty collections", "x: []\ny: {}\n"),
+        ("hand alignment and a comment", "x:   spaced   # kept\n"),
         (
-            "a very long plain scalar",
-            format!("note: {}\n", "word ".repeat(40)),
+            "everything a YAML emitter normalizes",
+            "x: 'single quoted'\ny: \"double quoted\"\nz: 0644\nw: 2026-08-26\nv: ~\nu: yes\n",
         ),
-        (
-            "a long scalar with runs of spaces a folding emitter would eat",
-            format!("note: {}\n", "aaaaaaaaaa  ".repeat(12)),
-        ),
-        (
-            "a leading-zero number that is really a string",
-            "code: 0123\n".into(),
-        ),
-        ("a YAML 1.1 boolean spelling", "flag: yes\n".into()),
-        ("an explicit null", "n: ~\n".into()),
-        ("a key with no value at all", "e:\n".into()),
-        (
-            "a literal block scalar containing a bare fence",
-            "note: |\n  ---\n  inside\n".into(),
-        ),
-        (
-            "a quoted scalar containing a newline and a fence",
-            "note: \"a\\n---\\nb\"\n".into(),
-        ),
-        ("an anchor and an alias", "a: &x 1\nb: *x\n".into()),
-        (
-            "a nested sequence of mappings",
-            "l:\n  - a: 1\n    b: 2\n".into(),
-        ),
-        ("a key containing a dot", "a.b: 1\n".into()),
-        ("a key containing a space", "a b: 1\n".into()),
-        ("a quoted key containing a colon", "\"a:b\": 1\n".into()),
-        ("a non-string key", "7: seven\n".into()),
-        ("a null key", "~: nothing\n".into()),
-        ("an empty string value", "s: \"\"\n".into()),
-        ("a value that is exactly a fence", "s: '---'\n".into()),
-        ("a date-shaped scalar", "when: 2026-08-26\n".into()),
-        ("a comment above a key", "# a comment\nk: 1\n".into()),
-        ("a unicode key and value", "제목: 한국어 값\n".into()),
-        ("a value with a tab", "t: \"a\\tb\"\n".into()),
-        (
-            "a deeply indented nested map",
-            "a:\n  b:\n    c:\n      d: 1\n".into(),
-        ),
-        ("an empty flow mapping", "m: {}\n".into()),
-        ("an empty flow sequence", "s: []\n".into()),
     ];
 
-    for (why, extra) in cases {
-        let text = note_with(&extra);
-        let note = Note::parse(text.as_bytes())
-            .unwrap_or_else(|e| panic!("precondition: {why} must parse as a note: {e}\n{text}"));
+    for (name, extra) in cases {
+        let text = note_with(extra);
+        let note = Note::parse(id(), text.as_bytes())
+            .unwrap_or_else(|e| panic!("{name}: the input must parse: {e}\n{text}"));
 
-        let canonical = note.to_canonical_bytes();
-        let shown = String::from_utf8_lossy(&canonical).into_owned();
+        let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
 
-        let reparsed = Note::parse(&canonical).unwrap_or_else(|e| {
-            panic!(
-                "{why}: the canonical writer produced a document that will not parse: {e}\n{shown}"
-            )
+        // Round-trips, and reaches a fixed point.
+        let reparsed = Note::parse(id(), written.as_bytes()).unwrap_or_else(|e| {
+            panic!("{name}: jot wrote something it cannot read: {e}\n{written}")
         });
-
         assert_eq!(
-            reparsed.meta.unknown(),
-            note.meta.unknown(),
-            "{why}: the canonical writer changed an unknown key's value or order\n{shown}"
-        );
-        assert_eq!(
-            reparsed.body, note.body,
-            "{why}: the body was touched\n{shown}"
-        );
-        assert_bytes_eq(
-            &reparsed.to_canonical_bytes(),
-            &canonical,
-            &format!(
-                "{why}: the canonical form is not a fixed point, so every edit churns the file"
-            ),
+            String::from_utf8(reparsed.to_bytes(&schema())).unwrap(),
+            written,
+            "{name}: not a fixed point"
         );
 
-        // Structural: exactly two fences, and the body still starts where it did.
-        let fence_lines = shown.lines().take_while(|l| l.trim_end() != "---").count();
+        // And every unknown key came through as its own source lines, not as an emitter's idea of
+        // them.
         assert!(
-            fence_lines == 0,
-            "{why}: canonical output must open with a fence on line 1\n{shown}"
+            !note.frontmatter.unknown().is_empty(),
+            "{name}: nothing was treated as unknown, so this case proves nothing"
         );
-        assert!(
-            shown.ends_with("\nBody.\n"),
-            "{why}: the body must survive verbatim at the end\n{shown}"
-        );
+        for unknown in note.frontmatter.unknown() {
+            assert!(
+                written.contains(unknown.source()),
+                "{name}: `{}` was re-emitted rather than preserved.\n--- wanted ---\n{}\
+                 \n--- got ---\n{written}",
+                unknown.name(),
+                unknown.source()
+            );
+        }
+        assert!(written.ends_with("\nBody.\n"), "{name}: the body moved");
     }
 }
 
-/// The same attack aimed at `title`, the one known key that is arbitrary user text and therefore
-/// the only known key the canonical writer must hand to a YAML emitter rather than print itself.
-/// A title that escaped its quoting could inject a fence and split the document.
+/// Titles are the one arbitrary user text the write path *emits* rather than copies, so scalar
+/// style and escaping are `yaml_serde`'s problem — and this is the probe that checks jot handed
+/// them over rather than guessing.
 #[test]
-fn probe_b_canonical_writer_survives_a_hostile_title() {
+fn probe_b_the_write_path_survives_a_hostile_title() {
     let titles = [
         "plain",
-        "a: b",
-        "a # b",
-        "---",
-        "\n---\n",
-        "- not a list",
+        "with: a colon",
+        "with #a hash",
+        "- leading dash",
+        "? leading question mark",
+        "trailing space ",
+        " leading space",
         "true",
-        "yes",
+        "false",
         "null",
         "~",
-        "0123",
-        "",
-        " leading space",
-        "trailing space ",
-        "line one\nline two",
+        "2026",
+        "3.14",
+        "0644",
+        "2026-08-26",
+        "yes",
+        "on",
+        "\"already quoted\"",
+        "'single quoted'",
+        "back\\slash",
         "한국어 제목",
-        "quote \" and backslash \\ and 'single'",
-        "2026-08-26T09:00:00Z",
-        "{flow: mapping}",
-        "[flow, sequence]",
-        "&anchor",
-        "*alias",
-        "!tag",
-        "%directive",
-        "@reserved",
-        "`backtick",
-        "a\tb",
-        "…\u{200b}zero width",
-        &"x".repeat(500),
+        "emoji 🎉 title",
+        "one\ntwo",
+        "tab\there",
+        "",
+        "---",
+        "...",
+        "[bracketed]",
+        "{braced}",
+        "a very long title that goes on and on and might tempt an emitter to fold it across lines",
     ];
 
     for title in titles {
-        // Build the title through the parser rather than by string splicing, so the test cannot
-        // accidentally be checking its own escaping instead of the writer's.
-        let mut note = Note::parse(note_with("").as_bytes()).unwrap();
-        note.meta.title = Some(title.to_string());
-        note.meta.forget_verbatim();
+        let mut note = Note::parse(id(), note_with("").as_bytes()).unwrap();
+        note.frontmatter.title = Some(title.to_string());
 
-        let canonical = note.to_canonical_bytes();
-        let shown = String::from_utf8_lossy(&canonical).into_owned();
-        let reparsed = Note::parse(&canonical).unwrap_or_else(|e| {
-            panic!("title {title:?} produced a document that will not parse: {e}\n{shown}")
-        });
+        let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
+        let reparsed = Note::parse(id(), written.as_bytes())
+            .unwrap_or_else(|e| panic!("{title:?}: emitted unparseable YAML: {e}\n{written}"));
 
         assert_eq!(
-            reparsed.meta.title.as_deref(),
+            reparsed.frontmatter.title.as_deref(),
             Some(title),
-            "title {title:?} did not survive the canonical writer\n{shown}"
+            "{title:?} did not survive:\n{written}"
         );
         assert_eq!(
-            reparsed.body, note.body,
-            "title {title:?} leaked into the body — it escaped its quoting\n{shown}"
+            reparsed.frontmatter.root, note.frontmatter.root,
+            "{title:?}: a hostile title disturbed a neighbouring key:\n{written}"
         );
-        assert_bytes_eq(
-            &reparsed.to_canonical_bytes(),
-            &canonical,
-            &format!("title {title:?}: canonical form is not a fixed point"),
-        );
-    }
-}
-
-/// Every known key, individually, at a hostile value. Catches a writer that hand-prints a key it
-/// should have escaped (the reason `title` goes through the emitter and the UUIDs and timestamps
-/// do not is a claim about *value domains*, and this is the test of that claim).
-#[test]
-fn probe_b_canonical_writer_emits_every_known_key_in_a_form_that_parses_back() {
-    let full = note_with(
-        "title: A title\nedited_at: 2026-08-27T09:00:00Z\nreply_to: 01a03d20-a54c-7977-a1f4-1a88b38855dd\nquote: 01a03d10-3f8a-7bb1-9c22-0e1d5a6b7c88\ntrashed_at: 2026-08-28T10:00:00Z\n",
-    );
-    let note = Note::parse(full.as_bytes()).expect("the all-keys note must parse");
-    let canonical = note.to_canonical_bytes();
-    let reparsed = Note::parse(&canonical).expect("canonical output must parse");
-
-    assert_eq!(reparsed.meta.id, note.meta.id);
-    assert_eq!(reparsed.meta.title, note.meta.title);
-    assert_eq!(reparsed.meta.created_at, note.meta.created_at);
-    assert_eq!(reparsed.meta.edited_at, note.meta.edited_at);
-    assert_eq!(reparsed.meta.reply_to, note.meta.reply_to);
-    assert_eq!(reparsed.meta.root, note.meta.root);
-    assert_eq!(reparsed.meta.quote, note.meta.quote);
-    assert_eq!(reparsed.meta.trashed_at, note.meta.trashed_at);
-
-    // And each key is on its own top-level line, in canonical order, exactly once.
-    let keys = top_level_keys(&frontmatter_block(&canonical));
-    assert_eq!(keys, CANONICAL_KEY_ORDER.to_vec());
-}
-
-/// A note written by an earlier version with a non-UTC offset, or with subsecond precision, must
-/// canonicalize to the one form §U2 fixes: RFC 3339, UTC, `Z`, second precision, quoted.
-///
-/// The last column is whether canonicalizing that spelling *changes the instant*. §U2 fixes second
-/// precision, so a subsecond input is truncated and the instant does move — that is the ruling, not
-/// a bug, and it is asserted here rather than left implicit because it is a one-way loss the first
-/// time stage 3 edits a note some other tool wrote with milliseconds.
-#[test]
-fn probe_b_canonical_timestamps_normalize_to_the_one_form_u2_fixes() {
-    let cases = [
-        ("2026-08-26T18:00:00+09:00", "2026-08-26T09:00:00Z", true),
-        ("2026-08-26T00:00:00-09:00", "2026-08-26T09:00:00Z", true),
-        ("2026-08-26T09:00:00.123456Z", "2026-08-26T09:00:00Z", false),
-        (
-            "2026-08-26T09:00:00.999999999Z",
-            "2026-08-26T09:00:00Z",
-            false,
-        ),
-        ("2026-08-26T09:00:00z", "2026-08-26T09:00:00Z", true),
-        ("2026-08-26t09:00:00Z", "2026-08-26T09:00:00Z", true),
-    ];
-    for (written, expected, instant_preserved) in cases {
-        let text = format!("---\nid: {ID}\ncreated_at: {written}\nroot: {ID}\n---\n\nBody.\n");
-        let note = Note::parse(text.as_bytes())
-            .unwrap_or_else(|e| panic!("`{written}` must be an acceptable RFC 3339 input: {e}"));
-
-        // The preserving path leaves the author's spelling alone...
         assert!(
-            String::from_utf8_lossy(&note.to_bytes()).contains(written),
-            "the preserving path must not rewrite `{written}`"
-        );
-
-        // ...and the canonical path normalizes it, quoted.
-        let canonical = note.to_canonical_bytes();
-        let block = frontmatter_block(&canonical);
-        let raw = top_level_value(&block, "created_at").expect("created_at survives");
-        let inner = unquote(&raw)
-            .unwrap_or_else(|| panic!("canonical timestamps must be quoted (U2), got {raw}"));
-        assert_eq!(
-            inner, expected,
-            "`{written}` canonicalized to `{inner}`, not to the form U2 fixes"
-        );
-
-        let reparsed = Note::parse(&canonical).unwrap();
-        assert_eq!(
-            reparsed.meta.created_at == note.meta.created_at,
-            instant_preserved,
-            "`{written}`: expected instant_preserved={instant_preserved}, but canonicalizing gave \
-             {} from {}",
-            reparsed.meta.created_at,
-            note.meta.created_at
-        );
-        // Whatever happened, it happens once: a second pass is stable.
-        assert_bytes_eq(
-            &reparsed.to_canonical_bytes(),
-            &canonical,
-            &format!("`{written}`: canonicalizing twice must equal canonicalizing once"),
+            written.ends_with("\nBody.\n"),
+            "{title:?}: the body moved:\n{written}"
         );
     }
 }
 
-/// Canonical output must be reachable repeatedly without drift, over the whole shared corpus, not
-/// just over the three fixtures `criteria.rs` names. Three rounds, because a writer can be a fixed
-/// point from round two while still being wrong on round one.
+/// Relations are emitted by hand rather than through the emitter, on the grounds that a
+/// hyphenated lowercase UUID is a plain scalar under every YAML schema. That is a claim about the
+/// value domain, so it is checked rather than assumed — including for the non-v7 and uppercase
+/// forms a hand-written vault can contain.
 #[test]
-fn probe_b_canonicalizing_every_fixture_three_times_reaches_the_same_bytes() {
-    for path in vault_note_paths() {
-        let name = path.display().to_string();
-        let note = Note::parse(&read_bytes(&path)).unwrap_or_else(|e| panic!("{name}: {e}"));
+fn probe_b_every_relation_value_emits_as_a_plain_scalar_that_parses_back() {
+    let ids = [
+        "01a03d21-7c11-7a02-b3de-9f0e21c4a771",
+        "9f1b3c2e-4d5a-4b6c-8d7e-9f0a1b2c3d4e",
+        "00000000-0000-7000-8000-000000000000",
+        "ffffffff-ffff-7fff-bfff-ffffffffffff",
+        "01A03D21-7C11-7A02-B3DE-9F0E21C4A771",
+    ];
+    for raw in ids {
+        let parsed: NoteId = raw.parse().unwrap();
+        let mut fm = Frontmatter::new();
+        fm.root = Some(parsed);
+        fm.reply_to = Some(parsed);
+        fm.quote = Some(parsed);
 
-        let first = note.to_canonical_bytes();
-        let second = Note::parse(&first)
-            .unwrap_or_else(|e| panic!("{name} round 2: {e}"))
-            .to_canonical_bytes();
-        let third = Note::parse(&second)
-            .unwrap_or_else(|e| panic!("{name} round 3: {e}"))
-            .to_canonical_bytes();
+        let block = fm.render(&schema());
+        for key in ["relation:root", "relation:reply_to", "relation:quote"] {
+            let value = top_level_value(&frontmatter_block(block.as_bytes()), key)
+                .unwrap_or_else(|| panic!("{raw}: {key} missing from\n{block}"));
+            assert_eq!(
+                value,
+                parsed.to_string(),
+                "{raw}: {key} was not emitted as a bare lowercase hyphenated uuid"
+            );
+            assert!(unquote(&value).is_none(), "{raw}: {key} was quoted");
+        }
+
+        let back = Frontmatter::parse_document(Path::new("m.md"), block.as_bytes())
+            .unwrap()
+            .0;
+        assert_eq!(back.root, Some(parsed), "{raw}");
+    }
+}
+
+/// Writing every fixture three times must reach the same bytes each time. A one-shot fixed-point
+/// check can be satisfied by a writer that oscillates with period two.
+#[test]
+fn probe_b_writing_every_fixture_three_times_reaches_the_same_bytes() {
+    for path in vault_note_paths() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+
+        let first = note.to_bytes(&schema());
+        let second = Note::parse(note.id, &first).unwrap().to_bytes(&schema());
+        let third = Note::parse(note.id, &second).unwrap().to_bytes(&schema());
 
         assert_bytes_eq(
             &second,
             &first,
-            &format!("{name}: round 2 differs from round 1"),
+            &format!("{name}: write 2 differs from write 1"),
         );
         assert_bytes_eq(
             &third,
             &second,
-            &format!("{name}: round 3 differs from round 2"),
+            &format!("{name}: write 3 differs from write 2"),
         );
     }
 }
 
-/// A CRLF note is what a Windows editor produces. The preserving path keeps it; the canonical path
-/// must at minimum produce something that still parses and still carries every field.
-#[test]
-fn probe_b_a_crlf_note_survives_both_write_paths() {
-    let text = format!(
-        "---\r\nid: {ID}\r\ntitle: CRLF\r\ncreated_at: 2026-08-26T09:00:00Z\r\nroot: {ID}\r\n---\r\n\r\nBody.\r\n"
-    );
-    let note = Note::parse(text.as_bytes()).expect("a CRLF note is a note");
-    assert_bytes_eq(
-        &note.to_bytes(),
-        text.as_bytes(),
-        "CRLF preserving round trip",
-    );
-
-    let canonical = note.to_canonical_bytes();
-    let reparsed = Note::parse(&canonical).expect("canonical output of a CRLF note must parse");
-    assert_eq!(reparsed.meta.title.as_deref(), Some("CRLF"));
-    assert_eq!(
-        reparsed.body, note.body,
-        "the CRLF body must survive verbatim"
-    );
-}
-
-// =============================================================================================
-// 2. The `forget_verbatim` footgun — characterization, not approval
-// =============================================================================================
-
-/// **KNOWN HAZARD, pinned deliberately.**
+/// A CRLF note must not come back with mixed terminators.
 ///
-/// `Frontmatter`'s known fields are `pub` and `to_bytes()` re-emits the retained block, so an edit
-/// through a public field followed by the *default-looking* write call silently discards the edit.
-/// Stage 1 never triggers it because stage 1 never edits; stage 3's `Workspace::edit` will.
+/// This is a stage-1b-specific hazard and it did not exist before: byte-replay reproduced a CRLF
+/// block whatever the writer would have chosen. Under one rendering path an LF-rendered `title:`
+/// sitting above a CRLF-preserved `summary:` is a file no editor would have produced, and a git
+/// diff nobody asked for.
+#[test]
+fn probe_b_a_crlf_note_stays_crlf_throughout() {
+    // Already in schema order, so a byte-identical round trip is a claim about the terminators
+    // and nothing else.
+    let crlf = "---\r\ntitle: A note\r\nrelation:root: 01a03d21-7c11-7a02-b3de-9f0e21c4a771\r\nsummary: |\r\n  preserved\r\n---\r\n\r\nBody.\r\n";
+    let note = Note::parse(id(), crlf.as_bytes()).expect("a CRLF note is a note");
+    assert_eq!(note.frontmatter.newline(), Newline::Crlf);
+    assert_bytes_eq(
+        &note.to_bytes(&schema()),
+        crlf.as_bytes(),
+        "CRLF round trip",
+    );
+
+    // Edited, the block is re-rendered — and must still be CRLF end to end.
+    let mut edited = note.clone();
+    edited.frontmatter.title = Some("Edited".into());
+    let written = String::from_utf8(edited.to_bytes(&schema())).unwrap();
+    let block_end = written.find("\n---").unwrap() + 4;
+    let block = &written[..block_end];
+    assert!(
+        !block.replace("\r\n", "").contains('\n'),
+        "a bare LF leaked into a CRLF block:\n{block:?}"
+    );
+    assert!(written.contains("title: Edited\r\n"), "{written:?}");
+    assert!(
+        written.contains("summary: |\r\n  preserved\r\n"),
+        "{written:?}"
+    );
+
+    // An LF note is not turned into a CRLF one by the same code path.
+    let lf = note_with("summary: x\n");
+    let lf_note = Note::parse(id(), lf.as_bytes()).unwrap();
+    assert_eq!(lf_note.frontmatter.newline(), Newline::Lf);
+    assert!(
+        !String::from_utf8(lf_note.to_bytes(&schema()))
+            .unwrap()
+            .contains('\r'),
+        "an LF note gained carriage returns"
+    );
+}
+
+// =============================================================================================
+// 2. The hazard stage 1b closed, kept as a regression
+// =============================================================================================
+
+/// Stage 1's finding F2: mutate a `pub` field, call `to_bytes()`, watch the edit vanish because the
+/// retained bytes were replayed instead.
 ///
-/// This test asserts the hazard exists, so that a fixer wave removing it (by dropping the verbatim
-/// block on mutation, by making the fields private behind setters, or by making `to_bytes` fall
-/// back to canonical when the typed fields disagree with the block) turns this red and is forced to
-/// say so rather than changing behavior silently.
+/// Stage 1b resolves it structurally rather than by guarding it — with one method that renders from
+/// typed state there is no second method that could ignore the fields. This is the regression that
+/// notices if a byte-retention path is ever reintroduced, and it is written against the *symptom*
+/// rather than the mechanism so that it keeps working whatever the mechanism becomes.
 #[test]
-fn probe_b_known_hazard_mutating_a_public_field_then_to_bytes_writes_the_pre_edit_bytes() {
-    let mut note = Note::parse(note_with("title: Original\n").as_bytes()).unwrap();
-    note.meta.title = Some("Edited".to_string());
+fn probe_b_every_public_field_of_frontmatter_reaches_the_bytes() {
+    let other: NoteId = "01a03d99-0000-7000-8000-000000000000".parse().unwrap();
 
-    let written = String::from_utf8_lossy(&note.to_bytes()).into_owned();
-    assert!(
-        written.contains("Original") && !written.contains("Edited"),
-        "the hazard has changed shape; re-read the fixer-wave note in verification.md.\n{written}"
-    );
+    for path in vault_note_paths() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let mut note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
 
-    // The edit is not merely unwritten — it is unrecoverable from the bytes.
-    let reread = Note::parse(&note.to_bytes()).unwrap();
-    assert_eq!(
-        reread.meta.title.as_deref(),
-        Some("Original"),
-        "a full write/read cycle through to_bytes() loses the edit entirely"
-    );
+        note.frontmatter.title = Some("mutated title".into());
+        note.frontmatter.root = Some(other);
+        note.frontmatter.reply_to = Some(other);
+        note.frontmatter.quote = Some(other);
 
-    // The two escape hatches both work, which is the whole of the current mitigation.
-    assert!(String::from_utf8_lossy(&note.to_canonical_bytes()).contains("Edited"));
-    note.meta.forget_verbatim();
-    assert!(String::from_utf8_lossy(&note.to_bytes()).contains("Edited"));
+        let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
+        let block = frontmatter_block(written.as_bytes());
+
+        assert_eq!(
+            top_level_value(&block, "title").as_deref(),
+            Some("mutated title"),
+            "{name}: the title edit did not reach the bytes:\n{written}"
+        );
+        for key in ["relation:root", "relation:reply_to", "relation:quote"] {
+            assert_eq!(
+                top_level_value(&block, key).as_deref(),
+                Some(other.to_string().as_str()),
+                "{name}: the {key} edit did not reach the bytes:\n{written}"
+            );
+        }
+    }
 }
 
-/// The same hazard reached through `unknown_mut()`, which is documented as *not* invalidating the
-/// verbatim block. A caller that adds an unknown key and writes preservingly loses it.
+/// The other half: clearing a field removes the key rather than writing it empty.
 #[test]
-fn probe_b_known_hazard_mutating_the_unknown_map_then_to_bytes_writes_the_pre_edit_bytes() {
-    let mut note = Note::parse(note_with("source: obsidian\n").as_bytes()).unwrap();
-    let before = note.to_bytes();
-
-    note.meta.unknown_mut().clear();
-    assert_eq!(
-        note.meta.unknown().len(),
-        0,
-        "precondition: the unknown map really was emptied"
-    );
-    assert_bytes_eq(
-        &note.to_bytes(),
-        &before,
-        "clearing every unknown key changed nothing on the preserving path — the same silent-loss \
-         shape as the title case, reached through the accessor whose doc comment says so",
-    );
-    assert!(
-        !String::from_utf8_lossy(&note.to_canonical_bytes()).contains("obsidian"),
-        "the canonical path does reflect the mutation"
-    );
-}
-
-// =============================================================================================
-// 3. `NoteMeta` with no verbatim block — the stage-2 shape
-// =============================================================================================
-
-/// `NoteMeta` is a type alias for `Frontmatter`, so a `NoteMeta` reconstructed from SQLite rows in
-/// stage 2 has `verbatim: None`. Nothing may panic, and both write paths must agree.
-#[test]
-fn probe_b_a_note_meta_with_no_verbatim_writes_canonically_on_both_paths() {
-    let parsed = Note::parse(note_with("title: T\nsource: obsidian\n").as_bytes()).unwrap();
-
-    let meta = NoteMeta::new(parsed.meta.id, parsed.meta.created_at, parsed.meta.root);
-    assert!(
-        !meta.has_verbatim(),
-        "a constructed NoteMeta has nothing retained"
-    );
-    assert_eq!(meta.verbatim(), None);
-
-    let note = Note::new(meta, "\nBody.\n".to_string());
-    assert_bytes_eq(
-        &note.to_bytes(),
-        &note.to_canonical_bytes(),
-        "with no verbatim block the preserving path must fall back to the canonical one, not to \
-         empty output and not to a panic",
-    );
-
-    let reparsed = Note::parse(&note.to_bytes()).expect("what it wrote must parse back");
-    assert_eq!(reparsed.meta.id, parsed.meta.id);
-    assert_eq!(reparsed.meta.created_at, parsed.meta.created_at);
-    assert_eq!(reparsed.meta.root, parsed.meta.root);
-    assert_eq!(reparsed.body, "\nBody.\n");
-}
-
-/// The optional known fields set after construction must all reach the file. A stage-2 rebuild that
-/// dropped `edited_at` on write would be invisible until a user noticed a wrong date.
-#[test]
-fn probe_b_a_note_meta_built_field_by_field_emits_every_field_it_was_given() {
-    let source = Note::parse(
-        note_with("title: T\nedited_at: 2026-08-27T09:00:00Z\nreply_to: 01a03d20-a54c-7977-a1f4-1a88b38855dd\nquote: 01a03d10-3f8a-7bb1-9c22-0e1d5a6b7c88\ntrashed_at: 2026-08-28T10:00:00Z\n")
-            .as_bytes(),
+fn probe_b_clearing_a_field_removes_its_key_rather_than_emptying_it() {
+    let mut note = Note::parse(
+        id(),
+        note_with(&format!("relation:reply_to: {ID}\nrelation:quote: {ID}\n")).as_bytes(),
     )
     .unwrap();
 
-    let mut meta = NoteMeta::new(source.meta.id, source.meta.created_at, source.meta.root);
-    meta.title = source.meta.title.clone();
-    meta.edited_at = source.meta.edited_at;
-    meta.reply_to = source.meta.reply_to;
-    meta.quote = source.meta.quote;
-    meta.trashed_at = source.meta.trashed_at;
+    note.frontmatter.title = None;
+    note.frontmatter.reply_to = None;
+    note.frontmatter.quote = None;
 
-    let note = Note::new(meta, "\nBody.\n".to_string());
-    let reparsed = Note::parse(&note.to_bytes()).expect("must parse");
-
-    assert_eq!(reparsed.meta.title, source.meta.title);
-    assert_eq!(reparsed.meta.edited_at, source.meta.edited_at);
-    assert_eq!(reparsed.meta.reply_to, source.meta.reply_to);
-    assert_eq!(reparsed.meta.quote, source.meta.quote);
-    assert_eq!(reparsed.meta.trashed_at, source.meta.trashed_at);
+    let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
     assert_eq!(
-        top_level_keys(&frontmatter_block(&note.to_bytes())),
-        CANONICAL_KEY_ORDER.to_vec()
-    );
-}
-
-/// **KNOWN HAZARD, pinned deliberately.** A `NoteMeta` rebuilt from typed fields carries no unknown
-/// keys, because the index will not have stored them. Writing such a note over the file it came
-/// from destroys every key this version does not know about — the exact failure `stage1.md` calls
-/// "the expensive one". Stage 1 cannot trigger it; stage 2/3 can, on the first `edit`.
-#[test]
-fn probe_b_known_hazard_a_note_meta_rebuilt_from_fields_carries_no_unknown_keys() {
-    let parsed = Note::parse(note_with("source: obsidian\ntags:\n  - a\n").as_bytes()).unwrap();
-    assert_eq!(
-        parsed.meta.unknown().len(),
-        2,
-        "precondition: the file really did carry two unknown keys"
-    );
-
-    let rebuilt = NoteMeta::new(parsed.meta.id, parsed.meta.created_at, parsed.meta.root);
-    assert_eq!(
-        rebuilt.unknown().len(),
-        0,
-        "the hazard has changed shape; re-read the fixer-wave note in verification.md"
-    );
-
-    let written =
-        String::from_utf8_lossy(&Note::new(rebuilt, "\nBody.\n".into()).to_bytes()).into_owned();
-    assert!(
-        !written.contains("obsidian") && !written.contains("tags"),
-        "confirming the loss is total, not partial\n{written}"
+        top_level_keys(&frontmatter_block(written.as_bytes())),
+        ["relation:root"],
+        "a cleared field must be absent, not empty:\n{written}"
     );
 }
 
 // =============================================================================================
-// 4. Cross-module consistency: two independent note-filename parsers
+// 3. The markdown crate, pinned where the parse path depends on it
 // =============================================================================================
 
-/// The set of filenames the two parsers must agree on.
+/// `stage1b.md` records that markdown-rs reports no frontmatter node for both "no fence" and
+/// "unterminated fence", and proposes recovering the distinction from the AST — an unterminated
+/// `---` arrives as a `ThematicBreak` at offset 0.
 ///
-/// `note::load` parses the filename with a private `filename_id` rather than calling
-/// `fs::parse_note_filename`; `note.rs` says the duplication is deliberate and adds "**Keep the two
-/// in step until** [stage 2 unifies them]". This is the test of that sentence.
+/// That inference is unsound, and this is the probe that shows why: an *indented* `  ---`, which
+/// is not a fence at all, produces the same shape. Any implementation that classified from the AST
+/// would report an indented fence as unterminated. The two must still come back as the two errors
+/// §U10 asks for.
+#[test]
+fn probe_b_an_indented_fence_is_not_reported_as_an_unterminated_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let write = |name: &str, text: &str| {
+        let path = tmp.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        Note::load(&path).expect_err(&format!("{name} must not load"))
+    };
+
+    let unterminated = write(&format!("{ID}.md"), "---\ntitle: a\n\nBody.\n");
+    let indented = write(
+        "01a03d99-0000-7000-8000-000000000000.md",
+        "  ---\ntitle: a\n  ---\n\nBody.\n",
+    );
+
+    assert!(
+        matches!(unterminated, Error::UnterminatedFrontmatter { .. }),
+        "got {unterminated:?}"
+    );
+    assert!(
+        matches!(indented, Error::MissingFrontmatterFence { .. }),
+        "an indented `---` is not a fence, so this file has none — got {indented:?}"
+    );
+}
+
+/// The other markdown-rs behaviour the parse path works around: the reported span stops before the
+/// closing fence's line terminator.
+///
+/// Getting that off by one is invisible on a note with a blank line after its block and fatal on
+/// one without. Both shapes are checked, plus the shape where the file ends inside the block.
+#[test]
+fn probe_b_the_body_begins_exactly_after_the_closing_fence() {
+    let cases: [(&str, &str); 5] = [
+        (
+            "blank line after the fence",
+            "---\ntitle: a\n---\n\nBody.\n",
+        ),
+        ("body on the next line", "---\ntitle: a\n---\nBody.\n"),
+        ("no final newline", "---\ntitle: a\n---\nBody."),
+        ("empty body", "---\ntitle: a\n---\n"),
+        (
+            "crlf, body on the next line",
+            "---\r\ntitle: a\r\n---\r\nBody.\r\n",
+        ),
+    ];
+    for (name, doc) in cases {
+        let note = Note::parse(id(), doc.as_bytes()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let expected = &doc[doc.find("---\n").map_or(0, |_| 0)..];
+        let _ = expected;
+
+        // Whatever the body is, it must be the tail of the file, and the block must be the head.
+        assert!(
+            doc.ends_with(&note.body),
+            "{name}: the body {:?} is not a suffix of the file",
+            note.body
+        );
+        let head = &doc[..doc.len() - note.body.len()];
+        assert!(
+            head.trim_end_matches(['\r', '\n']).ends_with("---"),
+            "{name}: the block ends at {head:?}, not at a fence"
+        );
+        assert!(
+            !note.body.starts_with("---"),
+            "{name}: the closing fence leaked into the body"
+        );
+        assert_bytes_eq(
+            &note.to_bytes(&schema()),
+            doc.as_bytes(),
+            &format!("{name}: round trip"),
+        );
+    }
+}
+
+/// A UTF-8 BOM is what Windows Notepad and several sync clients write, and a hand-written vault is
+/// a supported way to make notes.
+///
+/// markdown-rs reports the BOM as a three-byte prefix *outside* the frontmatter span rather than
+/// silently consuming it, which is what makes the three-slice partition hold. The BOM does not
+/// survive a write: it is a lexical choice, and the write path normalizes those. What must not
+/// happen is the fence going unrecognized.
+#[test]
+fn probe_b_a_utf8_bom_before_the_fence_does_not_hide_the_fence() {
+    const BOM: &str = "\u{FEFF}";
+    for (name, doc) in [
+        ("lf", format!("{BOM}{}", note_with(""))),
+        (
+            "crlf",
+            format!("{BOM}{}", note_with("").replace('\n', "\r\n")),
+        ),
+    ] {
+        let note = Note::parse(id(), doc.as_bytes())
+            .unwrap_or_else(|e| panic!("{name}: a BOM must not hide the fence: {e}"));
+        assert_eq!(note.frontmatter.title.as_deref(), Some("A note"), "{name}");
+        assert!(
+            !note.body.contains(BOM),
+            "{name}: the BOM leaked into the body"
+        );
+    }
+}
+
+/// The tolerance is for *one leading* BOM and nothing else. A BOM after the fence, or in the body,
+/// is ordinary content.
+#[test]
+fn probe_b_the_bom_tolerance_does_not_leak_past_the_opening_fence() {
+    const BOM: &str = "\u{FEFF}";
+
+    // Two BOMs: the second is not stripped, so the first line is not a fence.
+    let err = Note::parse(id(), format!("{BOM}{BOM}{}", note_with("")).as_bytes())
+        .expect_err("only one leading BOM is tolerated");
+    assert!(
+        matches!(err, Error::MissingFrontmatterFence { .. }),
+        "{err:?}"
+    );
+
+    // A BOM inside the body is content, and must come back untouched.
+    let doc = format!("---\ntitle: A note\n---\n\n{BOM}Body.\n");
+    let note = Note::parse(id(), doc.as_bytes()).unwrap();
+    assert!(
+        note.body.contains(BOM),
+        "the BOM was stripped from the body"
+    );
+    assert_bytes_eq(
+        &note.to_bytes(&schema()),
+        doc.as_bytes(),
+        "body BOM round trip",
+    );
+}
+
+// =============================================================================================
+// 4. Cross-module consistency: the two note-filename parsers
+// =============================================================================================
+
+/// The set of filenames `Note::load` and `fs::parse_note_filename` must agree on.
+///
+/// Stage 1 found them disagreeing (finding F1), which mattered because a `*.md` file enumeration
+/// returns, the scanner rejects as not-a-note, and `Note::load` happily loads is two components
+/// disagreeing about whether a file is a note. Stage 1b makes the filename the *identity*, so the
+/// same disagreement would now be about which note a file is.
 fn filename_cases() -> Vec<(String, &'static str)> {
     vec![
         (format!("{ID}.md"), "the bare form"),
@@ -533,10 +519,9 @@ fn filename_cases() -> Vec<(String, &'static str)> {
 }
 
 #[test]
-fn defect_note_load_and_fs_parse_note_filename_accept_the_same_filenames() {
+fn probe_b_note_load_and_fs_parse_note_filename_accept_the_same_filenames() {
     let tmp = tempfile::tempdir().unwrap();
-    let body =
-        format!("---\nid: {ID}\ncreated_at: 2026-08-26T09:00:00Z\nroot: {ID}\n---\n\nBody.\n");
+    let body = note_with("");
 
     let mut divergent: Vec<String> = Vec::new();
     for (name, why) in filename_cases() {
@@ -544,8 +529,6 @@ fn defect_note_load_and_fs_parse_note_filename_accept_the_same_filenames() {
 
         let path = tmp.path().join(&name);
         std::fs::write(&path, &body).unwrap();
-        // `Note::load` rejects a filename by returning InvalidNoteFilename; every other failure
-        // here would be about the *contents*, which are identical for every case.
         let load_accepts = match Note::load(&path) {
             Ok(_) => true,
             Err(Error::InvalidNoteFilename { .. }) => false,
@@ -562,184 +545,169 @@ fn defect_note_load_and_fs_parse_note_filename_accept_the_same_filenames() {
 
     assert!(
         divergent.is_empty(),
-        "`fs::parse_note_filename` and `note::load`'s private `filename_id` disagree about what a \
-         note filename is. `note.rs` says the duplication is deliberate and that the two must be \
-         kept in step; they are not. A `*.md` file that enumeration returns, the scanner rejects as \
-         not-a-note, and `Note::load` happily loads is two components disagreeing about whether a \
-         file is a note.\n{}",
+        "the two note-filename parsers disagree. A `*.md` file that enumeration returns, the \
+         scanner rejects as not-a-note, and `Note::load` happily loads is two components \
+         disagreeing about whether a file is a note — and, from stage 1b, about which note it \
+         is.\n{}",
         divergent.join("\n")
     );
+}
+
+/// Every filename `note_filename` builds must be one both parsers accept. Creation and
+/// enumeration meeting in the middle is what stops a note jot just wrote from being invisible.
+#[test]
+fn probe_b_every_filename_creation_can_produce_is_one_enumeration_accepts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("v");
+    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+
+    let titles = [
+        None,
+        Some(""),
+        Some("   "),
+        Some("!!!"),
+        Some("한국어 제목"),
+        Some("A Normal Title"),
+        Some("...leading and trailing..."),
+    ];
+    let mut expected = 0;
+    for (n, title) in titles.into_iter().enumerate() {
+        for slug in [jot_fs::FilenameSlug::None, jot_fs::FilenameSlug::FromTitle] {
+            let note_id = NoteId::new();
+            let name = jot_fs::note_filename(note_id.as_uuid(), title, slug);
+            let target = root.join(&name);
+            let text = format!("---\nrelation:root: {note_id}\n---\n\n{n}\n");
+            jot_fs::atomic_write(&target, &ws.tmp_dir(), text.as_bytes()).unwrap();
+            expected += 1;
+
+            assert_eq!(
+                jot_fs::parse_note_filename(&target).unwrap(),
+                note_id.as_uuid(),
+                "{name} does not parse back"
+            );
+            assert_eq!(Note::load(&target).unwrap().id, note_id, "{name}");
+            assert_eq!(
+                ws.note_path(note_id).unwrap().as_deref(),
+                Some(target.as_path()),
+                "{name} is not findable by its id"
+            );
+        }
+    }
+    assert_eq!(jot_fs::live_note_paths(&root).unwrap().len(), expected);
 }
 
 // =============================================================================================
 // 5. Inputs nobody wrote a criterion for
 // =============================================================================================
 
-/// A UTF-8 BOM is what Windows Notepad and several sync clients write.
+/// Two files in one vault whose *filenames* carry the same UUID — one bare, one slugged. Under
+/// stage 1b the filename is the identity, so these are two files claiming to be one note.
 ///
-/// **This probe used to pin the opposite.** Phase B reported the BOM as finding F5: the file's first
-/// line is `---` in every editor the user owns, and the reader answered "expected a `---` fence on
-/// the first line". The behavior was defensible and the message was not, so it was pinned as a
-/// characterization rather than asserted as correct. A fixer round implemented F5, the implementer
-/// correctly refused to edit this crate and appealed, and the appeal was granted. What follows
-/// asserts the new truth.
-///
-/// The shape that matters is *where* the tolerance lives. `split_fences` strips at most one leading
-/// BOM **for the fence test only**; `verbatim` still begins at byte 0. §U1's byte retention
-/// therefore gets no exception — the preserving path re-emits the BOM along with everything else —
-/// and the canonical path normalizes it away, in the same category as anchors being expanded and
-/// `!!` tags being resolved.
+/// Nothing in stage 1b detects it; pinning that here so stage 2's scanner inherits the problem
+/// rather than discovering it. `note_path` returning the first match is a documented consequence
+/// of the linear scan, not a decision.
 #[test]
-fn probe_b_a_utf8_bom_before_the_fence_parses_and_survives_the_preserving_path() {
-    const BOM: &str = "\u{FEFF}";
-    let text = format!("{BOM}{}", note_with("title: Notepad wrote this\n"));
-
-    let note = Note::parse(text.as_bytes())
-        .expect("a BOM before the opening fence must not hide the fence");
-    assert_eq!(
-        note.meta.id.to_string(),
-        ID,
-        "the BOM must not reach the YAML parser"
-    );
-    assert_eq!(note.meta.title.as_deref(), Some("Notepad wrote this"));
-    assert_eq!(
-        note.body, "\nBody.\n",
-        "the BOM belongs to the retained frontmatter block, not to the body"
-    );
-
-    // The load-bearing half. If this ever fails, tolerating the BOM has cost a byte, and U1 is no
-    // longer a guarantee but a default.
-    assert_bytes_eq(
-        &note.to_bytes(),
-        text.as_bytes(),
-        "the preserving path must reproduce a BOM'd note byte-for-byte, BOM included — a note jot \
-         has only read must come back off disk exactly as it went on",
-    );
-    assert!(
-        note.meta.verbatim().is_some_and(|v| v.starts_with(BOM)),
-        "the BOM must be retained *inside* the verbatim block. Stripping it there and re-adding it \
-         on write would round-trip this note and lose the BOM on any note that has none"
-    );
-
-    // And the canonical path drops it, deliberately and only once.
-    let canonical = note.to_canonical_bytes();
-    assert!(
-        !String::from_utf8_lossy(&canonical).contains(BOM),
-        "the canonical path must normalize the BOM away, like every other lexical choice it \
-         normalizes"
-    );
-    let reparsed = Note::parse(&canonical).expect("canonical output must parse");
-    assert_eq!(reparsed.meta.id, note.meta.id);
-    assert_eq!(reparsed.meta.title, note.meta.title);
-    assert_eq!(reparsed.body, note.body);
-    assert_bytes_eq(
-        &reparsed.to_canonical_bytes(),
-        &canonical,
-        "dropping the BOM must happen once, not on every write",
-    );
-
-    // The route this actually arrives by: an editor saved the file and the scanner loads the path.
+fn probe_b_two_files_claiming_one_identity_both_enumerate_without_complaint() {
     let tmp = tempfile::tempdir().unwrap();
-    let path = tmp.path().join(format!("{ID}.md"));
-    std::fs::write(&path, &text).unwrap();
-    let loaded =
-        Note::load(&path).expect("a BOM'd note on disk must load, not report a missing fence");
-    assert_eq!(loaded.meta.id.to_string(), ID);
-    assert_bytes_eq(
-        &loaded.to_bytes(),
-        text.as_bytes(),
-        "load -> to_bytes is byte-identical for a BOM'd note too",
-    );
-}
+    let root = tmp.path().join("v");
+    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
 
-/// The other half of F5, and the half that keeps the tolerance from becoming a hole: it is exactly
-/// **one** BOM, exactly **before the opening fence**, and nowhere else. A reader that skipped BOMs
-/// generally would start finding fences inside bodies.
-#[test]
-fn probe_b_the_bom_tolerance_does_not_leak_past_the_opening_fence() {
-    const BOM: &str = "\u{FEFF}";
+    let body = note_with("");
+    std::fs::write(root.join(format!("{ID}.md")), &body).unwrap();
+    std::fs::write(root.join(format!("{ID}_copy.md")), &body).unwrap();
 
-    for (why, text) in [
-        ("two BOMs", format!("{BOM}{BOM}{}", note_with(""))),
-        (
-            "a BOM in front of something that is not a fence",
-            format!("{BOM}id: a\n---\n"),
-        ),
-    ] {
-        let err =
-            Note::parse(text.as_bytes()).expect_err(&format!("{why} must not parse as a note"));
-        assert!(
-            matches!(err, Error::MissingFrontmatterFence { .. }),
-            "{why}: got {err:?}"
-        );
-    }
-
-    // A BOM in front of the *closing* fence is content, so the block never closes.
-    let unterminated =
-        format!("---\nid: {ID}\ncreated_at: 2026-08-26T09:00:00Z\nroot: {ID}\n{BOM}---\n");
-    let err = Note::parse(unterminated.as_bytes())
-        .expect_err("a BOM'd closing fence is not a closing fence");
-    assert!(
-        matches!(err, Error::UnterminatedFrontmatter { .. }),
-        "got {err:?}"
-    );
-
-    // A BOM inside the body is an ordinary character and rides along untouched.
-    let in_body =
-        format!("---\nid: {ID}\ncreated_at: 2026-08-26T09:00:00Z\nroot: {ID}\n---\n\n{BOM}body\n");
-    let note = Note::parse(in_body.as_bytes()).expect("a BOM in the body is just a character");
-    assert!(note.body.contains(BOM), "the body keeps it verbatim");
-    assert_bytes_eq(&note.to_bytes(), in_body.as_bytes(), "body-BOM round trip");
-
-    // BOM + CRLF together, which is what a Windows editor actually emits.
-    let crlf = format!(
-        "{BOM}---\r\nid: {ID}\r\ncreated_at: 2026-08-26T09:00:00Z\r\nroot: {ID}\r\n---\r\n\r\nx\r\n"
-    );
-    let note = Note::parse(crlf.as_bytes()).expect("BOM + CRLF is the real-world Notepad output");
-    assert_eq!(note.meta.id.to_string(), ID);
-    assert_bytes_eq(&note.to_bytes(), crlf.as_bytes(), "BOM + CRLF round trip");
-}
-
-/// Two files in one vault whose frontmatter carries the same `id`. Nothing in stage 1 detects it;
-/// pinning that here so stage 2's scanner knows it inherits the problem rather than discovering it.
-#[test]
-fn probe_b_two_notes_sharing_one_frontmatter_id_both_load_without_complaint() {
-    let tmp = tempfile::tempdir().unwrap();
-    let body = format!("---\nid: {ID}\ncreated_at: 2026-08-26T09:00:00Z\nroot: {ID}\n---\n\nx\n");
-    std::fs::write(tmp.path().join(format!("{ID}.md")), &body).unwrap();
-    std::fs::write(tmp.path().join(format!("{ID}_copy.md")), &body).unwrap();
-
-    let live = jot_fs::live_note_paths(tmp.path()).unwrap();
+    let live = jot_fs::live_note_paths(&root).unwrap();
     assert_eq!(live.len(), 2, "both files are enumerated");
     for path in &live {
-        let note = Note::load(path).expect("each file is individually valid");
-        assert_eq!(note.meta.id.to_string(), ID);
+        assert_eq!(Note::load(path).unwrap().id, id());
     }
+    assert!(
+        ws.note_path(id()).unwrap().is_some(),
+        "one of them answers to the id, and which one is unspecified"
+    );
 }
 
-/// A note that is its own parent, and a note whose `root` points nowhere. `overview.md`: dangling
-/// references are a designed state, and stage 1 does no graph validation. Pinned so a later stage
-/// adding validation does it deliberately.
+/// A note that is its own parent, and a note whose `relation:root` points nowhere.
+/// `overview.md`: dangling references are a designed state.
+///
+/// The one thing that is *not* tolerated is a reply **cycle**, and only because recomputing a root
+/// has to walk the chain. Parsing such a note is still fine; the cycle is reported when something
+/// asks for the root.
 #[test]
-fn probe_b_self_referential_and_dangling_links_load_without_complaint() {
+fn probe_b_self_referential_and_dangling_links_parse_without_complaint() {
     let other = "01a03d99-0000-7000-8000-000000000000";
     for extra in [
-        format!("reply_to: {ID}\n"),
-        format!("quote: {ID}\n"),
-        format!("reply_to: {other}\n"),
+        format!("relation:reply_to: {ID}\n"),
+        format!("relation:quote: {ID}\n"),
+        format!("relation:reply_to: {other}\n"),
+        format!("relation:quote: {other}\n"),
     ] {
-        let note =
-            Note::parse(note_with(&extra).as_bytes()).unwrap_or_else(|e| panic!("{extra:?}: {e}"));
-        assert_eq!(note.meta.id.to_string(), ID);
+        let note = Note::parse(id(), note_with(&extra).as_bytes())
+            .unwrap_or_else(|e| panic!("{extra:?}: {e}"));
+        assert_eq!(note.id, id());
     }
 
-    // `root` pointing at a note that does not exist.
-    let text =
-        format!("---\nid: {ID}\ncreated_at: 2026-08-26T09:00:00Z\nroot: {other}\n---\n\nx\n");
-    let note = Note::parse(text.as_bytes()).expect("a dangling root is a designed state");
-    assert_eq!(note.meta.root.to_string(), other);
+    // A dangling root parses, and survives a write untouched.
+    let text = format!("---\nrelation:root: {other}\n---\n\nx\n");
+    let note = Note::parse(id(), text.as_bytes()).expect("a dangling root is a designed state");
+    assert_eq!(note.frontmatter.root.unwrap().to_string(), other);
+    assert_bytes_eq(&note.to_bytes(&schema()), text.as_bytes(), "dangling root");
+
+    // A cycle is corruption, and is reported rather than walked forever.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("v");
+    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    std::fs::write(
+        root.join(format!("{ID}.md")),
+        format!("---\nrelation:reply_to: {ID}\n---\n"),
+    )
+    .unwrap();
+    assert!(matches!(
+        ws.open_note(id()).unwrap_err(),
+        Error::ReplyCycle { .. }
+    ));
 }
 
+/// Opening every note in the corpus is idempotent. A repair that is not a fixed point rewrites the
+/// vault on every open, which in a git-tracked vault is a diff a day forever.
+#[test]
+fn probe_b_opening_every_note_twice_writes_at_most_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("vault");
+    copy_tree(&fixture_vault(), &root);
+    let ws = Workspace::open(&root).unwrap();
+
+    for path in jot_fs::live_note_paths(&root).unwrap() {
+        let note_id = NoteId::from(jot_fs::parse_note_filename(&path).unwrap());
+        let first = ws.open_note(note_id).unwrap().unwrap();
+        let after_first = std::fs::read(&first.path).unwrap();
+
+        let second = ws.open_note(note_id).unwrap().unwrap();
+        assert!(
+            !second.repaired,
+            "{} is rewritten on every open",
+            path.display()
+        );
+        assert_bytes_eq(
+            &std::fs::read(&second.path).unwrap(),
+            &after_first,
+            &format!("{}: a second open changed the file", path.display()),
+        );
+    }
+}
+
+fn copy_tree(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), &to).unwrap();
+        }
+    }
+}
 /// A vault with nothing in it at all: `init`, then enumerate, then `discover` from the root. The
 /// empty case is where an off-by-one in a directory walk hides.
 #[test]
@@ -796,16 +764,61 @@ fn probe_b_atomic_write_fails_cleanly_when_the_target_is_unwritable() {
     );
 }
 
-/// `id` and `root` are required to be UUIDs, not required to be v7. A hand-written or imported
-/// vault using v4 must still load — and `short()` must still work on one.
+/// A note filename must be a UUID; it is not required to be v7. A hand-written or imported vault
+/// using v4 must still load — and `short()` must still work on one.
+///
+/// What such a note does *not* have is a creation time. Stage 1b derives `created_at` from the
+/// identity, so an identity that encodes no time genuinely has none, and `None` is the honest
+/// answer rather than a filesystem mtime dressed up as one.
 #[test]
-fn probe_b_a_non_v7_uuid_is_still_a_valid_note_id() {
+fn probe_b_a_non_v7_uuid_is_a_valid_note_id_with_no_creation_time() {
     let v4 = "9f1b3c2e-4d5a-4b6c-8d7e-9f0a1b2c3d4e";
-    let text = format!("---\nid: {v4}\ncreated_at: 2026-08-26T09:00:00Z\nroot: {v4}\n---\n\nx\n");
-    let note = Note::parse(text.as_bytes()).expect("a v4 uuid is a uuid");
-    assert_eq!(note.meta.id.to_string(), v4);
-    assert_eq!(note.meta.id.short(), "9f1b3c2e");
-    assert_eq!(note.meta.id.short().len(), 8);
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join(format!("{v4}.md"));
+    std::fs::write(&path, format!("---\nrelation:root: {v4}\n---\n\nx\n")).unwrap();
+
+    let note = Note::load(&path).expect("a v4 uuid is a uuid");
+    assert_eq!(note.id.to_string(), v4);
+    assert_eq!(note.id.short(), "9f1b3c2e");
+    assert_eq!(note.id.short().len(), 8);
+    assert_eq!(
+        note.created_at(),
+        None,
+        "a v4 id encodes no timestamp, so there is no creation time to report"
+    );
+    assert_eq!(note.meta().created_at, None);
+
+    // It still writes, and still round-trips.
+    assert_bytes_eq(
+        &note.to_bytes(&schema()),
+        &read_bytes(&path),
+        "a v4-named note round trip",
+    );
+}
+
+/// Every note in the corpus is v7-named, so every one of them has a recoverable creation time —
+/// which is what makes dropping `created_at` from the format lossless for a vault jot created.
+#[test]
+fn probe_b_every_fixture_recovers_a_creation_time_from_its_filename() {
+    for path in vault_note_paths() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let created = note
+            .created_at()
+            .unwrap_or_else(|| panic!("{name}: no creation time recoverable from the filename"));
+
+        // Sanity: the corpus was minted in 2026, not at the epoch and not in the far future.
+        assert!(
+            created.to_rfc3339().starts_with("2026-"),
+            "{name}: recovered {created}, which is not when the corpus was written"
+        );
+        // And nothing in the block claims to carry it.
+        let keys = top_level_keys(&frontmatter_block(&read_bytes(&path)));
+        assert!(
+            !keys.iter().any(|k| k == "created_at"),
+            "{name}: still stores created_at"
+        );
+    }
 }
 
 /// `NoteId::short()` on the fixture corpus: eight characters, and a real prefix of the display
@@ -820,13 +833,13 @@ fn probe_b_a_non_v7_uuid_is_still_a_valid_note_id() {
 fn probe_b_short_is_a_real_prefix_and_the_corpus_contains_a_collision() {
     let mut shorts = Vec::new();
     for path in vault_note_paths() {
-        let note = Note::parse(&read_bytes(&path)).unwrap();
-        let short = note.meta.id.short();
+        let note = Note::load(&path).unwrap();
+        let short = note.id.short();
         assert_eq!(short.len(), 8, "{path:?}");
         assert!(
-            note.meta.id.to_string().starts_with(&short),
+            note.id.to_string().starts_with(&short),
             "short() must be a prefix of the display form for {}",
-            note.meta.id
+            note.id
         );
         shorts.push(short);
     }

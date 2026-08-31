@@ -1,8 +1,12 @@
-#![cfg(feature = "stage1")]
-//! Probes beyond the six named criteria. The Acceptance list is a floor; these cover behavior
-//! `stage1.md`'s Work section commits to, plus the inputs an implementer would not have thought
-//! of. Every one of these is still a documented obligation somewhere — nothing here is invented
-//! scope.
+#![cfg(feature = "stage1b")]
+//! Probes beyond the named criteria. The Acceptance list is a floor; these cover behavior
+//! `stage1.md` and `stage1b.md` commit to in prose, plus the inputs an implementer would not have
+//! thought of. Every one of these is still a documented obligation somewhere — nothing here is
+//! invented scope.
+//!
+//! Rewritten for stage 1b where the format moved. The registry, enumeration, atomic-write,
+//! `init`/`open`/`discover` and filename-parsing sections are untouched: none of them ever knew
+//! what was inside a note, which is the point of `fs` not depending on `note`.
 //!
 //! API names are pinned by `dispatch.md` "API contract, pinned at the wave 2/3 boundary"; the ones
 //! used only here:
@@ -15,6 +19,7 @@
 
 use jot_acceptance::*;
 use jot_core::error::Error;
+use jot_core::frontmatter::FrontmatterSchema;
 use jot_core::fs as jot_fs;
 use jot_core::note::{Note, NoteId};
 use jot_core::registry::{self, Registry};
@@ -26,9 +31,9 @@ use std::path::{Path, PathBuf};
 // Rejecting gracefully: "each produces a distinct error naming the path" (stage1.md, Frontmatter)
 // ---------------------------------------------------------------------------------------------
 //
-// The four invalid specimens are copied into a temp dir under a filename whose UUID matches their
-// own frontmatter id (where they have one), so that a filename/frontmatter mismatch cannot be the
-// thing that fires and mask the error actually under test.
+// Each invalid specimen is copied into a temp dir under a well-formed note filename, so that a
+// filename complaint cannot fire first and mask the error actually under test. Stage 1b parses the
+// filename *before* the bytes, which makes that ordering matter more than it did in stage 1.
 
 fn staged_invalid(fixture: &str, uuid: &str) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
@@ -43,7 +48,8 @@ const UNTERMINATED: (&str, &str) = (
     "01a03d53-ae70-7b52-a1c0-2c9c4c1c6a2e",
 );
 const MALFORMED: (&str, &str) = ("malformed_yaml.md", "01a03d54-3ef8-750b-8dbb-3e6c2f4d5b9a");
-const MISSING_ID: (&str, &str) = ("missing_id.md", "01a03d54-cf80-7c22-9d17-4f2a5b6c7d8e");
+const NOT_A_MAPPING: (&str, &str) = ("not_a_mapping.md", "01a03d54-cf80-7c22-9d17-4f2a5b6c7d8e");
+const UNPRESERVABLE: (&str, &str) = ("unpreservable.md", "01a03d54-e130-7f83-b45a-6d1e2f3a4b5c");
 
 fn load_err(spec: (&str, &str)) -> (tempfile::TempDir, PathBuf, Error) {
     let (tmp, path) = staged_invalid(spec.0, spec.1);
@@ -101,21 +107,44 @@ fn probe_a_note_with_malformed_yaml_is_a_distinct_error_naming_the_path() {
 }
 
 #[test]
-fn probe_a_note_missing_id_is_a_distinct_error_naming_the_path() {
-    let (_tmp, path, err) = load_err(MISSING_ID);
+fn probe_a_block_that_is_not_a_mapping_is_a_distinct_error_naming_the_path() {
+    let (_tmp, path, err) = load_err(NOT_A_MAPPING);
     assert!(
-        matches!(err, Error::MissingId { .. }),
-        "expected a missing-id error, got {err:?}"
+        matches!(err, Error::FrontmatterNotAMapping { .. }),
+        "a sequence is well-formed YAML and is still not frontmatter, got {err:?}"
     );
     assert_names_the_path(&err, &path);
 }
 
+/// The guard that replaced stage 1's required-key errors: a block whose top-level keys the slicer
+/// and the YAML parser disagree about cannot have its unknown keys carried through a write, so it
+/// is refused rather than mangled.
 #[test]
-fn probe_the_four_invalid_fixtures_produce_four_mutually_distinct_errors() {
-    // Deliberately name-free: this survives T2.1 renaming the variants, and it is the assertion
-    // that actually encodes "distinct". A taxonomy that collapses three of these into one variant
-    // fails here even if every test above was updated to match.
-    let specs = [NO_FENCE, UNTERMINATED, MALFORMED, MISSING_ID];
+fn probe_a_block_that_cannot_be_preserved_is_refused_rather_than_mangled() {
+    let (_tmp, path, err) = load_err(UNPRESERVABLE);
+    assert!(
+        matches!(err, Error::UnpreservableFrontmatter { .. }),
+        "expected a refusal, got {err:?}"
+    );
+    assert_names_the_path(&err, &path);
+    assert!(
+        !err.to_string().to_lowercase().contains("parse error"),
+        "the message must say what it could not preserve: {err}"
+    );
+}
+
+#[test]
+fn probe_the_five_invalid_fixtures_produce_five_mutually_distinct_errors() {
+    // Deliberately name-free: this is the assertion that actually encodes "distinct". A taxonomy
+    // that collapses three of these into one variant fails here even if every test above was
+    // updated to match.
+    let specs = [
+        NO_FENCE,
+        UNTERMINATED,
+        MALFORMED,
+        NOT_A_MAPPING,
+        UNPRESERVABLE,
+    ];
     let mut seen: Vec<(&str, Error)> = Vec::new();
     let mut _keep = Vec::new();
     for spec in specs {
@@ -138,88 +167,66 @@ fn probe_the_four_invalid_fixtures_produce_four_mutually_distinct_errors() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Required fields: dispatch.md §U10 makes all three of id / created_at / root hard errors, each
-// with its own variant. `stage1.md`'s reject list only mentions `id`, so these two are exactly
-// the gap the ruling closed and the place an implementer would under-deliver.
+// There are no required frontmatter keys any more.
+//
+// Stage 1 made `id`, `created_at` and `root` hard errors when absent. Stage 1b removes all three
+// from the format: two are derived from the filename and one is repaired on open. The obligation
+// that replaced them is the opposite shape — a note with *nothing* in its block is a legal note,
+// and every state the old errors described is now something the vault represents.
 // ---------------------------------------------------------------------------------------------
 
-fn note_missing(key: &str) -> String {
-    let all = [
-        ("id", "01a03d21-7c11-7a02-b3de-9f0e21c4a771"),
-        ("created_at", "2026-08-26T09:00:00Z"),
-        ("root", "01a03d21-7c11-7a02-b3de-9f0e21c4a771"),
-    ];
-    let mut s = String::from("---\n");
-    for (k, v) in all {
-        if k != key {
-            s.push_str(&format!("{k}: {v}\n"));
-        }
-    }
-    s.push_str("---\n\nBody.\n");
-    s
-}
-
-fn load_synthesized(text: &str, filename: &str) -> (tempfile::TempDir, PathBuf, Error) {
+fn load_synthesized(
+    text: &str,
+    filename: &str,
+) -> (tempfile::TempDir, PathBuf, Result<Note, Error>) {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(filename);
     std::fs::write(&path, text).unwrap();
-    match Note::load(&path) {
-        Ok(_) => panic!("expected a hard error for:\n{text}"),
-        Err(e) => (tmp, path, e),
-    }
+    let result = Note::load(&path);
+    (tmp, path, result)
 }
 
-#[test]
-fn probe_a_note_missing_created_at_is_a_hard_error_with_its_own_variant() {
-    let (_tmp, path, err) = load_synthesized(
-        &note_missing("created_at"),
-        "01a03d21-7c11-7a02-b3de-9f0e21c4a771.md",
-    );
-    assert!(
-        matches!(err, Error::MissingCreatedAt { .. }),
-        "created_at is one of the three required keys and dispatch.md U10 makes it a hard error \
-         with a distinct variant, got {err:?}"
-    );
-    assert_names_the_path(&err, &path);
-}
+const SOME_ID: &str = "01a03d21-7c11-7a02-b3de-9f0e21c4a771";
 
 #[test]
-fn probe_a_note_missing_root_is_a_hard_error_with_its_own_variant() {
-    let (_tmp, path, err) = load_synthesized(
-        &note_missing("root"),
-        "01a03d21-7c11-7a02-b3de-9f0e21c4a771.md",
-    );
-    assert!(
-        matches!(err, Error::MissingRoot { .. }),
-        "root is required even for a top-level note; dispatch.md U10 accepts that a hand-written \
-         note without it cannot be loaded, got {err:?}"
-    );
-    assert_names_the_path(&err, &path);
-}
-
-#[test]
-fn probe_the_three_required_field_errors_are_mutually_distinct() {
-    let mut errs = Vec::new();
-    let mut _keep = Vec::new();
-    for key in ["id", "created_at", "root"] {
-        let (tmp, _path, err) = load_synthesized(
-            &note_missing(key),
-            "01a03d21-7c11-7a02-b3de-9f0e21c4a771.md",
+fn probe_a_note_carrying_none_of_the_old_required_keys_loads_cleanly() {
+    for block in ["", "title: only a title\n"] {
+        let (_tmp, _path, result) = load_synthesized(
+            &format!("---\n{block}---\n\nBody.\n"),
+            &format!("{SOME_ID}.md"),
         );
-        _keep.push(tmp);
-        errs.push((key, err));
+        let note = result.unwrap_or_else(|e| panic!("{block:?} must load: {e}"));
+        assert_eq!(note.id.to_string(), SOME_ID, "the identity is the filename");
+        assert!(
+            note.created_at().is_some(),
+            "derived from the id, not the block"
+        );
+        assert_eq!(note.body, "\nBody.\n");
     }
-    for i in 0..errs.len() {
-        for j in (i + 1)..errs.len() {
-            assert_ne!(
-                discriminant(&errs[i].1),
-                discriminant(&errs[j].1),
-                "missing `{}` and missing `{}` must be distinguishable, both gave {:?}",
-                errs[i].0,
-                errs[j].0,
-                errs[i].1
-            );
-        }
+}
+
+#[test]
+fn probe_a_stage_one_note_still_loads_and_keeps_its_old_keys_as_unknown() {
+    // Forward-compat runs backwards too: a note written by stage 1 has `id`, `created_at` and
+    // `root` in its block. None of them are interpreted now, none of them are errors, and none of
+    // them may be dropped.
+    let text = format!(
+        "---\nid: {SOME_ID}\ntitle: carried over\ncreated_at: 2026-08-26T09:00:00Z\nroot: {SOME_ID}\n---\n\nB.\n"
+    );
+    let (_tmp, _path, result) = load_synthesized(&text, &format!("{SOME_ID}.md"));
+    let note = result.expect("a stage-1 note is not malformed, only old");
+
+    let unknown: Vec<&str> = note
+        .frontmatter
+        .unknown()
+        .iter()
+        .map(|u| u.name())
+        .collect();
+    assert_eq!(unknown, ["id", "created_at", "root"]);
+
+    let written = String::from_utf8(note.to_bytes(&FrontmatterSchema::jot_default())).unwrap();
+    for key in ["id: ", "created_at: ", "root: "] {
+        assert!(written.contains(key), "{key} was dropped:\n{written}");
     }
 }
 
@@ -295,7 +302,7 @@ fn probe_enumeration_lists_live_notes_and_skips_the_jot_directory() {
         .collect();
 
     assert!(names.contains(&SLUG_FILENAME_NOTE.to_string()));
-    assert!(names.contains(&NON_CANONICAL_ORDER_NOTE.to_string()));
+    assert!(names.contains(&NON_SCHEMA_ORDER_NOTE.to_string()));
     assert!(
         !names.contains(&TRASHED_NOTE.to_string()),
         "a note inside .jot/.trash/ is not live; enumeration must not descend into .jot/"
@@ -725,20 +732,49 @@ fn probe_atomic_write_actually_stages_in_the_tmp_dir_it_is_given() {
 fn probe_a_note_with_an_empty_body_round_trips() {
     let path = fixture_vault().join(EMPTY_BODY_NOTE);
     let original = read_bytes(&path);
-    let note = Note::parse(&original).expect("an empty body is legal");
+    let note = Note::load(&path).expect("an empty body is legal");
     assert!(
         note.body.trim().is_empty(),
         "body should be empty, got {:?}",
         note.body
     );
-    assert_bytes_eq(&note.to_bytes(), &original, "empty-body round trip");
+    assert_bytes_eq(
+        &note.to_bytes(&FrontmatterSchema::jot_default()),
+        &original,
+        "empty-body round trip",
+    );
+}
+
+#[test]
+fn probe_a_note_whose_body_starts_on_the_next_line_keeps_its_first_character() {
+    // markdown-rs reports the block's span without the closing fence's terminator. Getting that
+    // off by one either eats this note's first character or gives it a leading blank line.
+    let path = fixture_vault().join(TIGHT_BODY_NOTE);
+    let original = read_bytes(&path);
+    let note = Note::load(&path).expect("a body starting immediately is legal");
+
+    assert!(
+        note.body
+            .starts_with("The body starts on the very next line"),
+        "the body lost or gained a leading byte: {:?}",
+        &note.body[..note.body.len().min(40)]
+    );
+    assert!(
+        !note.body.ends_with('\n'),
+        "this fixture has no final newline; the parser invented one"
+    );
+    assert_bytes_eq(
+        &note.to_bytes(&FrontmatterSchema::jot_default()),
+        &original,
+        "tight-body round trip",
+    );
 }
 
 #[test]
 fn probe_a_body_containing_a_fence_line_at_column_zero_is_not_a_second_fence() {
     let path = fixture_vault().join(FENCE_IN_BODY_NOTE);
     let original = read_bytes(&path);
-    let note = Note::parse(&original).expect("a `---` in the body is legal markdown");
+    let note = Note::load(&path).expect("a `---` in the body is legal markdown");
 
     assert!(
         note.body.contains("That line above is body content"),
@@ -749,28 +785,31 @@ fn probe_a_body_containing_a_fence_line_at_column_zero_is_not_a_second_fence() {
         note.body.lines().any(|l| l == "---"),
         "the horizontal rule itself belongs to the body"
     );
-    assert_bytes_eq(&note.to_bytes(), &original, "fence-in-body round trip");
+    assert_bytes_eq(
+        &note.to_bytes(&FrontmatterSchema::jot_default()),
+        &original,
+        "fence-in-body round trip",
+    );
 }
 
 #[test]
-fn probe_the_trashed_fixture_parses_and_keeps_its_trashed_at() {
+fn probe_the_trashed_fixture_parses_and_carries_no_trashed_at() {
+    // The location on disk *is* the state (overview.md, unchanged by 1b). `trashed_at` left the
+    // format with the other timestamps; the index mirrors it, derived like everything else.
     let path = fixture_vault()
         .join(".jot")
         .join(".trash")
         .join(TRASHED_NOTE);
     let original = read_bytes(&path);
-    let note = Note::parse(&original).expect("a trashed note is still a note");
-    assert_bytes_eq(&note.to_bytes(), &original, "trashed note round trip");
-
-    let block = frontmatter_block(&note.to_canonical_bytes());
-    assert!(
-        top_level_keys(&block).contains(&"trashed_at".to_string()),
-        "trashed_at must survive canonicalization:\n{block}"
+    let note = Note::load(&path).expect("a trashed note is still a note");
+    assert_bytes_eq(
+        &note.to_bytes(&FrontmatterSchema::jot_default()),
+        &original,
+        "trashed note round trip",
     );
-    assert_subsequence(
-        &top_level_keys(&block),
-        &["id", "title", "created_at", "root", "trashed_at"],
-        "trashed_at is last among the known keys",
+    assert!(
+        !top_level_keys(&frontmatter_block(&original)).contains(&"trashed_at".to_string()),
+        "the trash marker is the directory, not a key"
     );
 }
 
@@ -779,48 +818,46 @@ fn probe_load_from_a_path_accepts_the_slug_filename_form() {
     let path = fixture_vault().join(SLUG_FILENAME_NOTE);
     let note = Note::load(&path).expect("the slug is decorative; load must ignore it");
     assert_eq!(
-        note.meta.id.to_string(),
+        note.id.to_string(),
         "01a03d4d-5790-7855-9af5-c362987fc91e",
-        "the id comes from the frontmatter, and the slug must not have been compared"
+        "the id comes from the filename's UUID, and the slug is not part of it"
     );
 }
 
 #[test]
-fn probe_every_valid_fixture_loads_from_its_path_except_the_deliberate_mismatch() {
+fn probe_every_valid_fixture_loads_from_its_path() {
+    // Stage 1's exception — one fixture whose filename disagreed with its frontmatter id — is
+    // gone with the rule that needed it. Every note in the corpus now loads.
     for path in vault_note_paths() {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let result = Note::load(&path);
-        if name == MISMATCHED_FILENAME_NOTE {
-            assert!(result.is_err(), "{name} is the deliberate mismatch fixture");
-        } else {
-            result.unwrap_or_else(|e| panic!("{name} must load cleanly from its path: {e}"));
-        }
+        Note::load(&path).unwrap_or_else(|e| panic!("{name} must load cleanly from its path: {e}"));
     }
 }
 
 #[test]
 fn probe_parse_of_an_empty_file_is_an_error_not_a_panic() {
-    let err = Note::parse(b"").expect_err("an empty file has no frontmatter and cannot be a note");
+    let err = Note::parse(NoteId::new(), b"")
+        .expect_err("an empty file has no frontmatter and cannot be a note");
     assert!(!err.to_string().is_empty());
 }
 
 #[test]
-fn probe_parse_of_a_fence_only_file_is_an_error_not_a_panic() {
-    // `error.rs` (frozen) documents `FrontmatterNotAMapping` as covering "an empty block, a bare
-    // scalar, or a sequence", so this one *is* pinned — by the taxonomy's own doc comment rather
-    // than by dispatch.md. If T3.1 disagrees, that is a contract conflict to raise, not a test to
-    // soften.
-    let err = Note::parse(b"---\n---\n")
-        .expect_err("an empty frontmatter block is not a mapping and has no id");
-    assert!(
-        matches!(err, Error::FrontmatterNotAMapping { .. }),
-        "got {err:?}"
-    );
+fn probe_a_fence_only_file_is_an_untitled_top_level_note_not_an_error() {
+    // The one place stage 1b genuinely reverses stage 1. `error.rs` used to document
+    // `FrontmatterNotAMapping` as covering an empty block, because an empty block had no `id`.
+    // With identity in the filename an empty block is a note with nothing said about it, which is
+    // a state the vault represents rather than a failure.
+    let id = NoteId::new();
+    let note = Note::parse(id, b"---\n---\n").expect("an empty block is an untitled note");
+    assert_eq!(note.id, id);
+    assert_eq!(note.frontmatter.title, None);
+    assert_eq!(note.frontmatter.root, None);
+    assert!(note.frontmatter.unknown().is_empty());
 }
 
 #[test]
 fn probe_a_frontmatter_block_that_is_a_sequence_is_not_a_mapping() {
-    let err = Note::parse(b"---\n- one\n- two\n---\n\nBody.\n")
+    let err = Note::parse(NoteId::new(), b"---\n- one\n- two\n---\n\nBody.\n")
         .expect_err("a sequence is well-formed YAML but is not a frontmatter mapping");
     assert!(
         matches!(err, Error::FrontmatterNotAMapping { .. }),

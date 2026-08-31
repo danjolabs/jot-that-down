@@ -58,7 +58,9 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
+use crate::frontmatter::FrontmatterSchema;
 use crate::fs;
+use crate::note::{Note, NoteId};
 
 /// The manifest schema version this build writes, and the highest it will open.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -141,48 +143,6 @@ impl std::fmt::Display for WorkspaceKind {
     }
 }
 
-/// How this workspace names its note files.
-///
-/// The choice between a bare UUID and a UUID plus a decorative slug is deferred (see
-/// `overview.md`, Open questions). Making it a manifest knob now means it can be settled later
-/// without a migration: the slug is decorative in both cases, and the reader already accepts both
-/// forms regardless of what the manifest says.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum FilenameStyle {
-    /// `<uuid>.md`. The default.
-    #[default]
-    Uuid,
-    /// `<uuid>_<slug>.md`.
-    UuidSlug,
-}
-
-impl FilenameStyle {
-    /// The manifest spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            FilenameStyle::Uuid => "uuid",
-            FilenameStyle::UuidSlug => "uuid_slug",
-        }
-    }
-
-    /// Parses a manifest spelling.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "uuid" => Some(FilenameStyle::Uuid),
-            "uuid_slug" => Some(FilenameStyle::UuidSlug),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for FilenameStyle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 // =============================================================================================
 // The manifest
 // =============================================================================================
@@ -203,8 +163,11 @@ pub struct Manifest {
     /// Display only. Defaults to the target directory's basename at `init` (§U3) and is expected
     /// to be edited by hand.
     pub name: String,
-    /// How note files are named.
-    pub filename_style: FilenameStyle,
+    /// The declared frontmatter keys, in the order notes are written in.
+    ///
+    /// Absent from the file means [`FrontmatterSchema::jot_default`] — which is what lets a
+    /// stage-1 manifest, written before `[schema]` existed, open without a migration.
+    pub schema: FrontmatterSchema,
 }
 
 impl Manifest {
@@ -219,8 +182,8 @@ impl Manifest {
                 kind: self.kind.as_str(),
                 name: &self.name,
             },
-            notes: file::Notes {
-                filename: self.filename_style.as_str(),
+            schema: file::Schema {
+                frontmatter: self.schema.keys(),
             },
         };
         let body = toml::to_string_pretty(&file).map_err(|source| Error::ManifestSerialize {
@@ -278,13 +241,18 @@ impl Manifest {
                 value: raw.workspace.kind.clone(),
             }
         })?;
-        let filename_style = match raw.notes.filename.as_deref() {
-            None => FilenameStyle::default(),
-            Some(value) => FilenameStyle::parse(value).ok_or_else(|| {
-                parse_err(format!(
-                    "unknown `[notes] filename` style `{value}` (expected `uuid` or `uuid_slug`)"
-                ))
-            })?,
+        let schema = match raw.schema.frontmatter {
+            // A manifest with no `[schema]` predates the key, so it gets the default rather than
+            // an empty schema — an empty one would render notes with no keys at all.
+            None => FrontmatterSchema::jot_default(),
+            Some(keys) => {
+                if let Some(bad) = keys.iter().find(|k| k.trim().is_empty()) {
+                    return Err(parse_err(format!(
+                        "`[schema] frontmatter` contains an empty key (`{bad}`)"
+                    )));
+                }
+                FrontmatterSchema::new(keys)
+            }
         };
 
         Ok(Manifest {
@@ -297,7 +265,7 @@ impl Manifest {
                 .workspace
                 .name
                 .unwrap_or_else(|| default_name.to_string()),
-            filename_style,
+            schema,
         })
     }
 }
@@ -314,7 +282,7 @@ mod file {
     pub(super) struct Manifest<'a> {
         pub schema_version: u32,
         pub workspace: Workspace<'a>,
-        pub notes: Notes<'a>,
+        pub schema: Schema<'a>,
     }
 
     #[derive(serde::Serialize)]
@@ -325,8 +293,8 @@ mod file {
     }
 
     #[derive(serde::Serialize)]
-    pub(super) struct Notes<'a> {
-        pub filename: &'a str,
+    pub(super) struct Schema<'a> {
+        pub frontmatter: &'a [String],
     }
 
     /// Read just far enough to learn the schema version, and nothing else. Everything is optional
@@ -341,7 +309,7 @@ mod file {
     pub(super) struct ManifestIn {
         pub workspace: WorkspaceIn,
         #[serde(default)]
-        pub notes: NotesIn,
+        pub schema: SchemaIn,
     }
 
     #[derive(serde::Deserialize)]
@@ -352,8 +320,54 @@ mod file {
     }
 
     #[derive(Default, serde::Deserialize)]
-    pub(super) struct NotesIn {
-        pub filename: Option<String>,
+    pub(super) struct SchemaIn {
+        pub frontmatter: Option<Vec<String>>,
+    }
+}
+
+// =============================================================================================
+// Warnings
+// =============================================================================================
+
+/// Something about an opened workspace that is worth telling the user and is not worth refusing to
+/// open over.
+///
+/// A warning channel rather than an error because the alternative in each case is worse. Refusing
+/// to open a vault whose `[schema] frontmatter` omits `relation:reply_to` would lock the user out
+/// of their own notes over a config line they can fix in ten seconds — and it is not needed for
+/// safety, because [`crate::frontmatter::Frontmatter::try_render`] writes an interpreted key the
+/// schema omits anyway. The omission costs diff shape, never thread structure.
+///
+/// Collected at `init` and `open`, read through [`Workspace::warnings`], and surfaced by whichever
+/// surface is in front of the user. `jot-core` does not log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Warning {
+    /// A `jot` workspace declares a frontmatter schema that omits one or more relation keys, so
+    /// notes written from it will not carry the omitted keys in a declared position.
+    SchemaMissingRelationKeys {
+        /// The manifest the schema was read from.
+        path: PathBuf,
+        /// The omitted keys, in [`crate::frontmatter::RELATION_KEYS`] order.
+        missing: Vec<&'static str>,
+    },
+}
+
+impl std::fmt::Display for Warning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Warning::SchemaMissingRelationKeys { path, missing } => write!(
+                f,
+                "`{}`: `[schema] frontmatter` omits {} — notes will still carry {} when set, but                  not in a declared position",
+                path.display(),
+                missing
+                    .iter()
+                    .map(|k| format!("`{k}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if missing.len() == 1 { "it" } else { "them" },
+            ),
+        }
     }
 }
 
@@ -369,6 +383,7 @@ mod file {
 pub struct Workspace {
     root: PathBuf,
     manifest: Manifest,
+    warnings: Vec<Warning>,
 }
 
 impl Workspace {
@@ -408,11 +423,11 @@ impl Workspace {
             id: Uuid::now_v7(),
             kind,
             name: default_name(&root),
-            filename_style: FilenameStyle::default(),
+            schema: FrontmatterSchema::jot_default(),
         };
 
         match Self::write_new_tree(&root, &jot, &manifest) {
-            Ok(()) => Ok(Workspace { root, manifest }),
+            Ok(()) => Ok(Workspace::assembled(root, manifest)),
             Err(e) => {
                 // `.jot/` did not exist a moment ago — this call made it — so removing it takes
                 // nothing that was not ours.
@@ -468,7 +483,7 @@ impl Workspace {
         })?;
 
         let manifest = Manifest::from_toml(&text, &manifest_path, &default_name(&root))?;
-        Ok(Workspace { root, manifest })
+        Ok(Workspace::assembled(root, manifest))
     }
 
     /// Walks up from `from` looking for a `.jot/` directory, and opens the first one found.
@@ -557,6 +572,166 @@ impl Workspace {
     pub fn manifest_path(&self) -> PathBuf {
         manifest_path_of(&self.root)
     }
+
+    /// The declared frontmatter schema: `[schema] frontmatter` in the manifest.
+    #[must_use]
+    pub fn schema(&self) -> &FrontmatterSchema {
+        &self.manifest.schema
+    }
+
+    /// What `init` or `open` noticed and did not refuse over. Empty for a well-formed workspace.
+    ///
+    /// See [`Warning`] for why these are warnings rather than errors.
+    #[must_use]
+    pub fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
+
+    /// Build a workspace and collect whatever its manifest is worth warning about.
+    fn assembled(root: PathBuf, manifest: Manifest) -> Self {
+        let mut warnings = Vec::new();
+        // Relation keys are a `jot` concept. A `plain` workspace has no threads, so a schema
+        // without them is not an omission (stage 7).
+        if manifest.kind == WorkspaceKind::Jot {
+            let missing = manifest.schema.missing_relation_keys();
+            if !missing.is_empty() {
+                warnings.push(Warning::SchemaMissingRelationKeys {
+                    path: manifest_path_of(&root),
+                    missing,
+                });
+            }
+        }
+        Workspace {
+            root,
+            manifest,
+            warnings,
+        }
+    }
+
+    // ------------------------------------------------------------------ opening a single note
+
+    /// The path of the live note with this id, if the vault holds one.
+    ///
+    /// A linear scan, which is what stage 1b has: the id-to-path map is stage 2's index. The scan
+    /// goes through [`fs::live_note_paths`] and [`fs::parse_note_filename`] so that "which files
+    /// are notes" has exactly one answer in this crate.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReadDir`] if the vault root cannot be listed.
+    pub fn note_path(&self, id: NoteId) -> Result<Option<PathBuf>> {
+        let wanted = id.as_uuid();
+        for path in fs::live_note_paths(&self.root)? {
+            if fs::parse_note_filename(&path).is_ok_and(|found| found == wanted) {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Open one note, repairing what the schema says it should carry and the file does not.
+    ///
+    /// **This is the only read path that writes**, and the asymmetry is deliberate: `sync()` and
+    /// `rebuild()` scan the whole vault and must never produce a diff, so a vault scan cannot be
+    /// where repair happens. Opening a single note is a user action on one file, and rewriting
+    /// that file complete and in schema order is what "the file wins, the index conforms" looks
+    /// like when the file is the thing that is behind.
+    ///
+    /// What gets repaired, and what does not (`stage1b.md`, "Missing schema fields"):
+    ///
+    /// | Deleted externally | Repair |
+    /// | --- | --- |
+    /// | `title` | Absent means untitled. Optional; no repair value to invent. |
+    /// | `relation:root` | **Recomputed** by walking `relation:reply_to` upward. |
+    /// | `relation:reply_to` | **Unrecoverable.** The note has no parent. Never written back empty. |
+    ///
+    /// A note whose `relation:reply_to` was deleted but whose `relation:root` survived keeps that
+    /// root. The file wins, and the file still says what the root is; inventing a different one
+    /// from the absence of a sibling key would be the index correcting the file, which is the one
+    /// thing the source-of-truth decision forbids.
+    ///
+    /// The rewrite is skipped when the rendered bytes already equal the file's, so opening a note
+    /// twice writes once, and opening a clean vault's notes writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Note::load`] raises, [`Error::ReplyCycle`] if the reply chain loops, and
+    /// [`Error::Write`] or [`Error::Rename`] if the repaired file cannot be written.
+    pub fn open_note(&self, id: NoteId) -> Result<Option<OpenedNote>> {
+        let Some(path) = self.note_path(id)? else {
+            return Ok(None);
+        };
+        let before = std::fs::read(&path).map_err(|source| Error::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let mut note = Note::parse_at(&path, &before)?;
+
+        if note.frontmatter.root.is_none() {
+            note.frontmatter.root = Some(self.recompute_root(&path, &note)?);
+        }
+
+        let after = note.try_to_bytes(&self.manifest.schema)?;
+        let repaired = after != before;
+        if repaired {
+            fs::atomic_write(&path, &self.tmp_dir(), &after)?;
+        }
+        Ok(Some(OpenedNote {
+            note,
+            path,
+            repaired,
+        }))
+    }
+
+    /// The thread root of `note`, found by walking `relation:reply_to` upward.
+    ///
+    /// A note with no `relation:reply_to` is its own root. A chain that runs into a note the vault
+    /// does not hold stops there and returns that id: dangling references are a designed state, and
+    /// the last id the chain actually named is the best answer the file system has.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReplyCycle`] naming the note the walk came back to, plus whatever loading an
+    /// ancestor raises.
+    fn recompute_root(&self, path: &Path, note: &Note) -> Result<NoteId> {
+        let mut seen = vec![note.id];
+        let mut current = note.frontmatter.reply_to;
+
+        while let Some(id) = current {
+            if seen.contains(&id) {
+                return Err(Error::ReplyCycle {
+                    path: path.to_path_buf(),
+                    id: id.as_uuid(),
+                });
+            }
+            seen.push(id);
+
+            // A parent the vault does not hold ends the walk, and *is* the root: the chain named
+            // it, so it is a real ancestor whose file is simply not here.
+            let Some(parent_path) = self.note_path(id)? else {
+                return Ok(id);
+            };
+            let parent = Note::load(&parent_path)?;
+            match parent.frontmatter.reply_to {
+                None => return Ok(id),
+                Some(next) => current = Some(next),
+            }
+        }
+        // No `relation:reply_to` at all: the note is its own root.
+        Ok(note.id)
+    }
+}
+
+/// The result of [`Workspace::open_note`]: the note, where it lives, and whether opening it wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedNote {
+    /// The note as it now stands on disk.
+    pub note: Note,
+    /// The file it was read from and, if `repaired`, written back to.
+    pub path: PathBuf,
+    /// Whether the file's bytes were rewritten — because a schema field was repaired, or because
+    /// the file's key order was not the schema's.
+    pub repaired: bool,
 }
 
 // =============================================================================================
@@ -778,7 +953,20 @@ mod tests {
         );
         assert_eq!(value["workspace"]["kind"].as_str(), Some("jot"));
         assert_eq!(value["workspace"]["name"].as_str(), Some("Thoughts"));
-        assert_eq!(value["notes"]["filename"].as_str(), Some("uuid"));
+        assert_eq!(
+            value["schema"]["frontmatter"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "title",
+                "relation:root",
+                "relation:reply_to",
+                "relation:quote"
+            ]
+        );
     }
 
     #[test]
@@ -1107,36 +1295,125 @@ mod tests {
 
         let ws = Workspace::open(&root).unwrap();
         assert_eq!(ws.name(), "Field Notes");
-        assert_eq!(ws.manifest().filename_style, FilenameStyle::Uuid);
+        // No `[schema]` at all — a stage-1 manifest, which must open on the default
+        // rather than on an empty schema that would render notes with no keys.
+        assert_eq!(*ws.schema(), FrontmatterSchema::jot_default());
+        assert!(ws.warnings().is_empty());
+    }
+
+    /// A stage-1 manifest still carries `[notes] filename`. It is not an error — `serde`
+    /// ignores unknown fields, which is the same forward-compat courtesy the note format
+    /// extends to unknown frontmatter keys — and the vault opens on the default schema.
+    #[test]
+    fn a_stage_one_manifest_opens_on_the_default_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dir(tmp.path(), "v");
+        std::fs::create_dir(root.join(".jot")).unwrap();
+        std::fs::write(
+            root.join(".jot/workspace.toml"),
+            "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+             kind = \"jot\"\nname = \"V\"\n\n[notes]\nfilename = \"uuid_slug\"\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::open(&root).unwrap();
+        assert_eq!(*ws.schema(), FrontmatterSchema::jot_default());
+        assert!(ws.warnings().is_empty());
+    }
+
+    /// The declared order is the whole content of the schema, so it must survive a
+    /// round-trip through the file rather than being sorted or de-duplicated into
+    /// something tidier.
+    #[test]
+    fn a_declared_schema_keeps_its_order_and_its_unknown_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dir(tmp.path(), "v");
+        std::fs::create_dir(root.join(".jot")).unwrap();
+        std::fs::write(
+            root.join(".jot/workspace.toml"),
+            "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+             kind = \"jot\"\nname = \"V\"\n\n[schema]\nfrontmatter = [ \"relation:root\", \"summary\", \
+             \"title\", \"relation:reply_to\", \"relation:quote\", \"relation:root\" ]\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::open(&root).unwrap();
+        assert_eq!(
+            ws.schema().keys(),
+            [
+                "relation:root",
+                "summary",
+                "title",
+                "relation:reply_to",
+                "relation:quote"
+            ],
+            "declared order, first occurrence of a duplicate winning"
+        );
+        assert!(ws.warnings().is_empty());
+    }
+
+    /// The ratified answer to `stage1b.md`'s open question: a `jot` schema missing a
+    /// relation key **warns and opens**, and does not refuse.
+    ///
+    /// It is safe to open because `Frontmatter::try_render` writes an interpreted key the
+    /// schema omits anyway, so the omission costs diff shape and never thread structure.
+    #[test]
+    fn a_jot_schema_missing_relation_keys_warns_and_still_opens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dir(tmp.path(), "v");
+        std::fs::create_dir(root.join(".jot")).unwrap();
+        std::fs::write(
+            root.join(".jot/workspace.toml"),
+            "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+             kind = \"jot\"\nname = \"V\"\n\n[schema]\nfrontmatter = [ \"title\", \"relation:root\" ]\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::open(&root).expect("a thin schema is a warning, not a refusal");
+        match ws.warnings() {
+            [Warning::SchemaMissingRelationKeys { path, missing }] => {
+                assert_eq!(missing, &["relation:reply_to", "relation:quote"]);
+                assert_eq!(path, &ws.manifest_path());
+            }
+            other => panic!("expected one schema warning, got {other:?}"),
+        }
+        let shown = ws.warnings()[0].to_string();
+        assert!(shown.contains("relation:reply_to"), "{shown}");
+        assert!(shown.contains("relation:quote"), "{shown}");
+    }
+
+    /// A `plain` workspace has no threads, so a schema without relation keys is not an
+    /// omission there and must not be reported as one (stage 7).
+    #[test]
+    fn a_plain_workspace_is_not_warned_about_missing_relations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dir(tmp.path(), "v");
+        std::fs::create_dir(root.join(".jot")).unwrap();
+        std::fs::write(
+            root.join(".jot/workspace.toml"),
+            "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+             kind = \"plain\"\nname = \"V\"\n\n[schema]\nfrontmatter = [ \"title\" ]\n",
+        )
+        .unwrap();
+
+        assert!(Workspace::open(&root).unwrap().warnings().is_empty());
     }
 
     #[test]
-    fn open_accepts_the_uuid_slug_filename_style_and_rejects_anything_else() {
+    fn an_empty_schema_key_is_a_parse_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let base = "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\nkind = \"jot\"\nname = \"V\"\n\n[notes]\nfilename = ";
-
-        let good = dir(tmp.path(), "g");
-        std::fs::create_dir(good.join(".jot")).unwrap();
+        let root = dir(tmp.path(), "v");
+        std::fs::create_dir(root.join(".jot")).unwrap();
         std::fs::write(
-            good.join(".jot/workspace.toml"),
-            format!("{base}\"uuid_slug\"\n"),
+            root.join(".jot/workspace.toml"),
+            "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+             kind = \"jot\"\nname = \"V\"\n\n[schema]\nfrontmatter = [ \"title\", \"  \" ]\n",
         )
         .unwrap();
-        assert_eq!(
-            Workspace::open(&good).unwrap().manifest().filename_style,
-            FilenameStyle::UuidSlug
-        );
 
-        let bad = dir(tmp.path(), "b");
-        std::fs::create_dir(bad.join(".jot")).unwrap();
-        std::fs::write(
-            bad.join(".jot/workspace.toml"),
-            format!("{base}\"emoji\"\n"),
-        )
-        .unwrap();
-        let err = Workspace::open(&bad).unwrap_err();
+        let err = Workspace::open(&root).unwrap_err();
         assert!(matches!(err, Error::ManifestParse { .. }), "{err:?}");
-        assert!(err.to_string().contains("emoji"), "{err}");
+        assert!(err.to_string().contains("empty key"), "{err}");
     }
 
     /// Forward compatibility inside one schema version: a key this build has never heard of must
@@ -1396,20 +1673,13 @@ mod tests {
     // -------------------------------------------------------------------------------- pieces
 
     #[test]
-    fn kind_and_filename_style_round_trip_through_their_manifest_spellings() {
+    fn kind_round_trips_through_its_manifest_spelling() {
         for kind in [WorkspaceKind::Jot, WorkspaceKind::Plain] {
             assert_eq!(WorkspaceKind::parse(kind.as_str()), Some(kind));
             assert_eq!(kind.to_string(), kind.as_str());
         }
         assert_eq!(WorkspaceKind::parse("Jot"), None, "the spelling is exact");
         assert_eq!(WorkspaceKind::parse(""), None);
-
-        for style in [FilenameStyle::Uuid, FilenameStyle::UuidSlug] {
-            assert_eq!(FilenameStyle::parse(style.as_str()), Some(style));
-            assert_eq!(style.to_string(), style.as_str());
-        }
-        assert_eq!(FilenameStyle::parse("slug"), None);
-        assert_eq!(FilenameStyle::default(), FilenameStyle::Uuid);
     }
 
     /// The emitted manifest must parse back into the same values, or `init` and `open` disagree
@@ -1422,7 +1692,7 @@ mod tests {
             id: Uuid::parse_str("01a03d4c-3680-7c70-aade-6c016dd177d2").unwrap(),
             kind: WorkspaceKind::Plain,
             name: "Name with spaces, a \" quote and 한글".to_string(),
-            filename_style: FilenameStyle::UuidSlug,
+            schema: FrontmatterSchema::new(["title", "relation:root", "summary"]),
         };
 
         let text = manifest.to_toml(path).unwrap();
@@ -1445,7 +1715,7 @@ mod tests {
             id: Uuid::parse_str("01a03d4c-3680-7c70-aade-6c016dd177d2").unwrap(),
             kind: WorkspaceKind::Jot,
             name: "Thoughts".to_string(),
-            filename_style: FilenameStyle::Uuid,
+            schema: FrontmatterSchema::jot_default(),
         };
 
         assert_eq!(
@@ -1464,8 +1734,13 @@ id = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"
 kind = \"jot\"
 name = \"Thoughts\"
 
-[notes]
-filename = \"uuid\"
+[schema]
+frontmatter = [
+    \"title\",
+    \"relation:root\",
+    \"relation:reply_to\",
+    \"relation:quote\",
+]
 "
         );
     }
@@ -1474,5 +1749,346 @@ filename = \"uuid\"
     fn default_name_falls_back_when_a_path_has_no_final_component() {
         assert_eq!(default_name(Path::new("/")), "jot");
         assert_eq!(default_name(Path::new("a/b/Field Notes")), "Field Notes");
+    }
+
+    // ============================================================== opening a single note
+
+    /// A copy of the shared fixture vault, so a test may mutate notes without touching the corpus.
+    fn fixture_copy(tmp: &Path) -> PathBuf {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .join("tests")
+            .join("fixtures")
+            .join("vault");
+        let dst = tmp.join("vault");
+        copy_tree(&src, &dst);
+        dst
+    }
+
+    fn copy_tree(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let to = dst.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
+
+    /// A vault holding exactly the notes given as `(filename, contents)`.
+    fn vault_of(tmp: &Path, notes: &[(&str, &str)]) -> Workspace {
+        let root = dir(tmp, "v");
+        let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        for (name, text) in notes {
+            std::fs::write(root.join(name), text).unwrap();
+        }
+        ws
+    }
+
+    fn nid(s: &str) -> NoteId {
+        s.parse().unwrap()
+    }
+
+    const A: &str = "01a03d60-0000-7000-8000-00000000000a";
+    const B: &str = "01a03d61-0000-7000-8000-00000000000b";
+    const C: &str = "01a03d62-0000-7000-8000-00000000000c";
+
+    #[test]
+    fn note_path_finds_a_note_by_id_and_reports_absence_rather_than_failing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[(
+                &format!("{A}.md"),
+                &format!("---\nrelation:root: {A}\n---\n"),
+            )],
+        );
+        assert_eq!(
+            ws.note_path(nid(A)).unwrap(),
+            Some(ws.root().join(format!("{A}.md")))
+        );
+        assert_eq!(ws.note_path(nid(B)).unwrap(), None);
+        assert!(ws.open_note(nid(B)).unwrap().is_none());
+    }
+
+    #[test]
+    fn note_path_finds_a_note_filed_under_a_slug() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[(
+                &format!("{A}_a_slug.md"),
+                &format!("---\nrelation:root: {A}\n---\n"),
+            )],
+        );
+        assert_eq!(
+            ws.note_path(nid(A)).unwrap(),
+            Some(ws.root().join(format!("{A}_a_slug.md")))
+        );
+    }
+
+    /// Stage 1b acceptance: a note whose `relation:root` was deleted externally has it recomputed
+    /// on open.
+    #[test]
+    fn a_deleted_root_is_recomputed_by_walking_reply_to_upward() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[
+                (
+                    &format!("{A}.md"),
+                    &format!("---\ntitle: root\nrelation:root: {A}\n---\n\nA.\n"),
+                ),
+                (
+                    &format!("{B}.md"),
+                    &format!(
+                        "---\ntitle: mid\nrelation:root: {A}\nrelation:reply_to: {A}\n---\n\nB.\n"
+                    ),
+                ),
+                // `relation:root` deleted by hand; `relation:reply_to` survives.
+                (
+                    &format!("{C}.md"),
+                    &format!("---\ntitle: leaf\nrelation:reply_to: {B}\n---\n\nC.\n"),
+                ),
+            ],
+        );
+
+        let opened = ws.open_note(nid(C)).unwrap().unwrap();
+        assert!(opened.repaired, "the file should have been rewritten");
+        assert_eq!(opened.note.frontmatter.root, Some(nid(A)));
+        assert_eq!(opened.note.frontmatter.reply_to, Some(nid(B)));
+        assert_eq!(opened.note.body, "\nC.\n", "the body must be untouched");
+
+        // The repair is on disk, not only in memory.
+        let on_disk = std::fs::read_to_string(&opened.path).unwrap();
+        assert_eq!(
+            on_disk,
+            format!("---\ntitle: leaf\nrelation:root: {A}\nrelation:reply_to: {B}\n---\n\nC.\n")
+        );
+        // And opening it again writes nothing.
+        assert!(!ws.open_note(nid(C)).unwrap().unwrap().repaired);
+    }
+
+    /// Stage 1b acceptance: a note whose `relation:reply_to` was deleted becomes top-level and is
+    /// not written back as empty.
+    #[test]
+    fn a_deleted_reply_to_leaves_a_top_level_note_and_is_never_written_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[(&format!("{C}.md"), "---\ntitle: orphan\n---\n\nC.\n")],
+        );
+
+        let opened = ws.open_note(nid(C)).unwrap().unwrap();
+        assert_eq!(opened.note.frontmatter.reply_to, None);
+        assert_eq!(
+            opened.note.frontmatter.root,
+            Some(nid(C)),
+            "a note with no parent is its own root"
+        );
+
+        let on_disk = std::fs::read_to_string(&opened.path).unwrap();
+        assert_eq!(
+            on_disk,
+            format!("---\ntitle: orphan\nrelation:root: {C}\n---\n\nC.\n")
+        );
+        assert!(
+            !on_disk.contains("relation:reply_to"),
+            "an absent parent must not be written back as an empty key:\n{on_disk}"
+        );
+    }
+
+    /// The narrow reading of "the file wins": a surviving `relation:root` is not second-guessed
+    /// because a sibling key went missing. Restoring or recomputing a value the file still states
+    /// would be the index correcting the file.
+    #[test]
+    fn a_surviving_root_is_kept_even_when_reply_to_was_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[(
+                &format!("{C}.md"),
+                &format!("---\ntitle: t\nrelation:root: {A}\n---\n\nC.\n"),
+            )],
+        );
+        let opened = ws.open_note(nid(C)).unwrap().unwrap();
+        assert_eq!(opened.note.frontmatter.root, Some(nid(A)));
+        assert!(!opened.repaired, "nothing needed repairing");
+    }
+
+    #[test]
+    fn a_reply_chain_that_runs_into_a_missing_note_roots_at_that_note() {
+        // Dangling references are a designed state: the chain named an ancestor, so that ancestor
+        // is the root even though its file is not here.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[(
+                &format!("{C}.md"),
+                &format!("---\nrelation:reply_to: {B}\n---\n"),
+            )],
+        );
+        let opened = ws.open_note(nid(C)).unwrap().unwrap();
+        assert_eq!(opened.note.frontmatter.root, Some(nid(B)));
+    }
+
+    #[test]
+    fn a_reply_cycle_is_reported_rather_than_walked_forever() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[
+                (
+                    &format!("{A}.md"),
+                    &format!("---\nrelation:reply_to: {B}\n---\n"),
+                ),
+                (
+                    &format!("{B}.md"),
+                    &format!("---\nrelation:reply_to: {A}\n---\n"),
+                ),
+            ],
+        );
+        let e = ws.open_note(nid(A)).unwrap_err();
+        assert!(matches!(e, Error::ReplyCycle { .. }), "{e:?}");
+        assert!(e.to_string().contains(A), "{e}");
+    }
+
+    #[test]
+    fn a_note_that_replies_to_itself_is_a_cycle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[(
+                &format!("{A}.md"),
+                &format!("---\nrelation:reply_to: {A}\n---\n"),
+            )],
+        );
+        assert!(matches!(
+            ws.open_note(nid(A)).unwrap_err(),
+            Error::ReplyCycle { .. }
+        ));
+    }
+
+    #[test]
+    fn opening_a_note_rewrites_it_into_schema_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[(
+                &format!("{A}.md"),
+                &format!("---\nsummary: kept\nrelation:root: {A}\ntitle: t\n---\n\nBody.\n"),
+            )],
+        );
+        let opened = ws.open_note(nid(A)).unwrap().unwrap();
+        assert!(opened.repaired);
+        assert_eq!(
+            std::fs::read_to_string(&opened.path).unwrap(),
+            format!("---\ntitle: t\nrelation:root: {A}\nsummary: kept\n---\n\nBody.\n")
+        );
+    }
+
+    #[test]
+    fn opening_a_note_that_is_already_complete_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[(
+                &format!("{A}.md"),
+                &format!("---\ntitle: t\nrelation:root: {A}\n---\n\nBody.\n"),
+            )],
+        );
+        let path = ws.root().join(format!("{A}.md"));
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let opened = ws.open_note(nid(A)).unwrap().unwrap();
+        assert!(!opened.repaired);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before,
+            "a clean note must not be touched at all"
+        );
+        assert_eq!(
+            std::fs::read_dir(ws.tmp_dir()).unwrap().count(),
+            0,
+            "a staged file was left behind"
+        );
+    }
+
+    /// Stage 1b acceptance, in the form stage 1b can state it: a read pass over a clean vault
+    /// writes nothing.
+    ///
+    /// The criterion as written names `sync()` and `rebuild()`, which are stage 2's. What is
+    /// testable now is the property they will inherit — enumerating and parsing every note in the
+    /// corpus leaves every byte, and the whole directory tree, exactly as it was.
+    #[test]
+    fn reading_the_whole_fixture_vault_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let before = tree_snapshot(&root);
+
+        let ws = Workspace::open(&root).unwrap();
+        assert!(ws.warnings().is_empty(), "{:?}", ws.warnings());
+        for path in fs::live_note_paths(&root).unwrap() {
+            Note::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        }
+        for path in fs::trashed_note_paths(&root).unwrap() {
+            Note::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        }
+
+        assert_eq!(
+            tree_snapshot(&root),
+            before,
+            "a read pass changed the vault"
+        );
+    }
+
+    /// Every file under `root`, relative path and bytes, so a diff shows what moved.
+    fn tree_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        collect(root, root, &mut out);
+        out.sort();
+        return out;
+
+        fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, out);
+                } else {
+                    let rel = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((rel, std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+    }
+
+    /// Opening every note in the corpus is idempotent: the first open may repair, the second must
+    /// not. A repair that is not a fixed point would rewrite the vault on every open forever.
+    #[test]
+    fn opening_every_fixture_note_twice_writes_at_most_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fixture_copy(tmp.path());
+        let ws = Workspace::open(&root).unwrap();
+
+        for path in fs::live_note_paths(&root).unwrap() {
+            let id = NoteId::from(fs::parse_note_filename(&path).unwrap());
+            ws.open_note(id).unwrap().unwrap();
+            let second = ws.open_note(id).unwrap().unwrap();
+            assert!(
+                !second.repaired,
+                "{} is rewritten on every open",
+                path.display()
+            );
+        }
     }
 }

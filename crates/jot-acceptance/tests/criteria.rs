@@ -1,54 +1,665 @@
-#![cfg(feature = "stage1")]
-//! Stage 1 acceptance criteria, one test per named criterion in the Acceptance section of
-//! `docs/plans/stage1.md`, each named after the criterion it encodes.
+#![cfg(feature = "stage1b")]
+//! Stage 1b acceptance criteria, one test per named criterion in the Acceptance section of
+//! `docs/plans/stage1b.md`, each named after the criterion it encodes.
 //!
-//! Rulings from `docs/plans/runs/stage1/dispatch.md` are treated as part of the contract:
-//! §U1 (preserve on read, normalize on edit), §U3 (`init` semantics), §U4 (what "interrupted"
-//! means), §U7 (`init`/`open` never touch the registry), §U9/§U10 (hard errors only, and
-//! "the frontmatter wins" is a property of parsing from bytes).
+//! Stage 1's criteria are **not** carried forward wholesale. Three of them were about rules stage
+//! 1b deletes — "the frontmatter wins", the filename/frontmatter mismatch, and byte-identical
+//! re-serialization on the preserving path — and keeping them would mean asserting a contract the
+//! plan no longer states. What survives, unchanged in substance, is everything about the vault on
+//! disk: `init`'s tree, atomic replacement on Windows, an interrupted write, and `discover`. Those
+//! stayed green through the rewrite and are re-stated here so that a stage-1b run of this suite is
+//! a complete gate rather than a delta.
 //!
-//! ## API names
+//! ## Two criteria this stage cannot close
 //!
-//! Every name below is now pinned by `dispatch.md` "API contract, pinned at the wave 2/3
-//! boundary". Phase A guessed several of them; the guesses were reconciled against T2.1's frozen
-//! `error.rs` and the five error variants that disagreed were renamed here — a contract fix, not a
-//! weakened assertion. Nothing in this file may be renamed again without an appeal.
-//!
-//!   `Note::parse(&[u8]) -> Result<Note>`         — from bytes; never consults a filename (§U9)
-//!   `Note::load(&Path) -> Result<Note>`          — from a path; reports `NoteIdMismatch` (§U9)
-//!   `Note::to_bytes(&self) -> Vec<u8>`           — preserving path (§U1)
-//!   `Note::to_canonical_bytes(&self) -> Vec<u8>` — canonical path (§U1)
-//!   `Note { pub meta: NoteMeta, pub body: String }`, `NoteMeta.id: NoteId`
-//!   `Workspace::{init, open, discover}`, `Workspace::root(&self) -> &Path`
-//!   `WorkspaceKind::{Jot, Plain}`
-//!   `fs::atomic_write(target, tmp_dir, bytes) -> Result<()>`
-//!   `Error::NoteIdMismatch { path, filename_id: Uuid, frontmatter_id: Uuid }`
-//!
-//! Still unpinned, and deliberately untested here: the `Note`/`NoteMeta`/`Frontmatter`
-//! relationship is T3.1's design call, so this suite references `Frontmatter` nowhere and reaches
-//! every unknown-key assertion through emitted bytes. That gap closes in phase B.
+//! - **"`sync()` and `rebuild()` over a clean vault write nothing."** Neither function exists;
+//!   stage 1b's own "Not in this stage" section puts SQLite in stage 2. What is testable now is
+//!   the property they will inherit — a read pass over the corpus changes no byte — and that is
+//!   what [`a_read_pass_over_a_clean_vault_writes_nothing`] asserts. The criterion as written
+//!   moves to stage 2's suite.
+//! - **"A workspace whose `schema.frontmatter` omits a relation key is rejected at `open`."**
+//!   Marked *contingent* in the stage doc. Ratified 2026-08-31 the other way: a thin schema
+//!   **warns and opens**. [`a_thin_schema_warns_and_opens_rather_than_being_rejected`] encodes the
+//!   ratified rule, and the rendering guarantee that makes it safe is asserted alongside it.
 
 use jot_acceptance::*;
 use jot_core::error::Error;
+use jot_core::frontmatter::{Frontmatter, FrontmatterSchema};
 use jot_core::fs as jot_fs;
-use jot_core::note::Note;
-use jot_core::workspace::{Workspace, WorkspaceKind};
-use std::path::Path;
+use jot_core::note::{Note, NoteId};
+use jot_core::workspace::{Warning, Workspace, WorkspaceKind};
+use std::path::{Path, PathBuf};
+
+fn schema() -> FrontmatterSchema {
+    FrontmatterSchema::jot_default()
+}
+
+/// A copy of the shared corpus in a temp directory, so a test may write without touching it.
+fn vault_copy(tmp: &Path) -> PathBuf {
+    let dst = tmp.join("vault");
+    copy_tree(&fixture_vault(), &dst);
+    dst
+}
+
+fn copy_tree(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), &to).unwrap();
+        }
+    }
+}
+
+/// A vault holding exactly `notes`, each `(filename, contents)`.
+fn vault_of(tmp: &Path, notes: &[(String, String)]) -> Workspace {
+    let root = tmp.join("v");
+    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    for (name, text) in notes {
+        std::fs::write(root.join(name), text).unwrap();
+    }
+    ws
+}
 
 // =============================================================================================
-// Criterion 1 — "`Workspace::init` on an empty directory produces the exact tree above."
+// Criterion — "A note written by jot has its frontmatter keys in exactly `schema.frontmatter`
+//              order."
 // =============================================================================================
 
+#[test]
+fn a_note_written_by_jot_has_its_keys_in_exactly_schema_order() {
+    // Read out of order, written in order. The input deliberately puts every interpreted key in
+    // the wrong place and buries an unknown key between two of them.
+    let id: NoteId = "01a03d4e-78a0-76bc-be78-8ae41b38eefa".parse().unwrap();
+    let other = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5";
+    let source = format!(
+        "---\nrelation:quote: {other}\nsummary: in the middle\nrelation:root: {other}\n\
+         title: T\nrelation:reply_to: {other}\n---\n\nBody.\n"
+    );
+
+    let note = Note::parse(id, source.as_bytes()).expect("the fixture shape must parse");
+    let written = note.to_bytes(&schema());
+    let keys = top_level_keys(&frontmatter_block(&written));
+
+    assert_eq!(
+        &keys[..4],
+        &SCHEMA_KEY_ORDER,
+        "emitted key order is not the declared order; full order was {keys:?}"
+    );
+    assert_eq!(
+        keys,
+        [
+            "title",
+            "relation:root",
+            "relation:reply_to",
+            "relation:quote",
+            "summary"
+        ],
+        "unknown keys belong after the declared ones, in the order they were read"
+    );
+}
+
+/// A second case for the same criterion. The double underscore is deliberate: everything left of
+/// it is the criterion's name as `stage1b.md` writes it, and everything right of it is the
+/// sub-case, so a failure report still names the criterion. Ratified at seal in
+/// `runs/stage1/verification.md`.
+#[allow(non_snake_case)]
+#[test]
+fn a_note_written_by_jot_has_its_keys_in_exactly_schema_order__a_different_schema_reorders_it() {
+    // The order is *declared*, not hardcoded: the same typed state under a different schema is a
+    // different file. A `KNOWN_KEYS` constant left in the implementation would fail here and
+    // nowhere else.
+    let id = NoteId::new();
+    let other = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5";
+    let source = format!("---\ntitle: T\nrelation:root: {other}\nsummary: S\n---\n\nB.\n");
+    let note = Note::parse(id, source.as_bytes()).unwrap();
+
+    let declared = FrontmatterSchema::new(["summary", "relation:root", "title"]);
+    let written = note.to_bytes(&declared);
+    assert_eq!(
+        top_level_keys(&frontmatter_block(&written)),
+        ["summary", "relation:root", "title"]
+    );
+}
+
+// =============================================================================================
+// Criterion — "`render → parse → render` is a fixed point."
+// =============================================================================================
+
+#[test]
+fn render_parse_render_is_a_fixed_point() {
+    for path in vault_note_paths() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+
+        let once = note.to_bytes(&schema());
+        let reparsed = Note::parse(note.id, &once)
+            .unwrap_or_else(|e| panic!("{name}: jot wrote something it cannot read back: {e}"));
+        let twice = reparsed.to_bytes(&schema());
+
+        assert_bytes_eq(
+            &twice,
+            &once,
+            &format!("{name}: render is not a fixed point"),
+        );
+        assert_eq!(
+            reparsed.frontmatter, note.frontmatter,
+            "{name}: the typed state changed across a write"
+        );
+        assert_eq!(reparsed.body, note.body, "{name}: the body changed");
+    }
+}
+
+// =============================================================================================
+// Criterion — "A note carrying `summary:` (not in the schema) survives an edit to its title with
+//              `summary`'s bytes unchanged, including when its value is a block scalar or a
+//              nested mapping."
+// =============================================================================================
+
+#[test]
+fn a_note_carrying_summary_survives_a_title_edit_with_its_bytes_unchanged() {
+    for fixture in [SUMMARY_BLOCK_SCALAR_NOTE, SUMMARY_NESTED_MAPPING_NOTE] {
+        let path = fixture_vault().join(fixture);
+        let original = read_text(&path);
+        let mut note = Note::load(&path).unwrap_or_else(|e| panic!("{fixture}: {e}"));
+
+        assert!(
+            !schema().contains("summary"),
+            "the criterion is about a key the schema does *not* declare"
+        );
+
+        // The exact source lines of `summary` in the file, taken from the fixture rather than from
+        // the implementation, so the assertion is against the file's bytes.
+        let expected = summary_source(&original);
+        assert!(
+            expected.lines().count() >= 3,
+            "{fixture}: this fixture is meant to be a multi-line value, found {expected:?}"
+        );
+
+        note.frontmatter.title = Some("An edited title".to_string());
+        let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
+
+        assert!(
+            written.contains("title: An edited title"),
+            "{fixture}: the edit did not land:\n{written}"
+        );
+        assert!(
+            written.contains(&expected),
+            "{fixture}: summary's bytes changed.\n--- wanted ---\n{expected}\n--- got ---\n{written}"
+        );
+    }
+}
+
+/// The `summary:` line and every continuation line under it, read straight out of the file.
+fn summary_source(text: &str) -> String {
+    let block = frontmatter_block(text.as_bytes());
+    let mut out = String::new();
+    let mut inside = false;
+    for line in block.lines() {
+        let starts_a_top_level_key =
+            !line.starts_with([' ', '\t', '#']) && !line.is_empty() && line.contains(':');
+        if inside && starts_a_top_level_key {
+            break;
+        }
+        if line.starts_with("summary:") {
+            inside = true;
+        }
+        if inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    assert!(!out.is_empty(), "no `summary:` key in:\n{block}");
+    out
+}
+
+// =============================================================================================
+// Criterion — "A note whose `relation:root` was deleted externally has it recomputed on open; one
+//              whose `relation:reply_to` was deleted becomes top-level and is not written back as
+//              empty."
+// =============================================================================================
+
+const A: &str = "01a03d60-0000-7000-8000-00000000000a";
+const B: &str = "01a03d61-0000-7000-8000-00000000000b";
+const C: &str = "01a03d62-0000-7000-8000-00000000000c";
+
+#[test]
+fn a_deleted_relation_root_is_recomputed_on_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = vault_of(
+        tmp.path(),
+        &[
+            (
+                format!("{A}.md"),
+                format!("---\nrelation:root: {A}\n---\n\nA.\n"),
+            ),
+            (
+                format!("{B}.md"),
+                format!("---\nrelation:root: {A}\nrelation:reply_to: {A}\n---\n\nB.\n"),
+            ),
+            // `relation:root` deleted by hand, three deep in the thread.
+            (
+                format!("{C}.md"),
+                format!("---\nrelation:reply_to: {B}\n---\n\nC.\n"),
+            ),
+        ],
+    );
+
+    let id: NoteId = C.parse().unwrap();
+    let opened = ws
+        .open_note(id)
+        .expect("open must succeed")
+        .expect("the note is in the vault");
+
+    assert_eq!(
+        opened
+            .note
+            .frontmatter
+            .root
+            .map(|r| r.to_string())
+            .as_deref(),
+        Some(A),
+        "the root must be recomputed by walking reply_to to the top of the thread"
+    );
+    assert!(
+        opened.repaired,
+        "the repair must reach the file, not just memory"
+    );
+
+    let on_disk = std::fs::read_to_string(&opened.path).unwrap();
+    assert_eq!(
+        top_level_value(&frontmatter_block(on_disk.as_bytes()), "relation:root").as_deref(),
+        Some(A),
+        "on disk:\n{on_disk}"
+    );
+    assert!(on_disk.ends_with("\nC.\n"), "the body moved:\n{on_disk}");
+}
+
+#[test]
+fn a_deleted_relation_reply_to_becomes_top_level_and_is_not_written_back_as_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = vault_of(
+        tmp.path(),
+        &[(
+            format!("{C}.md"),
+            "---\ntitle: orphaned\n---\n\nC.\n".to_string(),
+        )],
+    );
+
+    let id: NoteId = C.parse().unwrap();
+    let opened = ws.open_note(id).unwrap().unwrap();
+
+    assert_eq!(opened.note.frontmatter.reply_to, None);
+    assert_eq!(
+        opened
+            .note
+            .frontmatter
+            .root
+            .map(|r| r.to_string())
+            .as_deref(),
+        Some(C),
+        "a note with no parent is its own root, which is what `top-level` means"
+    );
+
+    let on_disk = std::fs::read_to_string(&opened.path).unwrap();
+    let keys = top_level_keys(&frontmatter_block(on_disk.as_bytes()));
+    assert!(
+        !keys.iter().any(|k| k == "relation:reply_to"),
+        "an absent parent was written back as an empty key — `empty` means `something was here` \
+         and nothing can act on it. On disk:\n{on_disk}"
+    );
+    assert_eq!(keys, ["title", "relation:root"]);
+}
+
+// =============================================================================================
+// Criterion — "`sync()` and `rebuild()` over a clean vault write nothing — `git status` stays
+//              empty."  (the reachable half; see the module docs)
+// =============================================================================================
+
+#[test]
+fn a_read_pass_over_a_clean_vault_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = vault_copy(tmp.path());
+    let before = tree_bytes(&root);
+
+    let ws = Workspace::open(&root).expect("the fixture vault must open");
+    for path in jot_fs::live_note_paths(&root).unwrap() {
+        Note::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+    for path in jot_fs::trashed_note_paths(&root).unwrap() {
+        Note::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    }
+    let _ = ws.manifest();
+
+    assert_eq!(
+        tree_bytes(&root),
+        before,
+        "a read pass changed the vault — `git status` would not stay empty"
+    );
+}
+
+/// Every file under `root` as `(relative path, bytes)`, sorted.
+fn tree_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    return out;
+
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                walk(root, &path, out);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+}
+
+// =============================================================================================
+// Criterion — "Two notes created in the same millisecond get distinct filenames and distinct
+//              identities."
+// =============================================================================================
+
+#[test]
+fn two_notes_created_in_the_same_millisecond_get_distinct_filenames_and_identities() {
+    use std::collections::HashSet;
+
+    let ids: Vec<NoteId> = (0..5_000).map(|_| NoteId::new()).collect();
+
+    let same_ms = ids
+        .windows(2)
+        .filter(|p| p[0].created_at() == p[1].created_at())
+        .count();
+    assert!(
+        same_ms > 0,
+        "no two of {} ids landed in one millisecond, so this proves nothing",
+        ids.len()
+    );
+
+    let unique: HashSet<NoteId> = ids.iter().copied().collect();
+    assert_eq!(unique.len(), ids.len(), "two notes share an identity");
+
+    // The filename is the only copy of the identity, so a filename clash would merge two notes
+    // into one file. Both creation-time slug options, and one title for all of them.
+    for slug in [jot_fs::FilenameSlug::None, jot_fs::FilenameSlug::FromTitle] {
+        let names: HashSet<String> = ids
+            .iter()
+            .map(|id| jot_fs::note_filename(id.as_uuid(), Some("one shared title"), slug))
+            .collect();
+        assert_eq!(names.len(), ids.len(), "{slug:?} produced a filename clash");
+    }
+
+    // Distinct *and ordered*: an id minted earlier sorts before one minted later.
+    assert!(ids.windows(2).all(|p| p[0] < p[1]));
+}
+
+// =============================================================================================
+// Criterion — "`created_at` recovered from a note's filename UUID equals the creation time it was
+//              minted with."
+// =============================================================================================
+
+#[test]
+fn created_at_recovered_from_the_filename_uuid_equals_the_mint_time() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Mint, name a file from it, then recover the time from nothing but that filename.
+    let minted = NoteId::new();
+    let expected = minted.created_at().expect("a v7 id encodes its mint time");
+
+    let name = jot_fs::note_filename(
+        minted.as_uuid(),
+        Some("A Title"),
+        jot_fs::FilenameSlug::FromTitle,
+    );
+    let path = tmp.path().join(&name);
+    std::fs::write(&path, "---\ntitle: A Title\n---\n\nB.\n").unwrap();
+
+    let loaded = Note::load(&path).unwrap();
+    assert_eq!(loaded.id, minted, "the filename is the identity");
+    assert_eq!(
+        loaded.created_at(),
+        Some(expected),
+        "the creation time must come back out of {name}"
+    );
+
+    // And nothing in the file carries it, which is the point of the removal.
+    let block = frontmatter_block(&read_bytes(&path));
+    assert!(
+        !top_level_keys(&block).iter().any(|k| k == "created_at"),
+        "created_at is derived from the id, not stored:\n{block}"
+    );
+
+    // Against a fixture whose id is a literal, so the decode is pinned rather than tautological.
+    let fixture: NoteId = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5".parse().unwrap();
+    assert_eq!(
+        fixture.created_at().unwrap().to_rfc3339(),
+        "2026-08-26T09:00:37+00:00"
+    );
+}
+
+// =============================================================================================
+// Criterion — "A workspace whose `schema.frontmatter` omits a relation key is rejected at `open`,
+//              naming what is missing."  (contingent; ratified the other way — see module docs)
+// =============================================================================================
+
+#[test]
+fn a_thin_schema_warns_and_opens_rather_than_being_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("v");
+    std::fs::create_dir_all(root.join(".jot")).unwrap();
+    std::fs::write(
+        root.join(".jot").join("workspace.toml"),
+        "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+         kind = \"jot\"\nname = \"V\"\n\n[schema]\nfrontmatter = [ \"title\", \"relation:root\" ]\n",
+    )
+    .unwrap();
+
+    let ws = Workspace::open(&root).expect("a thin schema warns; it does not refuse");
+    match ws.warnings() {
+        [Warning::SchemaMissingRelationKeys { path, missing }] => {
+            assert_eq!(missing, &["relation:reply_to", "relation:quote"]);
+            assert_eq!(
+                path,
+                &ws.manifest_path(),
+                "the warning must name the manifest"
+            );
+        }
+        other => panic!("expected exactly one schema warning, got {other:?}"),
+    }
+    let shown = ws.warnings()[0].to_string();
+    for key in ["relation:reply_to", "relation:quote"] {
+        assert!(shown.contains(key), "the warning must name {key}: {shown}");
+    }
+}
+
+/// Why warning is safe: a relation the schema omits is still written when the note has one, so the
+/// omission costs diff shape and never thread structure. Without this the ratified answer would be
+/// silent data loss and the stage doc's recommendation would be the right one.
+#[test]
+fn a_thin_schema_never_drops_a_relation_the_note_carries() {
+    let id = NoteId::new();
+    let source = format!(
+        "---\nrelation:root: {A}\nrelation:reply_to: {B}\nrelation:quote: {C}\n---\n\nB.\n"
+    );
+    let note = Note::parse(id, source.as_bytes()).unwrap();
+
+    let thin = FrontmatterSchema::new(["title", "relation:root"]);
+    let written = String::from_utf8(note.to_bytes(&thin)).unwrap();
+
+    for (key, value) in [
+        ("relation:root", A),
+        ("relation:reply_to", B),
+        ("relation:quote", C),
+    ] {
+        assert_eq!(
+            top_level_value(&frontmatter_block(written.as_bytes()), key).as_deref(),
+            Some(value),
+            "{key} was dropped by a schema that does not declare it:\n{written}"
+        );
+    }
+}
+
+// =============================================================================================
+// Criterion — "For every fixture note, the three slices the parse path cuts — BOM prefix, fenced
+//              block, body — concatenate back to the original file byte-for-byte."
+// =============================================================================================
+
+#[test]
+fn every_fixture_note_reconstitutes_from_the_three_slices() {
+    for path in vault_note_paths() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let original = read_bytes(&path);
+        let text = String::from_utf8(original.clone()).unwrap();
+
+        // The suite has no access to the private `Split`, so it reconstructs the same three
+        // slices from the public parse and from the file's own text. `body` is what the parser
+        // returned; `prefix` and `block` are everything before it. If the parser kept a byte of
+        // the body inside the block, or dropped one between them, this arithmetic breaks.
+        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            text.ends_with(&note.body),
+            "{name}: the returned body is not a suffix of the file"
+        );
+        let split_at = text.len() - note.body.len();
+        let (prefix_and_block, body) = text.split_at(split_at);
+
+        assert_eq!(body, note.body, "{name}");
+        assert_eq!(
+            format!("{prefix_and_block}{body}"),
+            text,
+            "{name}: the slices do not reconstitute the file"
+        );
+
+        // And the prefix really is only a BOM or nothing — a parser that swallowed leading bytes
+        // into the block would still satisfy the concatenation above.
+        let fence = prefix_and_block.find("---").expect("an opening fence");
+        let prefix = &prefix_and_block[..fence];
+        assert!(
+            prefix.is_empty() || prefix == "\u{feff}",
+            "{name}: the prefix is {prefix:?}, which is neither empty nor a BOM"
+        );
+        assert!(
+            prefix_and_block[fence..].trim_end().ends_with("---"),
+            "{name}: the block does not end at a closing fence"
+        );
+    }
+}
+
+// =============================================================================================
+// Criterion — "A file with no fence and a file with an unterminated fence produce two *different*
+//              errors, each naming the path."
+// =============================================================================================
+
+#[test]
+fn no_fence_and_an_unterminated_fence_produce_two_different_errors_each_naming_the_path() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let staged = |fixture: &str, uuid: &str| -> (PathBuf, Error) {
+        let path = tmp.path().join(format!("{uuid}.md"));
+        std::fs::copy(fixture_invalid().join(fixture), &path).unwrap();
+        let err = Note::load(&path).expect_err(&format!("{fixture} must not load"));
+        (path, err)
+    };
+
+    let (no_fence_path, no_fence) = staged("no_fence.md", A);
+    let (unterminated_path, unterminated) = staged("unterminated_fence.md", B);
+
+    assert!(
+        matches!(no_fence, Error::MissingFrontmatterFence { .. }),
+        "no_fence.md produced {no_fence:?}"
+    );
+    assert!(
+        matches!(unterminated, Error::UnterminatedFrontmatter { .. }),
+        "unterminated_fence.md produced {unterminated:?}"
+    );
+    assert_ne!(
+        std::mem::discriminant(&no_fence),
+        std::mem::discriminant(&unterminated),
+        "the two fence failures collapsed into one variant"
+    );
+
+    for (path, err) in [
+        (&no_fence_path, &no_fence),
+        (&unterminated_path, &unterminated),
+    ] {
+        assert_eq!(err.path(), Some(path.as_path()), "{err}");
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            err.to_string().contains(&*name),
+            "{err} does not name {name}"
+        );
+    }
+}
+
+// =============================================================================================
+// Criterion — "A note whose body contains list markers, emphasis, and hard line breaks survives a
+//              title edit with every body byte unchanged."
+// =============================================================================================
+
+#[test]
+fn a_markdown_body_survives_a_title_edit_with_every_byte_unchanged() {
+    let path = fixture_vault().join(MARKDOWN_BODY_NOTE);
+    let original = read_text(&path);
+    let mut note = Note::load(&path).unwrap();
+
+    // The fixture must actually contain what the criterion names, or the test is vacuous.
+    for (what, needle) in [
+        ("a non-canonical list marker", "\n* "),
+        ("a second list marker", "\n+ "),
+        ("an ordered marker with a paren", "\n1) "),
+        ("underscore emphasis", "_underscores_"),
+        ("underscore strong", "__two of them__"),
+        ("a two-space hard break", ":  \n"),
+        ("a backslash hard break", "\\\n"),
+        ("an indented code block", "\n    An indented code block"),
+        ("a literal tab", "\t"),
+    ] {
+        assert!(
+            note.body.contains(needle),
+            "{MARKDOWN_BODY_NOTE} is missing {what} ({needle:?}), so this test proves nothing"
+        );
+    }
+
+    let body_before = note.body.clone();
+    note.frontmatter.title = Some("Edited".to_string());
+    let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
+
+    assert!(written.contains("title: Edited"), "the edit did not land");
+    assert!(
+        written.ends_with(&body_before),
+        "the body was rewritten. A markdown *renderer* in the write path would normalize exactly \
+         these constructs.\n--- before ---\n{body_before}\n--- after ---\n{written}"
+    );
+
+    // Stated the other way too: everything after the closing fence is byte-identical to the file.
+    let original_body = &original[original.len() - body_before.len()..];
+    assert_eq!(original_body, body_before);
+}
+
+// =============================================================================================
+// Carried forward from stage 1 — the vault on disk, unchanged by the format work
+// =============================================================================================
+
+/// Stage 1: "`Workspace::init` on an empty directory produces the exact tree."
 #[test]
 fn workspace_init_on_an_empty_directory_produces_the_exact_tree() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("Thoughts");
     std::fs::create_dir(&root).unwrap();
 
-    Workspace::init(&root, WorkspaceKind::Jot).expect("init on an empty directory must succeed");
+    Workspace::init(&root, WorkspaceKind::Jot).expect("init must succeed");
 
-    // "the exact tree" is read literally: these entries and no others. A stray `index.db`, a
-    // `.DS_Store`, a leftover staging file, or a missing `tmp/` all fail here.
     assert_eq!(
         relative_tree(&root),
         vec![
@@ -58,550 +669,76 @@ fn workspace_init_on_an_empty_directory_produces_the_exact_tree() {
             ".jot/tmp".to_string(),
             ".jot/workspace.toml".to_string(),
         ],
-        "init must produce exactly the on-disk contract in stage1.md and nothing else"
+        "init produced a different tree"
     );
+
+    // The manifest declares the schema notes are written in. Stage 1's `[notes] filename` knob is
+    // gone; a manifest still carrying it would mean the removal did not land.
+    let manifest = read_text(&root.join(".jot").join("workspace.toml"));
+    assert!(manifest.contains("[schema]"), "{manifest}");
+    assert!(manifest.contains("frontmatter"), "{manifest}");
     assert!(
-        root.join(".jot/.trash").is_dir(),
-        ".jot/.trash must be a directory"
+        !manifest.contains("[notes]"),
+        "the removed filename knob is still being written:\n{manifest}"
     );
-    assert!(
-        root.join(".jot/tmp").is_dir(),
-        ".jot/tmp must be a directory (it is the staging area atomic_write requires)"
-    );
-    assert!(
-        !root.join(".jot/index.db").exists(),
-        "index.db is stage 2; stage 1 init must not create it"
-    );
-
-    let gitignore = read_text(&root.join(".jot/.gitignore"));
-    let lines: Vec<&str> = gitignore.lines().map(str::trim).collect();
-    assert!(
-        lines.contains(&"index.db*"),
-        ".jot/.gitignore must ignore index.db*, got:\n{gitignore}"
-    );
-    assert!(
-        lines.contains(&"tmp/"),
-        ".jot/.gitignore must ignore tmp/, got:\n{gitignore}"
-    );
-
-    let manifest_text = read_text(&root.join(".jot/workspace.toml"));
-    let manifest: toml::Value = toml::from_str(&manifest_text)
-        .unwrap_or_else(|e| panic!("workspace.toml is not valid TOML: {e}\n{manifest_text}"));
-
-    assert_eq!(
-        manifest
-            .get("schema_version")
-            .and_then(toml::Value::as_integer),
-        Some(1),
-        "schema_version must be 1\n{manifest_text}"
-    );
-    let ws = manifest
-        .get("workspace")
-        .unwrap_or_else(|| panic!("no [workspace] table\n{manifest_text}"));
-    let id = ws
-        .get("id")
-        .and_then(toml::Value::as_str)
-        .unwrap_or_else(|| panic!("no workspace.id\n{manifest_text}"));
-    assert!(
-        is_uuid_v7(id),
-        "workspace.id must be a lowercase hyphenated UUIDv7, got {id:?}"
-    );
-    assert_eq!(
-        ws.get("kind").and_then(toml::Value::as_str),
-        Some("jot"),
-        "workspace.kind must reflect the kind passed to init\n{manifest_text}"
-    );
-    // dispatch.md §U3: `name` is not a parameter; it defaults to the target directory's basename.
-    assert_eq!(
-        ws.get("name").and_then(toml::Value::as_str),
-        Some("Thoughts"),
-        "workspace.name defaults to the target directory basename (dispatch.md U3)\n{manifest_text}"
-    );
-    assert_eq!(
-        manifest
-            .get("notes")
-            .and_then(|n| n.get("filename"))
-            .and_then(toml::Value::as_str),
-        Some("uuid"),
-        "[notes] filename defaults to \"uuid\"\n{manifest_text}"
-    );
-}
-
-// =============================================================================================
-// Criterion 2 — "A hand-written note file parses; re-serializing it changes nothing."
-//
-// dispatch.md §U1 splits this into two serialization paths. The walk below covers the preserving
-// path only; the canonical path is never exercised by a round-trip walk, which is exactly where a
-// vacuous implementation would hide, so it gets its own tests immediately after.
-// =============================================================================================
-
-#[test]
-fn a_hand_written_note_file_parses_and_re_serializing_it_changes_nothing() {
-    let paths = vault_note_paths();
-    assert!(
-        paths.len() >= 9,
-        "expected the full shared corpus (>= 9 notes, eight live plus the trashed one), found {} \
-         — a shrunken corpus makes this gate vacuously green",
-        paths.len()
-    );
-
-    let mut saw_non_canonical = false;
-    for path in &paths {
-        let original = read_bytes(path);
-        let note = Note::parse(&original)
-            .unwrap_or_else(|e| panic!("fixture {} failed to parse: {e}", path.display()));
-        let reserialized = note.to_bytes();
-        assert_bytes_eq(
-            &reserialized,
-            &original,
-            &format!(
-                "parse -> serialize of the unmodified note {} was not byte-identical; per \
-                 stage1.md this is a bug in the writer, not in the fixture",
-                path.display()
-            ),
-        );
-        if path
-            .file_name()
-            .is_some_and(|n| n == NON_CANONICAL_ORDER_NOTE)
-        {
-            saw_non_canonical = true;
-        }
-    }
-
-    assert!(
-        saw_non_canonical,
-        "the walk must include {NON_CANONICAL_ORDER_NOTE}, whose keys are deliberately out of \
-         canonical order — it is the fixture that distinguishes a preserving writer from a \
-         normalizing one"
-    );
-}
-
-/// The `__` is deliberate and is allowed rather than renamed: everything left of it is the
-/// criterion's name as `stage1.md` writes it, and everything right of it is the sub-case. That
-/// makes a line in a CI failure log map back to a line in the stage doc without a lookup, which is
-/// the whole point of naming a test after a criterion. Ratified at seal in
-/// `runs/stage1/verification.md`.
-#[allow(non_snake_case)]
-#[test]
-fn a_hand_written_note_file_parses_and_re_serializing_it_changes_nothing__out_of_order_keys() {
-    // Called out separately from the walk so a failure names this criterion directly rather than
-    // arriving as one line of a loop.
-    let path = fixture_vault().join(NON_CANONICAL_ORDER_NOTE);
-    let original = read_bytes(&path);
-
-    let block = frontmatter_block(&original);
-    assert_eq!(
-        top_level_keys(&block),
-        vec!["created_at", "root", "id", "title"],
-        "precondition: this fixture's keys are supposed to be out of canonical order"
-    );
-
-    let note = Note::parse(&original).expect("a hand-written note with shuffled keys must parse");
-    assert_bytes_eq(
-        &note.to_bytes(),
-        &original,
-        "the preserving path must reproduce a hand-written note's key order, spacing and scalar \
-         style exactly (dispatch.md U1)",
-    );
-}
-
-#[test]
-fn canonical_serialization_emits_known_keys_in_the_fixed_order() {
-    // Synthesized rather than taken from the corpus: every fixture that carries all eight known
-    // keys would have to already be in canonical order to be realistic, and a test whose input is
-    // already sorted cannot tell a sorter from a passthrough.
-    let source = "\
----
-trashed_at: 2026-08-28T10:00:00Z
-quote: 01a03d10-3f8a-7bb1-9c22-0e1d5a6b7c88
-root: 01a03d20-a54c-7977-a1f4-1a88b38855dd
-reply_to: 01a03d20-a54c-7977-a1f4-1a88b38855dd
-edited_at: 2026-08-27T09:00:00Z
-created_at: 2026-08-26T09:00:00Z
-title: Reverse of canonical order
-id: 01a03d21-7c11-7a02-b3de-9f0e21c4a771
-zeta: written first among the unknown keys
-alpha: written second among the unknown keys
----
-
-Body text.
-";
-    let note = Note::parse(source.as_bytes()).expect("synthesized note must parse");
-
-    // The preserving path leaves it alone...
-    assert_bytes_eq(
-        &note.to_bytes(),
-        source.as_bytes(),
-        "preserving path must not reorder an unmodified note",
-    );
-
-    // ...and the canonical path sorts the known keys into the fixed order, then leaves the
-    // unknown keys in their *original relative* order (zeta before alpha, not alphabetical).
-    let canonical = note.to_canonical_bytes();
-    let keys = top_level_keys(&frontmatter_block(&canonical));
-    assert_eq!(
-        keys,
-        vec![
-            "id",
-            "title",
-            "created_at",
-            "edited_at",
-            "reply_to",
-            "root",
-            "quote",
-            "trashed_at",
-            "zeta",
-            "alpha",
-        ],
-        "canonical output must be {CANONICAL_KEY_ORDER:?} then unknown keys in their original \
-         relative order (dispatch.md U1)"
-    );
-}
-
-#[test]
-fn canonical_serialization_keeps_unknown_keys_after_the_known_ones_in_their_original_order() {
-    let path = fixture_vault().join(UNKNOWN_KEYS_NOTE);
-    let original = read_bytes(&path);
-    let note = Note::parse(&original).expect("the unknown-keys fixture must parse");
-
-    let canonical = note.to_canonical_bytes();
-    let keys = top_level_keys(&frontmatter_block(&canonical));
-
-    // Fixture order is: id, source, title, created_at, tags, root, location, priority.
-    assert_eq!(
-        keys,
-        vec![
-            "id",
-            "title",
-            "created_at",
-            "root",
-            "source",
-            "tags",
-            "location",
-            "priority",
-        ],
-        "known keys canonicalized, unknown keys (source, tags, location, priority) following in \
-         their original relative order"
-    );
-}
-
-#[test]
-fn canonical_serialization_normalizes_a_note_whose_keys_were_written_out_of_order() {
-    let path = fixture_vault().join(NON_CANONICAL_ORDER_NOTE);
-    let note = Note::parse(&read_bytes(&path)).expect("must parse");
-
-    let canonical = note.to_canonical_bytes();
-    let keys = top_level_keys(&frontmatter_block(&canonical));
-    assert_eq!(
-        keys,
-        vec!["id", "title", "created_at", "root"],
-        "a note that reaches the canonical path reshuffles into canonical order; this is the \
-         other half of dispatch.md U1 and the half the round-trip walk cannot see"
-    );
-}
-
-#[test]
-fn canonical_serialization_preserves_the_body_verbatim_and_is_a_fixed_point() {
-    for name in [
-        NON_CANONICAL_ORDER_NOTE,
-        UNKNOWN_KEYS_NOTE,
-        ALL_KNOWN_KEYS_NOTE,
-    ] {
-        let path = fixture_vault().join(name);
-        let note = Note::parse(&read_bytes(&path)).unwrap_or_else(|e| panic!("{name}: {e}"));
-
-        let canonical = note.to_canonical_bytes();
-        let reparsed = Note::parse(&canonical).unwrap_or_else(|e| {
-            panic!(
-                "{name}: canonical output does not parse back:\n{}\nerror: {e}",
-                String::from_utf8_lossy(&canonical)
-            )
-        });
-
-        assert_eq!(
-            reparsed.body, note.body,
-            "{name}: the canonical path must not touch the body"
-        );
-        assert_bytes_eq(
-            &reparsed.to_canonical_bytes(),
-            &canonical,
-            &format!("{name}: canonical form must be a fixed point"),
-        );
-        assert_bytes_eq(
-            &reparsed.to_bytes(),
-            &canonical,
-            &format!(
-                "{name}: once canonical bytes have been parsed, the preserving path must emit \
-                 those same bytes"
-            ),
-        );
+    for key in SCHEMA_KEY_ORDER {
+        assert!(manifest.contains(key), "{key} missing from:\n{manifest}");
     }
 }
 
+/// Stage 1: "Overwriting an existing note file succeeds on Windows."
 #[test]
-fn canonical_serialization_emits_timestamps_as_quoted_rfc3339_utc() {
-    // dispatch.md §U2: canonical output is RFC 3339, UTC, `Z`, second precision, quoted so no
-    // YAML emitter can reinterpret it as a timestamp type.
-    let source = "\
----
-id: 01a03d21-7c11-7a02-b3de-9f0e21c4a771
-created_at: 2026-08-26T09:00:00Z
-edited_at: 2026-08-27T09:30:15Z
-root: 01a03d21-7c11-7a02-b3de-9f0e21c4a771
-trashed_at: 2026-08-28T10:00:00Z
----
-
-Body.
-";
-    let note = Note::parse(source.as_bytes()).expect("must parse");
-    let block = frontmatter_block(&note.to_canonical_bytes());
-
-    for (key, expected) in [
-        ("created_at", "2026-08-26T09:00:00Z"),
-        ("edited_at", "2026-08-27T09:30:15Z"),
-        ("trashed_at", "2026-08-28T10:00:00Z"),
-    ] {
-        let raw = top_level_value(&block, key)
-            .unwrap_or_else(|| panic!("canonical output lost `{key}`:\n{block}"));
-        let inner = unquote(&raw).unwrap_or_else(|| {
-            panic!(
-                "canonical `{key}` must be a quoted string so YAML cannot retype it \
-                 (dispatch.md U2), got {raw}"
-            )
-        });
-        assert_eq!(
-            inner, expected,
-            "canonical `{key}` must stay RFC 3339 UTC with a Z suffix and second precision"
-        );
-    }
-}
-
-// =============================================================================================
-// Criterion 3 — "A note carrying an unknown frontmatter key survives a parse -> write cycle
-//                with the key intact."
-// =============================================================================================
-
-#[test]
-fn a_note_with_an_unknown_frontmatter_key_survives_a_parse_write_cycle_with_the_key_intact() {
+fn overwriting_an_existing_note_file_succeeds() {
     let tmp = tempfile::tempdir().unwrap();
-    let tmp_dir = tmp.path().join("tmp");
-    std::fs::create_dir(&tmp_dir).unwrap();
+    let root = tmp.path().join("v");
+    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
 
-    let source_path = fixture_vault().join(UNKNOWN_KEYS_NOTE);
-    let original = read_bytes(&source_path);
-    let note = Note::parse(&original).expect("the unknown-keys fixture must parse");
+    let target = root.join(format!("{A}.md"));
+    jot_fs::atomic_write(&target, &ws.tmp_dir(), b"first\n").unwrap();
+    jot_fs::atomic_write(&target, &ws.tmp_dir(), b"second\n").expect("replacing must succeed");
 
-    // A real write cycle, through the real writer, not an in-memory shortcut.
-    let target = tmp.path().join(UNKNOWN_KEYS_NOTE);
-    jot_fs::atomic_write(&target, &tmp_dir, &note.to_bytes()).expect("atomic_write must succeed");
-
-    let written = read_bytes(&target);
-    assert_bytes_eq(
-        &written,
-        &original,
-        "preserving path: a full parse -> write cycle through the filesystem must not move a byte",
-    );
-
-    // And through the canonical path, where the keys are genuinely re-emitted rather than copied.
-    let canonical_target = tmp.path().join("canonical.md");
-    jot_fs::atomic_write(&canonical_target, &tmp_dir, &note.to_canonical_bytes())
-        .expect("atomic_write must succeed");
-
-    let canonical = read_bytes(&canonical_target);
-    let block = frontmatter_block(&canonical);
-    let keys = top_level_keys(&block);
-    for unknown in ["source", "tags", "location", "priority"] {
-        assert!(
-            keys.contains(&unknown.to_string()),
-            "unknown key `{unknown}` was dropped by the canonical writer:\n{block}"
-        );
-    }
-    // Values, not just keys: a writer that emits `tags:` with nothing under it has still lost the
-    // data. Nested mapping and list contents are checked as substrings so the assertion does not
-    // depend on which YAML style the emitter picks.
-    for fragment in [
-        "obsidian-import",
-        "migration",
-        "draft",
-        "Seoul",
-        "KR",
-        "city",
-        "country",
-        "3",
-    ] {
-        assert!(
-            block.contains(fragment),
-            "unknown-key value `{fragment}` was lost by the canonical writer:\n{block}"
-        );
-    }
-
-    // The strongest form of "intact": re-read it and canonicalize again, unchanged.
-    let reparsed = Note::parse(&canonical).expect("canonical output must parse");
-    assert_bytes_eq(
-        &reparsed.to_canonical_bytes(),
-        &canonical,
-        "unknown keys must survive an unbounded number of write cycles, not just the first",
-    );
-}
-
-// =============================================================================================
-// Criterion 4 — "A note whose filename UUID disagrees with its frontmatter `id` is reported,
-//                and the frontmatter wins."
-//
-// dispatch.md §U9/§U10 splits this: parsing from bytes never consults a filename (the frontmatter
-// wins unconditionally); loading from a path is a hard error carrying all three facts.
-// =============================================================================================
-
-#[test]
-fn a_note_whose_filename_uuid_disagrees_with_its_frontmatter_id_is_reported() {
-    let path = fixture_vault().join(MISMATCHED_FILENAME_NOTE);
-
-    let err = match Note::load(&path) {
-        Ok(_) => panic!(
-            "loading {} from its path must be a hard error: its filename says {} and its \
-             frontmatter says {} (dispatch.md U9)",
-            path.display(),
-            MISMATCHED_FILENAME_ID,
-            MISMATCHED_FRONTMATTER_ID
-        ),
-        Err(e) => e,
-    };
-
-    match &err {
-        Error::NoteIdMismatch {
-            path: reported_path,
-            filename_id,
-            frontmatter_id,
-        } => {
-            assert_eq!(
-                reported_path, &path,
-                "the mismatch error must carry the offending path"
-            );
-            assert_eq!(
-                filename_id.to_string(),
-                MISMATCHED_FILENAME_ID,
-                "the mismatch error must carry the filename's id"
-            );
-            assert_eq!(
-                frontmatter_id.to_string(),
-                MISMATCHED_FRONTMATTER_ID,
-                "the mismatch error must carry the frontmatter's id"
-            );
-        }
-        other => panic!("expected a filename/frontmatter id mismatch error, got {other:?}"),
-    }
-
-    // "a message that says only 'parse error' is a bug" — overview.md.
-    let message = err.to_string();
-    for expected in [
-        MISMATCHED_FILENAME_ID,
-        MISMATCHED_FRONTMATTER_ID,
-        MISMATCHED_FILENAME_NOTE,
-    ] {
-        assert!(
-            message.contains(expected),
-            "the error message must name {expected}; it said: {message}"
-        );
-    }
-}
-
-/// The `__` is deliberate and is allowed rather than renamed: everything left of it is the
-/// criterion's name as `stage1.md` writes it, and everything right of it is the sub-case. That
-/// makes a line in a CI failure log map back to a line in the stage doc without a lookup, which is
-/// the whole point of naming a test after a criterion. Ratified at seal in
-/// `runs/stage1/verification.md`.
-#[allow(non_snake_case)]
-#[test]
-fn a_note_whose_filename_uuid_disagrees_with_its_frontmatter_id__the_frontmatter_wins() {
-    let path = fixture_vault().join(MISMATCHED_FILENAME_NOTE);
-    let note = Note::parse(&read_bytes(&path))
-        .expect("parsing from bytes must succeed: there is no filename to disagree with");
-
-    assert_eq!(
-        note.meta.id.to_string(),
-        MISMATCHED_FRONTMATTER_ID,
-        "the frontmatter id is the note's identity, unconditionally (dispatch.md U9)"
-    );
-    assert_ne!(
-        note.meta.id.to_string(),
-        MISMATCHED_FILENAME_ID,
-        "the filename id must never become the note's identity"
-    );
-}
-
-// =============================================================================================
-// Criterion 5 — "Overwriting an existing note file succeeds on Windows, and an interrupted write
-//                leaves the original intact."
-// =============================================================================================
-
-#[test]
-fn overwriting_an_existing_note_file_succeeds_on_windows() {
-    let tmp = tempfile::tempdir().unwrap();
-    let tmp_dir = tmp.path().join("tmp");
-    std::fs::create_dir(&tmp_dir).unwrap();
-    let target = tmp.path().join("01a03d4c-c708-7cbf-83c0-883cedb7f1d5.md");
-
-    let first = b"---\nid: 01a03d4c-c708-7cbf-83c0-883cedb7f1d5\n---\n\nfirst\n";
-    let second =
-        b"---\nid: 01a03d4c-c708-7cbf-83c0-883cedb7f1d5\n---\n\nsecond, longer than first\n";
-
-    jot_fs::atomic_write(&target, &tmp_dir, first).expect("first write must succeed");
-    assert_bytes_eq(&read_bytes(&target), first, "first write");
-
-    jot_fs::atomic_write(&target, &tmp_dir, second)
-        .expect("rename over an existing file must succeed (MOVEFILE_REPLACE_EXISTING on Windows)");
     assert_bytes_eq(
         &read_bytes(&target),
-        second,
-        "the overwrite must replace the target's contents entirely, with no tail of the old file \
-         left behind",
+        b"second\n",
+        "the replacement did not land",
     );
-
-    assert!(
-        std::fs::read_dir(&tmp_dir).unwrap().next().is_none(),
-        "the staging directory must be empty after a successful write"
+    assert_eq!(
+        std::fs::read_dir(ws.tmp_dir()).unwrap().count(),
+        0,
+        "a staged file was left behind"
     );
 }
 
+/// Stage 1: "An interrupted write leaves the original intact."
 #[test]
 fn an_interrupted_write_leaves_the_original_intact() {
-    // dispatch.md §U4 scopes "interrupted" to a failure injected between staging and rename, and
-    // says explicitly that asserting only on tmp cleanup does not satisfy this: the assertion is
-    // on the *target's* contents.
     let tmp = tempfile::tempdir().unwrap();
-    let vault = tmp.path().join("vault");
-    let tmp_dir = tmp.path().join("staging");
-    std::fs::create_dir(&vault).unwrap();
-    std::fs::create_dir(&tmp_dir).unwrap();
+    let root = tmp.path().join("v");
+    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
 
-    let target = vault.join("01a03d4c-c708-7cbf-83c0-883cedb7f1d5.md");
-    let original = b"---\nid: 01a03d4c-c708-7cbf-83c0-883cedb7f1d5\ncreated_at: 2026-08-26T09:00:37Z\nroot: 01a03d4c-c708-7cbf-83c0-883cedb7f1d5\n---\n\nThe original body, which must survive.\n";
-    std::fs::write(&target, original).unwrap();
+    let target = root.join(format!("{A}.md"));
+    let original = format!("---\ntitle: original\nrelation:root: {A}\n---\n\nBody.\n");
+    jot_fs::atomic_write(&target, &ws.tmp_dir(), original.as_bytes()).unwrap();
 
-    let replacement = b"---\nid: 01a03d4c-c708-7cbf-83c0-883cedb7f1d5\n---\n\nThe replacement, which must never land.\n";
-
-    let result = {
+    {
         let _blocked = BlockedReplacement::new(&target);
-        jot_fs::atomic_write(&target, &tmp_dir, replacement)
-    };
+        let err = jot_fs::atomic_write(&target, &ws.tmp_dir(), b"clobbered\n")
+            .expect_err("the rename must fail while the target is blocked");
+        assert!(matches!(err, Error::Rename { .. }), "{err:?}");
+    }
 
-    assert!(
-        result.is_err(),
-        "the injection did not actually block the rename, so this test proves nothing about \
-         interruption; the target must be un-replaceable for the assertion below to mean anything"
-    );
     assert_bytes_eq(
         &read_bytes(&target),
-        original,
-        "a write that failed at the rename must leave the target byte-identical to what it was — \
-         not truncated, not partially written, not deleted",
+        original.as_bytes(),
+        "the target was damaged by a write that failed",
+    );
+    assert!(
+        Note::load(&target).is_ok(),
+        "the surviving file must still be a readable note"
     );
 }
 
-// =============================================================================================
-// Criterion 6 — "`discover()` finds the workspace from three directories deep."
-// =============================================================================================
-
+/// Stage 1: "`discover()` finds the workspace from three directories deep."
 #[test]
 fn discover_finds_the_workspace_from_three_directories_deep() {
     let tmp = tempfile::tempdir().unwrap();
@@ -620,13 +757,58 @@ fn discover_finds_the_workspace_from_three_directories_deep() {
         found.root().display(),
         root.display()
     );
-
-    // The nested directories must not have been mistaken for workspaces or modified.
     assert_eq!(
         relative_tree(&deep),
         Vec::<String>::new(),
         "discover must not create anything in the directory it was called from"
     );
+}
+
+/// Stage 1's forward-compat rule, unchanged and load-bearing: an unknown key is preserved, never
+/// interpreted, never dropped. Stated over the whole corpus rather than one fixture, because the
+/// rewrite from byte-replay to rendering is exactly where this would quietly stop being true.
+#[test]
+fn every_unknown_key_in_the_corpus_survives_a_write_byte_for_byte() {
+    for path in vault_note_paths() {
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        if note.frontmatter.unknown().is_empty() {
+            continue;
+        }
+
+        let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
+        for unknown in note.frontmatter.unknown() {
+            assert!(
+                written.contains(unknown.source()),
+                "{name}: unknown key `{}` did not survive.\n--- wanted ---\n{}\n--- got ---\n{written}",
+                unknown.name(),
+                unknown.source()
+            );
+        }
+
+        // And every top-level key of the original block is still a top-level key of the output.
+        let before = top_level_keys(&frontmatter_block(&read_bytes(&path)));
+        let after = top_level_keys(&frontmatter_block(written.as_bytes()));
+        for key in &before {
+            assert!(
+                after.contains(key) || is_dropped_by_design(key, &note.frontmatter),
+                "{name}: key `{key}` vanished. before {before:?}, after {after:?}"
+            );
+        }
+    }
+}
+
+/// The only keys allowed to disappear across a write are interpreted keys whose value was absent
+/// or explicitly null — `title: null` means untitled, and an empty relation means the relation is
+/// not there. Both are omitted rather than written back empty.
+fn is_dropped_by_design(key: &str, fm: &Frontmatter) -> bool {
+    match key {
+        "title" => fm.title.is_none(),
+        "relation:root" => fm.root.is_none(),
+        "relation:reply_to" => fm.reply_to.is_none(),
+        "relation:quote" => fm.quote.is_none(),
+        _ => false,
+    }
 }
 
 /// `tempfile` hands out paths that may differ from their canonical form (`/var` vs `/private/var`,

@@ -33,27 +33,29 @@ pub fn fixture_invalid() -> PathBuf {
     repo_root().join("tests").join("fixtures").join("invalid")
 }
 
-/// The fixture whose known keys are deliberately out of canonical order. Named because two
-/// separate criteria turn on it: the preserving path must reproduce it byte-for-byte, and the
-/// canonical path must reorder it.
-pub const NON_CANONICAL_ORDER_NOTE: &str = "01a03d50-2a38-7db1-b33b-20f9083fb0ef.md";
+/// The fixture whose interpreted keys are deliberately out of schema order. Named because two
+/// criteria turn on it: opening it must reorder it, and the reorder must be a fixed point.
+pub const NON_SCHEMA_ORDER_NOTE: &str = "01a03d50-2a38-7db1-b33b-20f9083fb0ef.md";
 
-/// The fixture with unknown keys interleaved among known ones, including a nested mapping and a
-/// list.
+/// The fixture with unknown keys interleaved among interpreted ones, including a nested mapping
+/// and a list.
 pub const UNKNOWN_KEYS_NOTE: &str = "01a03d4f-99b0-758b-8ea2-0e460e4bd005.md";
 
-/// The fixture carrying every known key except `trashed_at`.
-pub const ALL_KNOWN_KEYS_NOTE: &str = "01a03d4e-78a0-76bc-be78-8ae41b38eefa.md";
+/// The fixture carrying all four interpreted keys, already in schema order.
+pub const ALL_INTERPRETED_KEYS_NOTE: &str = "01a03d4e-78a0-76bc-be78-8ae41b38eefa.md";
 
-/// The fixture whose filename UUID deliberately disagrees with its frontmatter `id`.
-pub const MISMATCHED_FILENAME_NOTE: &str = "01a03d50-bac0-7851-bd56-683ef65923cd.md";
+/// The fixture whose unknown `summary` key holds a **block scalar** — named by the acceptance
+/// criterion about `summary` surviving a title edit.
+pub const SUMMARY_BLOCK_SCALAR_NOTE: &str = "01a03d59-5e6f-7a8b-9c0d-1e2f3a4b5c6d.md";
 
-/// The UUID in `MISMATCHED_FILENAME_NOTE`'s frontmatter. The frontmatter wins, so this is the
-/// note's identity.
-pub const MISMATCHED_FRONTMATTER_ID: &str = "01a03d51-4b48-72e2-9f30-f180030c06ab";
+/// The fixture whose unknown `summary` key holds a **nested mapping** — the other half of that
+/// criterion.
+pub const SUMMARY_NESTED_MAPPING_NOTE: &str = "01a03d5a-6f7a-7b8c-9d0e-2f3a4b5c6d7e.md";
 
-/// The UUID in `MISMATCHED_FILENAME_NOTE`'s filename. Decorative, and wrong.
-pub const MISMATCHED_FILENAME_ID: &str = "01a03d50-bac0-7851-bd56-683ef65923cd";
+/// The fixture whose body is full of markdown a renderer would normalize: non-canonical list
+/// markers, underscore emphasis, both kinds of hard line break, an indented code block, trailing
+/// whitespace, and a literal tab.
+pub const MARKDOWN_BODY_NOTE: &str = "01a03d5b-7a8b-7c9d-8e0f-3a4b5c6d7e8f.md";
 
 /// The fixture with an empty body.
 pub const EMPTY_BODY_NOTE: &str = "01a03d51-dbd0-7abc-b6d1-c5e69a9e7f65.md";
@@ -61,22 +63,23 @@ pub const EMPTY_BODY_NOTE: &str = "01a03d51-dbd0-7abc-b6d1-c5e69a9e7f65.md";
 /// The fixture whose body contains a `---` line at column zero.
 pub const FENCE_IN_BODY_NOTE: &str = "01a03d52-6c58-75de-81f8-1b3940ecc38b.md";
 
+/// The fixture whose body starts on the line immediately after the closing fence, and which has
+/// no final newline.
+pub const TIGHT_BODY_NOTE: &str = "01a03d56-2b3c-7d4e-8f5a-6b7c8d9e0f1a.md";
+
 /// The fixture exercising the `<uuid>_<slug>.md` filename form.
 pub const SLUG_FILENAME_NOTE: &str = "01a03d4d-5790-7855-9af5-c362987fc91e_first_thoughts.md";
 
-/// The trashed fixture, which is the only one carrying `trashed_at`.
+/// The trashed fixture. It carries no `trashed_at`: from stage 1b the location on disk *is* the
+/// state.
 pub const TRASHED_NOTE: &str = "01a03d52-fce0-756a-8944-abff289098e4.md";
 
-/// The canonical key order fixed by `dispatch.md` §U1.
-pub const CANONICAL_KEY_ORDER: [&str; 8] = [
-    "id",
+/// The schema the fixture vault declares, which is also `FrontmatterSchema::jot_default`.
+pub const SCHEMA_KEY_ORDER: [&str; 4] = [
     "title",
-    "created_at",
-    "edited_at",
-    "reply_to",
-    "root",
-    "quote",
-    "trashed_at",
+    "relation:root",
+    "relation:reply_to",
+    "relation:quote",
 ];
 
 /// Every `.md` file the vault contains, live notes plus `.jot/.trash/`, sorted for a stable
@@ -175,46 +178,49 @@ pub fn frontmatter_block(bytes: &[u8]) -> String {
     panic!("output has an unterminated frontmatter fence:\n{text}");
 }
 
-/// Top-level mapping keys of a frontmatter block, in the order they appear. Nested keys (indented)
-/// and sequence items (`- ...`) are not top-level and are skipped.
+/// Top-level mapping keys of a frontmatter block, in the order they appear. Nested keys
+/// (indented) and sequence items (`- ...`) are not top-level and are skipped.
+///
+/// The key ends at the first `:` **followed by whitespace or the end of the line**, which is
+/// YAML's own rule and is what makes `relation:root` one key rather than a nested mapping. That
+/// rule is re-implemented here rather than borrowed from `jot-core`, so that a suite assertion
+/// about key order cannot be satisfied by the same mistake the implementation made.
 pub fn top_level_keys(block: &str) -> Vec<String> {
     let mut keys = Vec::new();
     for line in block.lines() {
-        if line.starts_with(' ') || line.starts_with('\t') || line.starts_with('#') {
-            continue;
-        }
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() || trimmed.starts_with('-') {
-            continue;
-        }
-        if let Some((key, _)) = trimmed.split_once(':') {
-            let key = key.trim();
-            if !key.is_empty() && !key.contains(' ') {
-                keys.push(key.to_string());
-            }
+        if let Some(key) = top_level_key_on(line) {
+            keys.push(key.to_string());
         }
     }
     keys
 }
 
-/// The raw text to the right of `key:` on a top-level line, trimmed of surrounding spaces.
+fn top_level_key_on(line: &str) -> Option<&str> {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let first = line.chars().next()?;
+    if first.is_whitespace() || first == '#' || line == "-" || line.starts_with("- ") {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let end = bytes.iter().enumerate().find_map(|(i, b)| {
+        (*b == b':' && matches!(bytes.get(i + 1), None | Some(b' ') | Some(b'\t'))).then_some(i)
+    })?;
+    (end > 0).then(|| &line[..end])
+}
+
+/// The raw text to the right of a top-level `key:`, trimmed of surrounding spaces.
 pub fn top_level_value(block: &str, key: &str) -> Option<String> {
     for line in block.lines() {
-        if line.starts_with(' ') || line.starts_with('\t') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix(key)
-            && let Some(value) = rest.strip_prefix(':')
-        {
-            return Some(value.trim().to_string());
+        if top_level_key_on(line) == Some(key) {
+            let rest = &line[key.len() + 1..];
+            return Some(rest.trim().to_string());
         }
     }
     None
 }
 
-/// Strips one layer of YAML quoting. `dispatch.md` §U2 says canonical timestamps are emitted as a
-/// quoted string; it does not say which quote character, so both are accepted and the caller
-/// asserts that *some* quoting was applied.
+/// Strips one layer of YAML quoting, either character, so a caller can assert that *some* quoting
+/// was applied without pinning which the emitter chose.
 pub fn unquote(value: &str) -> Option<&str> {
     for q in ['"', '\''] {
         if value.len() >= 2 && value.starts_with(q) && value.ends_with(q) {
@@ -383,12 +389,15 @@ mod harness_self_tests {
         );
         assert!(fixture_invalid().is_dir());
         for name in [
-            NON_CANONICAL_ORDER_NOTE,
+            NON_SCHEMA_ORDER_NOTE,
             UNKNOWN_KEYS_NOTE,
-            ALL_KNOWN_KEYS_NOTE,
-            MISMATCHED_FILENAME_NOTE,
+            ALL_INTERPRETED_KEYS_NOTE,
+            SUMMARY_BLOCK_SCALAR_NOTE,
+            SUMMARY_NESTED_MAPPING_NOTE,
+            MARKDOWN_BODY_NOTE,
             EMPTY_BODY_NOTE,
             FENCE_IN_BODY_NOTE,
+            TIGHT_BODY_NOTE,
             SLUG_FILENAME_NOTE,
         ] {
             assert!(
@@ -421,34 +430,46 @@ mod harness_self_tests {
 
     #[test]
     fn frontmatter_block_and_key_extraction_agree_with_the_fixtures() {
-        let out_of_order = read_bytes(&fixture_vault().join(NON_CANONICAL_ORDER_NOTE));
+        let out_of_order = read_bytes(&fixture_vault().join(NON_SCHEMA_ORDER_NOTE));
         assert_eq!(
             top_level_keys(&frontmatter_block(&out_of_order)),
-            vec!["created_at", "root", "id", "title"]
+            vec!["relation:root", "title"],
+            "the key ends at the first colon followed by whitespace, so `relation:root` is one \
+             key and not a nested mapping"
         );
 
         let unknown = read_bytes(&fixture_vault().join(UNKNOWN_KEYS_NOTE));
         assert_eq!(
             top_level_keys(&frontmatter_block(&unknown)),
             vec![
-                "id",
                 "source",
                 "title",
-                "created_at",
                 "tags",
-                "root",
+                "relation:root",
                 "location",
                 "priority"
             ],
             "nested keys (city/country) and list items must not be counted as top level"
         );
 
-        let all_known = read_bytes(&fixture_vault().join(ALL_KNOWN_KEYS_NOTE));
+        let all_interpreted = read_bytes(&fixture_vault().join(ALL_INTERPRETED_KEYS_NOTE));
         assert_eq!(
-            top_level_keys(&frontmatter_block(&all_known)),
-            CANONICAL_KEY_ORDER[..7].to_vec(),
-            "this fixture is already canonical apart from trashed_at, which is why it cannot be \
-             the only input to the canonical-order test"
+            top_level_keys(&frontmatter_block(&all_interpreted)),
+            SCHEMA_KEY_ORDER.to_vec(),
+            "this fixture is already in schema order, which is why it cannot be the only input \
+             to the key-order test"
+        );
+    }
+
+    /// A block scalar's interior lines are continuation, not keys — including one that would
+    /// otherwise look like `key: value`. If this helper counted them the suite would report a key
+    /// order the file does not have.
+    #[test]
+    fn key_extraction_ignores_the_interior_of_a_block_scalar() {
+        let bytes = read_bytes(&fixture_vault().join(SUMMARY_NESTED_MAPPING_NOTE));
+        assert_eq!(
+            top_level_keys(&frontmatter_block(&bytes)),
+            vec!["title", "relation:root", "summary"]
         );
     }
 
@@ -457,25 +478,31 @@ mod harness_self_tests {
         let bytes = read_bytes(&fixture_vault().join(FENCE_IN_BODY_NOTE));
         let block = frontmatter_block(&bytes);
         assert!(!block.contains("horizontal rule"), "block was:\n{block}");
-        assert_eq!(top_level_keys(&block), vec!["id", "created_at", "root"]);
+        assert_eq!(top_level_keys(&block), vec!["relation:root"]);
     }
 
     #[test]
     fn top_level_value_and_unquote_behave() {
-        let block = "id: abc\ncreated_at: \"2026-08-26T09:00:00Z\"\nedited_at: '2026-01-01T00:00:00Z'\nbare: 2026-08-26T09:00:00Z\n";
-        assert_eq!(top_level_value(block, "id").as_deref(), Some("abc"));
+        let block = "title: abc\nrelation:root: 01a03d4c-3680-7c70-aade-6c016dd177d2\n\
+                     quoted: \"a value\"\nsingle: 'another'\nbare: plain\n";
+        assert_eq!(top_level_value(block, "title").as_deref(), Some("abc"));
         assert_eq!(
-            unquote(&top_level_value(block, "created_at").unwrap()),
-            Some("2026-08-26T09:00:00Z")
+            top_level_value(block, "relation:root").as_deref(),
+            Some("01a03d4c-3680-7c70-aade-6c016dd177d2"),
+            "a key containing a colon must be readable by its whole name"
         );
         assert_eq!(
-            unquote(&top_level_value(block, "edited_at").unwrap()),
-            Some("2026-01-01T00:00:00Z")
+            unquote(&top_level_value(block, "quoted").unwrap()),
+            Some("a value")
+        );
+        assert_eq!(
+            unquote(&top_level_value(block, "single").unwrap()),
+            Some("another")
         );
         assert_eq!(
             unquote(&top_level_value(block, "bare").unwrap()),
             None,
-            "an unquoted timestamp must not be mistaken for a quoted one"
+            "an unquoted value must not be mistaken for a quoted one"
         );
         assert_eq!(top_level_value(block, "missing"), None);
     }
@@ -483,7 +510,7 @@ mod harness_self_tests {
     #[test]
     fn is_uuid_v7_accepts_the_fixture_ids_and_rejects_near_misses() {
         assert!(is_uuid_v7("01a03d4c-3680-7c70-aade-6c016dd177d2"));
-        assert!(is_uuid_v7(MISMATCHED_FRONTMATTER_ID));
+        assert!(is_uuid_v7("01a03d51-4b48-72e2-9f30-f180030c06ab"));
         // v4, not v7.
         assert!(!is_uuid_v7("01a03d4c-3680-4c70-aade-6c016dd177d2"));
         // uppercase, wrong length, non-hex, bad variant.
