@@ -1,211 +1,201 @@
-# Stage 2 — Index and rebuild
+# Stage 2 — Notes and threads
 
-**Goal.** A SQLite index that can be thrown away and rebuilt exactly, and that stays current cheaply.
+**Goal.** The complete domain: notes are created, edited, trashed, restored, purged; threads project
+into both of the forms settled in `docs/conversation/initial.md`; links resolve within the workspace.
 
-**Why now.** The index is the only reason this project exists rather than a folder of files. Its
-correctness rests on one property — *nothing lives only in the database* — and that property is easy
-to hold now and impossible to retrofit once queries start depending on state the files don't carry.
+**Why now.** This is the app's actual logic, and it is the last stage with no user interface to hide
+behind. Every rule proved here by a test is a rule three surfaces get for free. Every rule left
+implicit here gets reimplemented three times, slightly differently.
 
-**Not in this stage.** Note creation, threads, links-as-a-feature. This stage reads what stage 1
-writes and answers "what is in this vault?".
+**Not in this stage.** Anything a person can type at. Still library-only.
 
-> **Reordered.** Stages 3 and 4 were built before this one, against `snapshot::Snapshot` — a scan of
-> the vault into memory, shaped like the tables below. See "What the snapshot leaves for this stage"
-> at the foot of this file before starting: this stage is now a **substitution behind an existing
-> seam**, not a greenfield build, and the acceptance criteria below are joined by a new one.
+> **Built, and built before stage 4.** Everything below is implemented in `jot-core` against
+> `snapshot::Snapshot` rather than SQLite — see [overview.md](overview.md), "Build order changed".
+> No rule in this document was weakened to make that work; the index was only ever the *fast* way to
+> get the note set, and a scan is the slow way to get the same one. Two findings from the build are
+> recorded at the foot of this file.
 
-## Schema
+## Note lifecycle
 
-```sql
-PRAGMA user_version = 1;
+| Operation | Filesystem | Index | Frontmatter |
+| --- | --- | --- | --- |
+| `create` | write `<uuid>[_slug].md` in root | insert | `relation:root`, and any other relation |
+| `edit` | rewrite in place | update | nothing new in the file; `edited_at` follows mtime |
+| `trash` | move to `.jot/.trash/` | `state = 'trashed'` | nothing — the directory is the state |
+| `restore` | move back to root | `state = 'active'` | nothing |
+| `purge` | delete the file | delete the row | — |
 
--- What the scanner has already seen. Purely an optimization; safe to truncate.
-CREATE TABLE files (
-  path         TEXT PRIMARY KEY,   -- relative to workspace root, forward slashes
-  note_id      TEXT NOT NULL,
-  size         INTEGER NOT NULL,
-  mtime_ns     INTEGER NOT NULL,
-  content_hash TEXT NOT NULL       -- blake3; guards against mtime lying
-);
+Stage 1 phase B found a hazard on `edit`'s write: mutating `Note`'s public fields and then calling the
+byte-preserving `to_bytes()` silently discarded the edit, because that path replayed retained bytes
+rather than rendering current state. Stage 1b removes the hazard at the source rather than leaving it
+for `edit` to guard against — the two-path serializer is gone, there is one write path that always
+renders from typed state, and the impossible state (a write method that ignores the fields you just
+set) no longer exists. `edit` has nothing to enforce here beyond calling the one render path there is.
 
-CREATE TABLE notes (
-  id          TEXT PRIMARY KEY,    -- UUIDv7
-  root_id     TEXT NOT NULL,       -- own id when the note is a root
-  reply_to_id TEXT,
-  quoted_id   TEXT,
-  title       TEXT,
-  state       TEXT NOT NULL CHECK (state IN ('active', 'trashed')),
-  created_at  TEXT,                -- decoded from the id's UUIDv7 timestamp; NULL if not v7
-  edited_at   TEXT,                -- filesystem mtime at scan time; exempt from the rebuild check
-  trashed_at  TEXT                 -- mtime of the file inside `.jot/.trash/`
-);
+Rules that follow from the locked decisions and must be enforced in one place:
 
-CREATE INDEX notes_root     ON notes(root_id, id);
-CREATE INDEX notes_reply_to ON notes(reply_to_id);
-CREATE INDEX notes_quoted   ON notes(quoted_id);
-CREATE INDEX notes_timeline ON notes(state, id DESC);
+- **Trash never cascades.** Trashing a note with replies moves exactly one file. The replies stay
+  live and render a trashed-parent placeholder — your call, and it is also the only behavior that
+  survives a rebuild without extra bookkeeping.
+- **The frontmatter column carries only what stage 1b left in the file.** `id` and `created_at`
+  are the filename's; `edited_at` and `trashed_at` are index-only. `create` mints the id, and the
+  creation-time `FilenameSlug` option decides whether the filename gets a slug from the title.
+  Re-slugging on a title change is safe: the identity is the UUID and it does not move.
+- **`relation:root` is assigned once, at creation**, copied from the parent (or set to the note's own id for a
+  root). It is never recomputed, so purging a middle note leaves the subtree grouped.
+- **Re-parenting is not supported.** Nothing in the design needs it, and it would be the one operation
+  requiring a subtree rewrite. If it is ever wanted, it arrives as an explicit `reparent` that
+  rewrites `root` across the subtree — not as a side effect of an edit.
+- **A quote is not a thread edge.** `quote` never touches `root_id`, and the quoted note never joins
+  the quoting note's tree.
+- **Purge is the only irreversible operation.** It requires explicit confirmation at every surface.
 
-CREATE TABLE links (
-  src_id TEXT NOT NULL,
-  dst_id TEXT NOT NULL,
-  PRIMARY KEY (src_id, dst_id)
-);
-CREATE INDEX links_dst ON links(dst_id);
+### Reference resolution
+
+Every reference — `reply_to`, `quote`, a link target — resolves to one of three states, computed, never stored:
+
+```rust
+enum Ref { Present(NoteMeta), Trashed(NoteMeta), Deleted(NoteId) }
 ```
 
-### Why there are no foreign keys
+- `Present` — an `active` row exists.
+- `Trashed` — a `trashed` row exists (file is in `.jot/.trash/`).
+- `Deleted` — no row at all. The id is all that remains, and that is what the UI shows.
 
-`reply_to_id`, `quoted_id`, and `links.dst_id` all point at notes that may not exist — that is the
-"Deleted" state from `docs/conversation.md`, and it must survive a full rebuild. A foreign key would
-make a legitimate state unrepresentable. Dangling is designed for; there is nothing to enforce.
+Surfaces render these three and nothing else. A fourth case appearing in a surface means the rule
+leaked out of core.
 
-Likewise: no `ON DELETE CASCADE` anywhere. Purging a note removes exactly one row.
+## Thread algebra
 
-### Leave the rowid alone
+The heart of the stage, and the part worth writing property tests for. Load once, project many times:
 
-`notes` is a normal rowid table, and stays one. When full-text search eventually arrives
-(`docs/sidenote.md`), an external-content FTS5 table attaches by rowid — cheap if the rowid is stable,
-a migration if `WITHOUT ROWID` was chosen here for no reason.
+```rust
+struct Thread {
+    focus:     NoteId,
+    ancestors: Vec<NoteMeta>,   // root → parent, always linear
+    tree:      TreeNode,        // focus and everything below it
+}
+
+impl TreeNode {
+    fn paths(&self)    -> Vec<Vec<NoteId>>;  // form 1: every root-to-leaf path
+    fn segments(&self) -> Vec<Segment>;      // form 2: chains from root or branch point
+}
+```
+
+Both forms come from a single `SELECT * FROM notes WHERE root_id = ?` assembled in memory. Neither is
+persisted; a thread is tens of nodes and there is nothing to win.
+
+Using the example from `docs/conversation/initial.md` — edges `A→B`, `B→C`, `C→E`, `C→D`, `A→F`:
+
+```text
+  B - C - E          paths     (A,B,C,D), (A,B,C,E), (A,F)
+ /     \             segments  (A,B,C), (A,F), (C,D), (C,E)
+A       D
+ \
+  F
+```
+
+### Invariants to test as properties
+
+Generate random trees; assert on every one:
+
+- **Segments partition the edges.** Every edge appears in exactly one segment, and the total edge
+  count across segments equals `nodes - 1`.
+- **Segment count** equals the number of children of the root plus, for every branch point, its
+  number of children. (Here: `A` contributes 2, `C` contributes 2 → 4.)
+- **Segments cover every node**, each exactly once as a non-first element.
+- **Paths cover every node**, and every path starts at the root and ends at a leaf; the number of
+  paths equals the number of leaves.
+- **Ancestors are linear and terminate** — no cycles, and the walk ends at a note whose `reply_to` is
+  absent or unresolvable.
+- **A cycle is rejected, not hung on.** Hand-edited frontmatter can produce `A→B→A`. Detect it during
+  the walk and return a diagnosable error; never loop forever.
+
+### Sibling order
+
+Creation order, from UUIDv7. No `position` column, no ordering metadata, nothing to keep consistent.
+
+## Links
+
+**The parser is already a dependency.** Stage 1b delegates frontmatter fence splitting to
+`markdown` 1.0.0 (markdown-rs), chosen partly *for* this stage — see `stage1b.md`, "The parse path".
+This stage adds no new crate and inherits the same rule: parse to an AST, read byte offsets, never
+call the renderer.
+
+- [ ] Extract `[[<uuid>]]` and `[[<uuid>|label]]` from the body during scan by walking the mdast,
+      not by regex over raw text, so links inside fenced code blocks are not picked up. The walk is
+      the whole implementation: collect `Node::Text`, skip `Node::Code` and `Node::InlineCode`, and
+      match the link syntax within each text node's value. Verified 2026-08-31 on the pinned crate —
+      a paragraph's `[[uuid|label]]` arrives as a *single* `Text` node with its byte span intact, so
+      no reassembly across events is needed. (`pulldown-cmark` splits the same link across eight
+      events; that is why it was not chosen.)
+- [ ] Inline code is excluded along with fenced blocks. `` `[[uuid]]` `` is a person writing *about*
+      a link, not making one. This is a decision, not a side effect of the walk — say so in a test.
+- [ ] Keep each link's byte offset from the extraction. Stage 5's reader wants to highlight a link in
+      place, and recovering the offset later means re-parsing.
+- [ ] Populate `links`; expose `backlinks(id)`.
+- [ ] **Workspace-scoped only** — a target id absent from this workspace resolves to `Deleted`, and
+      never reaches into another workspace. Independence is the point of a workspace.
+- [ ] `quoted_by(id)` — the inverse of `quoted_id`, presented alongside backlinks.
 
 ## Work
 
-### Migrations
-
-- [ ] Embedded SQL migrations keyed on `PRAGMA user_version`; forward-only.
-- [ ] On a version newer than the binary understands: refuse to open, say so, and point at deleting
-      the index — which is always safe, because it is derived.
-- [ ] Pragmas at open: `journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=OFF`, `busy_timeout`.
-
-### Scanner
-
-- [ ] `scan()` — enumerate the workspace root and `.jot/.trash/`, diff against `files`.
-- [ ] Change detection: `(size, mtime_ns)` fast path; on mismatch, hash and compare. A note whose
-      hash is unchanged is not reparsed.
-- [ ] Deletion detection: a `files` row whose path no longer exists → remove the note row. Its
-      children keep their now-dangling `reply_to_id`, which is exactly the "Deleted" state.
-- [ ] State from location: found in the root → `active`; found in `.jot/.trash/` → `trashed`. The
-      directory decides, and from stage 1b it is the *only* thing that decides — there is no
-      `trashed_at` key in the file to read a timestamp from. Mirror the trashed file's mtime.
-- [ ] **Read the whole file, store only the metadata.** Link extraction (stage 3) needs the body, so
-      the earlier "read only up to the frontmatter fence" idea does not survive contact with links.
-      The user-facing decision is unchanged — bodies are never *stored* in the index — and at personal
-      scale reading a few MB of markdown costs nothing.
-- [ ] Report: `SyncReport { added, updated, removed, unchanged, problems }` where `problems` carries
-      per-file parse failures and duplicate ids. **No id/filename disagreements**: stage 1b made the
-      filename the identity, so there is nothing left to disagree. What replaces that problem is two
-      *files* whose names carry one UUID — see `probe_b_two_files_claiming_one_identity_...`, which
-      pins that stage 1b does not detect it and stage 2 inherits it.
-
-Three things stage 1b changed under this stage's feet, none of them optional:
-
-- **`sync()` and `rebuild()` are strictly read-only.** A vault scan must not produce a diff. Repair
-  of missing schema fields happens on `Workspace::open_note`, which is one file and one user action.
-- **`created_at` is not parsed.** It is decoded from the note id; the scanner never looks for it.
-- **`edited_at` is exempt from the rebuild invariant.** See `overview.md`. The tempting "fix" is to
-  make rebuild write mtime everywhere, which spreads the lossiness instead of containing it.
-
-### Rebuild
-
-- [ ] `rebuild()` — drop and recreate every table, then scan from empty.
-- [ ] `sync()` — incremental scan; this is what surfaces call before reading.
-- [ ] **The invariant, as a test**: for a fixture vault mutated through a sequence of operations,
-      `sync()` and `rebuild()` produce identical logical content. Run it in CI. Every future feature
-      that adds a table must extend this test or it will rot.
-
-### Queries
-
-Enough to prove the schema; the surfaces come later.
-
-- [ ] `timeline_roots(cursor, limit)` — reverse-chronological roots, plus reply counts:
-
-  ```sql
-  SELECT * FROM notes
-   WHERE state = 'active'
-     AND (reply_to_id IS NULL
-          OR reply_to_id NOT IN (SELECT id FROM notes))   -- orphans are roots too
-     AND id < :cursor
-   ORDER BY id DESC LIMIT :limit;
-  ```
-
-  The orphan clause matters: a note whose parent was purged would otherwise be invisible forever —
-  present in the vault, absent from every view. UUIDv7 being time-sortable makes `id < :cursor` a
-  free keyset pagination.
-
-- [ ] `timeline_flat(cursor, limit)` — same, without the root filter.
-- [ ] `tree(root_id)` — `SELECT * FROM notes WHERE root_id = ?`; one indexed query pulls a whole thread.
-- [ ] `resolve_prefix(prefix)` — `id GLOB prefix || '*'`, returning unique / ambiguous / none.
-- [ ] `search(title_like, date_range, filters)` — `LIKE` over `title` is sufficient at this scale and
-      for the deferred-FTS decision.
+- [ ] `Draft { body, title, reply_to, quote }` → `create`. Reject a `reply_to` that does not resolve
+      to a `Present` or `Trashed` note; permit replying to a trashed note (it is still a real note).
+- [ ] `Edit { body, title }` → `edit`. `edited_at` is not written — it is mtime, so it moves only
+      when the file does, which is exactly "only when content actually changed" for free.
+- [ ] `trash` / `restore` / `purge`, each a filesystem move plus a single index update, in that order,
+      so an interruption leaves the index stale rather than the vault wrong. Stale is recoverable by
+      `sync()`; wrong is not.
+- [ ] `Ref` resolution, batched — resolving parents one query per note in a list view is the obvious
+      performance trap here.
+- [ ] `thread(id)` assembling ancestors and tree in one round trip.
+- [ ] Reply and branch counts for the timeline, from one grouped query, not N.
+- [ ] `resolve(prefix)` returning `Unique | Ambiguous(Vec<NoteMeta>) | None`.
 
 ## Acceptance
 
-- Deleting `.jot/index.db` and reopening the workspace reproduces every query result exactly.
-- Touching a file without changing its content produces zero reparses.
-- Moving a file into `.jot/.trash/` by hand flips its state on the next `sync()`.
-- Deleting a note file by hand leaves its children queryable, with an unresolvable `reply_to_id`.
-- A note whose parent was purged appears in the timeline as a root.
-- 10k synthetic notes: cold rebuild and warm `sync()` both measured and written down here. Warm sync
-  should be low tens of milliseconds; if it is not, the fast path is wrong.
+- Create a root, three replies, and a fork; `segments()` and `paths()` match the worked example above.
+- Trash the middle note of a chain: children stay live, the parent reference reports `Trashed`.
+- Purge that note instead: children stay live, the reference reports `Deleted`, and the subtree is
+  still grouped under the original `root_id`.
+- Purge the root itself: the surviving children appear in the timeline as orphan roots.
+- A hand-written cycle in `reply_to` produces an error naming both notes, and no hang.
+- A body containing the same `[[uuid]]` in prose, in a fenced code block, and in inline code yields
+  exactly one link — from the prose.
+- A link to a purged note still extracts, and resolves to `Deleted`; extraction never consults the
+  index.
+- Property tests pass over several thousand generated trees.
+- Killing the process between the file move and the index write leaves the vault correct and the
+  index repaired by the next `sync()`.
 
 ## Risks
 
-- **A write must never originate from an index row.** Stage 1 phase B confirmed the mechanism:
-  `NoteMeta` reconstructed field-by-field (as a row from `notes` would be) carries an empty unknown-key
-  map, so writing it back destroys every frontmatter key the file had that the index doesn't track —
-  the exact "expensive failure" this project's frontmatter forward-compat rule exists to prevent, just
-  displaced from stage 1 into whichever stage writes from a query result. This stage only reads and
-  never writes a note file, so it cannot trigger the hazard itself, but its `notes` rows are what a
-  later write path (stage 3's `edit`) will be tempted to build a write from. The rule for that stage:
-  a write is always `load(path)` → mutate → write; the index is used only to find the path, never as
-  the source of what gets written.
-- **`sync()` on a WAL database in a synced folder.** Not solved here — mitigated by `.gitignore`,
-  documented sync exclusion, and the fact that the file is disposable. Revisit only if it actually bites.
-- **Duplicate id across two files.** From stage 1b this means two *filenames* carrying one UUID —
-  `<uuid>.md` beside `<uuid>_a_slug.md`, which a copy-paste or a sync client produces. Report it as a problem and
-  keep the lexicographically-first path; do not silently pick one.
-- **mtime granularity** differs across filesystems. The hash fallback covers it; never make mtime alone
-  authoritative.
+- **The N+1 in list rendering.** Every timeline row wants its parent's state and its reply count.
+  Batch both, and add a test that asserts the query count for a 50-row page is constant.
+- **Cycles and self-reference** come from hand-edited files, not from the app. They are a normal input.
+- ~~**`edited_at` churn.**~~ **Largely settled by stage 1b**, which made `edited_at` mtime rather
+  than a written field: a no-op save that writes identical bytes still touches mtime, so the guard
+  moves from "do not bump the field" to "do not write the file when the bytes are unchanged" —
+  which `Workspace::open_note` already does. The original concern, kept for the shape of it:
+  bumping it on a no-op save makes every note look recently touched and
+  poisons the "recently edited" sort in stage 5. Compare content before writing.
 
-## What the snapshot leaves for this stage
+## Findings from the build
 
-Stages 3 and 4 shipped against `jot-core`'s `snapshot::Snapshot` rather than SQLite. Everything the
-domain needs turned out to be a function of the set of notes in the vault, so the index was never
-load-bearing for *correctness* — only for speed. That is the right shape for a deferred index, and
-it makes this stage a swap rather than a rewrite.
+### `relation:root` on a reply to a note whose own root is missing
 
-### What already exists, and maps one-to-one
+`create` copies the parent's `relation:root`. A parent that is itself missing that key — hand-edited,
+or written by something else — leaves nothing to copy. The rule implemented: **fall back to the
+parent's own id.** It keeps the reply grouped with the only ancestor actually known, and it never
+invents a root by walking, because walking is `open_note`'s repair job and doing it here would make
+`create` a write to a second file.
 
-| This stage's query | Already implemented as |
-| --- | --- |
-| `SELECT … WHERE id = ?` | `Snapshot::get` |
-| `tree(root_id)` | `Snapshot::thread`, `Snapshot::ancestors` |
-| `resolve_prefix(prefix)` | `Snapshot::resolve` |
-| `timeline_roots` / `timeline_flat` | `Snapshot::timeline` (with the orphan clause) |
-| `search(title_like, …)` | `Snapshot::search` |
-| `links` / `backlinks(id)` | `Record::links`, `Snapshot::backlinks` |
-| `SyncReport { added, updated, removed, unchanged, problems }` | `Snapshot::diff` |
+### The reply-to-a-trashed-note case is load-bearing
 
-`Workspace::sync` and `Workspace::rebuild` already exist with the right signatures and are already
-called by the CLI before reads. **Their meanings must not change** when SQLite lands: today they are
-synonyms because every scan is a cold one, and the moment `sync` becomes incremental the rebuild
-invariant stops being trivially true and starts being the thing to test.
-
-### What the snapshot does *not* do — this stage's actual work
-
-- **No `files` table.** There is no `(size, mtime_ns, content_hash)` fast path, so every `sync()`
-  reads and reparses every note. This is the whole performance story and the reason the stage
-  exists. "Touching a file without changing its content produces zero reparses" is currently
-  **false**, and is an acceptance criterion here.
-- **No persistence.** The scan is per-process. A CLI invocation pays a full vault read at startup —
-  fine at hundreds of notes, and the thing to measure at 10k. `stage4.md` budgets `jot new` at under
-  100 ms warm; that budget is currently met by the vault being small, not by the code being fast.
-- **No hash fallback**, so mtime granularity is not yet a concern — and must become one.
-- **Bodies are read and discarded** on every scan, for link extraction. Stage 2's `links` table is
-  what stops that being paid repeatedly.
-
-### One new acceptance criterion
-
-- **The swap is invisible.** With SQLite behind it, the whole of `crates/jot-cli` and every existing
-  `jot-core` test must pass **unchanged**. The 423 tests that exist at the end of stage 4 are the
-  regression suite for this stage; if any public signature has to move to accommodate a database,
-  the seam was in the wrong place and that is the finding, not the change.
+`create` rejects a `reply_to` that resolves to nothing and **permits** one that resolves to a
+trashed note, exactly as this document specifies. Worth keeping the reason visible: trash never
+cascades, so a trashed note is still a real note with live replies underneath it, and refusing to
+reply to one would make the trash a place threads go to die. `Error::ReplyTargetMissing` is
+therefore about absence only, and is a separate variant from `Error::NoteNotFound` because the
+subject differs — the note you asked for is fine, it is the parent that is gone.

@@ -1,6 +1,6 @@
 # `jot --json`
 
-The machine-readable output shape, promised by [`plans/stage4.md`](plans/stage4.md). This is the
+The machine-readable output shape, promised by [`plans/stage3.md`](plans/stage3.md). This is the
 contract that makes `jot` compose with `jq` and everything else; treat a change to it the way you
 would treat a change to a database schema.
 
@@ -112,7 +112,7 @@ A `notemeta` extended with:
 ```
 
 `ancestors` is always linear and is empty when the focus is a root. `paths` and `segments` are the
-two projections from [`plans/stage3.md`](plans/stage3.md); neither is stored, both are computed from
+two projections from [`plans/stage2.md`](plans/stage2.md); neither is stored, both are computed from
 the same in-memory tree. Siblings are in creation order, which is id order.
 
 ## `links`

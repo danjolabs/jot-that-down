@@ -1,6 +1,6 @@
 # Plan overview
 
-Derived from `docs/ideas.md` and the decisions settled in `docs/conversation.md`.
+Derived from `docs/ideas.md` and the decisions settled in `docs/conversation/initial.md`.
 Read this file first; each `stage<#>.md` is self-contained once you have the conventions below.
 
 ## The product in one paragraph
@@ -13,7 +13,7 @@ a folder decision before the thought is finished. Three surfaces over one core: 
 
 ## Locked decisions
 
-Carried in from `docs/conversation.md`; stages assume these without re-arguing them.
+Carried in from `docs/conversation/initial.md`; stages assume these without re-arguing them.
 
 | Area | Decision |
 | --- | --- |
@@ -74,9 +74,10 @@ jot-that-down/
 
 ### Core API surface
 
-The shape every stage builds toward. Stages 1–3 fill it in; stages 4–6 only consume it.
+The shape every stage builds toward. Stages 1, 2 and 4 fill it in; stages 3, 5 and 6 only
+consume it.
 
-**Built as of stages 3–4** (see the build-order note below). Three signatures moved from the
+**Built as of stages 2–3** (see the build-order note below). Three signatures moved from the
 original sketch; each is marked and explained.
 
 ```rust
@@ -118,7 +119,7 @@ Three deliberate departures from the sketch:
   pays for at every call site. The two that stayed fallible — `get` and `links_in` — genuinely
   re-read the file, because bodies are not in the snapshot.
 - **`timeline`, `files`, `search`, and `trashed` return `Row`, not `NoteMeta`.** A list view needs
-  its reply counts and its parent's state, and computing those per row is the N+1 stage 3 names as
+  its reply counts and its parent's state, and computing those per row is the N+1 stage 2 names as
   its performance trap. `Row` carries them, filled during the same pass that selects the rows.
 - **`thread` returns `Option`, not `Result`.** "No note with this id" is an answer, not a failure.
 
@@ -128,9 +129,10 @@ Three deliberate departures from the sketch:
 | --- | --- | --- | --- |
 | 1 | [Vault foundations](stage1.md) | Workspace on disk, frontmatter round-trip, atomic writes | — |
 | 1b | [Declared frontmatter schema](stage1b.md) | Filename-only identity, schema-declared frontmatter, single write path | 1 |
-| 2 | [Index and rebuild](stage2.md) | SQLite schema, scanner, deterministic rebuild | 1b |
-| 3 | [Notes and threads](stage3.md) | Full note lifecycle, thread algebra, links | 2 |
-| 4 | [CLI](stage4.md) | `jot` — daily-usable capture and retrieval | 3 |
+| 2 | [Notes and threads](stage2.md) | Full note lifecycle, thread algebra, links | 1b |
+| 3 | [CLI](stage3.md) | `jot` — daily-usable capture and retrieval | 2 |
+| — | [Pre-stage-4 refactor](pre-stage4-refactor.md) | Typed frontmatter schema, roles declared rather than hardcoded | 3 |
+| 4 | [Index and rebuild](stage4.md) | SQLite schema, scanner, deterministic rebuild | the refactor |
 | 5 | [TUI](stage5.md) | Timeline, thread, file+reader, search, trash | 4 |
 | 6 | [Desktop](stage6.md) | Tauri app, capture overlay, `jot://` deep links | 5 |
 | 7 | [Schema and plain workspaces](stage7.md) | User-declared *extra* fields with types and defaults, `plain` workspace type, rename detection | 6 |
@@ -138,27 +140,27 @@ Three deliberate departures from the sketch:
 [`orchestration.md`](orchestration.md) covers how these stages get executed and verified — the agent
 roles, the model routing, the three gates, and the criteria no orchestrator can close.
 
-Stages 1–3 are one continuous piece of work — nothing is user-visible until stage 4. Resist the urge
+Stages 1–2 are one continuous piece of work — nothing is user-visible until stage 3. Resist the urge
 to skip ahead: every shortcut taken in 1–3 is paid for three times over in 4–6.
 
-The first moment the app is genuinely usable is **the end of stage 4**. Dogfood from there; let real
+The first moment the app is genuinely usable is **the end of stage 3**. Dogfood from there; let real
 use reorder everything after it.
 
 ### Build order changed: 1b → 3 → 4 → 2
 
-Stages 3 and 4 were built **before** stage 2, and stage 2's SQLite index does not exist yet.
+Stages 2 and 3 were built **before** stage 4, and stage 4's SQLite index does not exist yet.
 
-The reason it was safe: nothing in stages 3 or 4 is *only* obtainable from a database. Threads,
+The reason it was safe: nothing in stages 2 or 3 is *only* obtainable from a database. Threads,
 reference resolution, links, backlinks, and prefix resolution are all functions of the set of notes
 in the vault, and the index is a **speed** layer over that set. So `jot-core` grew
 `snapshot::Snapshot` — one scan of the vault into a `BTreeMap`, deliberately shaped like the tables
 it stands in for, with `Snapshot::get`/`thread`/`resolve`/`backlinks` mirroring the queries
-`stage2.md` specifies. The public `Workspace` API is the one above either way, which makes stage 2 a
+`stage4.md` specifies. The public `Workspace` API is the one above either way, which makes stage 4 a
 substitution behind the seam rather than a rewrite in front of it.
 
 What this bought: the domain got exercised against a real surface, by hand, weeks earlier — which is
-the whole argument `stage4.md` makes for building the CLI early, applied one stage further back.
-What it costs is written up in [stage2.md](stage2.md) under "What the snapshot leaves for this
+the whole argument `stage3.md` makes for building the CLI early, applied one stage further back.
+What it costs is written up in [stage4.md](stage4.md) under "What the snapshot leaves for this
 stage". The costs are all *performance* costs, which is the correct shape for a deferred index. If
 they were correctness costs the deferral would have been a mistake.
 
@@ -177,7 +179,7 @@ they were correctness costs the deferral would have been a mistake.
 - **Tests** — one `tests/fixtures/vault/` used by every stage. Add to it, never fork it. Property
   tests for the thread algebra; snapshot tests (`insta`) for rendered output; `assert_cmd` for CLI.
 - **The rebuild invariant** — a full rebuild of the index must produce the same logical content as an
-  incremental sync. This is a CI check from stage 2 onward, not a manual belief. **Exception:
+  incremental sync. This is a CI check from stage 4 onward, not a manual belief. **Exception:
   `edited_at`.** From stage 1b onward it is index-only, populated from filesystem mtime at scan time,
   and mtime is not reproducible content — a rebuild and an incremental sync are not guaranteed to
   observe the same mtime for an untouched file across two scans. The check must exempt this one field
@@ -211,15 +213,15 @@ they were correctness costs the deferral would have been a mistake.
 
 ## Open questions
 
-- **DB filename.** `docs/conversation.md` says `{data,index}.db`. This plan assumes a single
+- **DB filename.** `docs/conversation/initial.md` says `{data,index}.db`. This plan assumes a single
   `.jot/index.db`, on the grounds that naming it `data.db` invites treating it as source of truth.
   Confirm, or say what the second file would hold.
 - **Concurrent edit.** A surface holding a note while an external editor writes it. Needs a re-stat
   and hash comparison before write, or jot clobbers the external edit. Raised in stage 1b and left
-  open there; `Workspace::open_note` is the first writer with the problem, and stage 2's `files`
+  open there; `Workspace::open_note` is the first writer with the problem, and stage 4's `files`
   table (size, mtime, hash) is the first place with the machinery to solve it.
 - **Externally deleted file** — not moved to `.jot/.trash/`, just gone. Not trashed, not purged. The
-  index row drops on sync with no tombstone. Raised in stage 1b; stage 2 is where it becomes real.
+  index row drops on sync with no tombstone. Raised in stage 1b; stage 4 is where it becomes real.
 - ~~**Filename slug.**~~ **Settled in [stage 1b](stage1b.md).** The `[notes] filename` knob is gone.
   The slug was always decorative and always ignored by the reader, so the knob governed nothing the
   reader cared about; it is replaced by a creation-time option for whether a new note's filename gets

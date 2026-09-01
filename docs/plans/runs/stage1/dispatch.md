@@ -22,7 +22,7 @@ Two were escalated to the user; eight were ruled by the orchestrator.
   bytes. Re-serializing an unmodified note emits those bytes unchanged. Byte-identity is therefore
   structural rather than a property the emitter has to earn, and the acceptance criterion
   ("`git diff` is empty") holds for any note whatever its key order, spacing, or scalar style.
-- **Canonical path.** Notes this version *creates*, and — from stage 3 — notes it *edits*, are
+- **Canonical path.** Notes this version *creates*, and — from stage 2 — notes it *edits*, are
   emitted with known keys in the fixed order `id, title, created_at, edited_at, reply_to, root,
   quote, trashed_at`, then unknown keys in their original relative order.
 - A note therefore reshuffles into canonical form the first time it is genuinely edited, and never
@@ -88,7 +88,7 @@ versions, and the monotonic guarantee lives in the counter-carrying context type
 
 **No.** Neither `init` nor `open` touches the registry. A library call with a global filesystem side
 effect outside the vault is a testing problem and a surprise. Registration is an explicit
-`registry::*` call, wired by the CLI in stage 4.
+`registry::*` call, wired by the CLI in stage 3.
 
 **This removes T4.1's dependency on T3.3 entirely.** T4.1 now depends only on T3.2.
 
@@ -122,7 +122,7 @@ follow exactly:
   scanner, not silently resolved."
 
 A note without `root` cannot be hand-written and then loaded. That is a real cost of this ruling; it
-is accepted, and stage 2's scanner is where a repair path belongs if one is ever wanted.
+is accepted, and stage 4's scanner is where a repair path belongs if one is ever wanted.
 
 ## Deviations from the planner's breakdown, accepted
 

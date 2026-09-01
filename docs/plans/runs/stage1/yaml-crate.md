@@ -299,7 +299,7 @@ form to drift.
 
 Secondary reasons:
 
-- Stages 4–6 render human-facing timelines ("today", "yesterday"), which needs local time.
+- Stages 3, 5 and 6 render human-facing timelines ("today", "yesterday"), which needs local time.
   `chrono`'s `Local` is first-class; `time` deliberately ships no timezone database and
   `OffsetDateTime::now_local()` fails outright on some platforms.
 - The historical objection to `chrono` — RUSTSEC-2020-0159, the `localtime_r` soundness issue — is
@@ -381,7 +381,7 @@ Verified by compiling a probe against exactly this set on Windows:
 costs nothing, and a wave-3 agent blocked on a missing dependency costs a serialized amendment
 across three worktrees.
 
-Not provisioned, on purpose: `insta` and `assert_cmd` (`overview.md` wants them from stages 4–5,
+Not provisioned, on purpose: `insta` and `assert_cmd` (`overview.md` wants them from stages 3 and 5,
 nothing in stage 1 renders or shells out) and any atomic-write crate — see the note in the
 breakdown that `std::fs::rename` on Windows already maps to `MoveFileExW` with
 `MOVEFILE_REPLACE_EXISTING`; T3.2 verifies that rather than taking a dependency on faith.

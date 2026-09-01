@@ -342,8 +342,8 @@ made by whoever happened to be dispatched.
   stage1` and, if so, whether it is allowed to fail during the stage and made blocking at seal. T1.1
   writes the workflow in wave 1, before any acceptance test exists, so this needs an answer at
   dispatch time, not at seal.
-- **U9 — Filename/frontmatter mismatch is "reported" — to whom?** Stage 1 has no scanner (stage 2)
-  and no CLI (stage 4), so there is no obvious channel. Missing: the observable. Is it a field on
+- **U9 — Filename/frontmatter mismatch is "reported" — to whom?** Stage 1 has no scanner (stage 4)
+  and no CLI (stage 3), so there is no obvious channel. Missing: the observable. Is it a field on
   `NoteMeta`, a warnings vector returned alongside the note, a non-fatal `Error` variant returned by
   a `load`-style function? The verifier cannot write this acceptance test without one.
 - **U10 — Required fields versus the error list.** Required keys are `id`, `created_at`, `root`, but

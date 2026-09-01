@@ -23,7 +23,7 @@ untouched" is structural rather than earned.
 
 ## Why this crate rather than `pulldown-cmark`
 
-`stage3.md` already requires a markdown parser for `[[uuid]]` extraction, so the dependency was
+`stage2.md` already requires a markdown parser for `[[uuid]]` extraction, so the dependency was
 arriving regardless. In markdown-rs's mdast a paragraph's `[[uuid|label]]` arrives as a single
 `Text` node with byte offsets, while fenced and inline code are distinct node kinds to skip;
 `pulldown-cmark` splits the same link across eight events and would need reassembly. One crate

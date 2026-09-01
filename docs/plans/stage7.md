@@ -10,7 +10,7 @@ stage possible without a migration.
 
 ## Frontmatter schema
 
-Your idea from `docs/conversation.md`: every file in a workspace carries a known frontmatter shape,
+Your idea from `docs/conversation/initial.md`: every file in a workspace carries a known frontmatter shape,
 with defaults and type checking.
 
 ### Declaration
@@ -87,7 +87,7 @@ An ordinary markdown directory — arbitrary filenames, real folders, no threads
   it opt-in per workspace and fall back to path-as-identity when declined.
 - **Recursive scanning**, honoring `.gitignore`-style excludes.
 - **Renames and moves** become real events; a path-identified note that moves must not look like a
-  delete plus a create. Content hash from stage 2 is what makes this detectable.
+  delete plus a create. Content hash from stage 4 is what makes this detectable.
 - **Links become `[[filename]]`**, not `[[uuid]]` — resolution by path or basename, still strictly
   within one workspace.
 - Threads, quotes, and the timeline are absent, not empty. The rail shows three destinations, and the
@@ -103,7 +103,7 @@ line here is a line not spent on the capture loop that is the actual point.
 ## Work
 
 - [ ] Schema declaration parsing and validation in `workspace.toml`, with reserved-field enforcement.
-- [ ] `note_fields` table, populated by the scanner; migration from stage 2's schema.
+- [ ] `note_fields` table, populated by the scanner; migration from stage 4's schema.
 - [ ] Defaults applied at creation; violations reported through `SyncReport` and rendered as advisory.
 - [ ] Field filters in `jot ls`, `jot search`, and both UIs.
 - [ ] Typed field controls in the desktop composer.

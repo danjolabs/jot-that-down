@@ -74,7 +74,7 @@ called out again under Deviations.
   HEAD**, and each of those agents had to reset before it could see `stage/1-vault-foundations`'s
   actual state. This is not independently documented in any run artifact — it is recorded here on the
   orchestrator's account, since no artifact in `runs/stage1/` captures it. Worth fixing in tooling
-  before stage 2: a worktree cut from the wrong ref is a silent way to lose a wave's prerequisites.
+  before stage 4: a worktree cut from the wrong ref is a silent way to lose a wave's prerequisites.
 - **The wave 2/3 API contract (`dispatch.md`'s error-variant renames and module shapes) was referenced
   in three implementer briefs before it was committed to the repo.** The content was settled and
   handed to wave-3 implementers first; `dispatch.md` itself records the commit landing at `9af5c62`,
@@ -91,7 +91,7 @@ called out again under Deviations.
   consequence worth flagging: `7ea4ab0`'s F3–F7 numbering matches `verification.md`'s Findings section
   exactly (F3 = lossy `NoteMeta` rebuild, F4 = `yaml_serde` API leak, F5 = BOM message, F6 = duplicate
   frontmatter id, F7 = self-reference/dangling links), but `verification.md` explicitly characterized
-  F3, F6, and F7 as accepted, non-blocking, or work to *inherit into stage 2* rather than defects
+  F3, F6, and F7 as accepted, non-blocking, or work to *inherit into stage 4* rather than defects
   requiring a stage-1 code fix. Whether the code-review pass independently reached the same
   conclusions and chose to fix some of them in stage 1 anyway, or whether scope was broadened at seal,
   cannot be determined without the missing artifact.
@@ -135,12 +135,12 @@ Three rounds, all after the initial phase B **FAIL** verdict recorded in `verifi
 
 `verification.md`'s own verdict, after the F1 fix and gap closure: **FAIL until F1 lands, then PASS.**
 It explicitly left F2 (the `to_bytes` write-hazard) as a decision to be *recorded*, not necessarily
-implemented, before stage 2 starts. That decision is now moot in the form F2 posed it — see Plan-doc
+implemented, before stage 4 starts. That decision is now moot in the form F2 posed it — see Plan-doc
 corrections.
 
 ## Human checkpoints
 
-`orchestration.md`'s "What Fable cannot verify" table lists **none** for stages 1–3: "fully
+`orchestration.md`'s "What Fable cannot verify" table lists **none** for stages 1, 2 and 4: "fully
 mechanizable, which is why they come first." That held. The two items escalated to the user during
 this stage were not human-checkpoint items in that sense — they were locked-decision-adjacent design
 rulings the orchestrator could not make unilaterally:
@@ -230,7 +230,7 @@ this role.
     to filename-only, linking `stage1b.md`.
   - Global risks table: the Windows atomic-rename risk marked verified/resolved, with the platform,
     toolchain, and date, and the replacement-vs-never-fails caveat stated explicitly.
-  - Stages table: added stage 1b between 1 and 2; stage 2's "Depends on" updated from `1` to `1b`.
+  - Stages table: added stage 1b between 1 and 2; stage 4's "Depends on" updated from `1` to `1b`.
   - Rebuild invariant: added the `edited_at` exemption and named the tempting wrong fix (writing mtime
     everywhere) explicitly, so whoever hits the CI failure doesn't reach for it.
 - **`orchestration.md`**
@@ -243,13 +243,13 @@ this role.
 - **`stage1.md`** — added a header note pointing to `stage1b.md` for the superseded format sections
   (Note format, Frontmatter, the round-trip acceptance criterion), without rewriting or deleting the
   body — it remains the record of what stage 1 built and what `verification.md`'s verdicts are about.
-- **`stage3.md`** — added a note after the lifecycle table stating that F2 (the `to_bytes` write
+- **`stage2.md`** — added a note after the lifecycle table stating that F2 (the `to_bytes` write
   hazard) is resolved structurally by stage 1b's single write path, not by a stage-3 constraint on
   `edit`. No "`edit` must call `to_canonical_bytes()`" constraint was added, because that method no
   longer exists as a distinct thing to require.
-- **`stage2.md`** — added one Risks-section item: a write must never originate from an index row
+- **`stage4.md`** — added one Risks-section item: a write must never originate from an index row
   (stage 1's F3 finding, mechanism confirmed by phase B). This is the one surviving sub-item of
-  `verification.md`'s three-part "stage2.md should inherit" write-back — see Skipped below for why
+  `verification.md`'s three-part "stage4.md should inherit" write-back — see Skipped below for why
   the other two did not land.
 
 ### Skipped as superseded by `stage1b.md`, or otherwise moot
@@ -261,16 +261,16 @@ this role.
   class of loss). Rather than patch stale specifics into a section that is about to be replaced, the
   header note added to `stage1.md` covers both at once: "the Note format, Frontmatter, and the
   round-trip criterion are no longer current."
-- **`stage3.md`'s original write-back ("`Workspace::edit` must use `to_canonical_bytes()`")** — not
+- **`stage2.md`'s original write-back ("`Workspace::edit` must use `to_canonical_bytes()`")** — not
   applied as worded, because `to_canonical_bytes()` doesn't survive stage 1b as a distinct method.
   Replaced with the structural note described above.
-- **`stage2.md` inheriting F6** (a note may share its frontmatter `id` with another file with no
+- **`stage4.md` inheriting F6** (a note may share its frontmatter `id` with another file with no
   complaint) — moot under stage 1b: identity moves to the filename only, so there is no frontmatter
-  `id` left for two files to collide on in the way F6 describes. `stage2.md`'s existing Risks section
+  `id` left for two files to collide on in the way F6 describes. `stage4.md`'s existing Risks section
   already separately names "duplicate `id` across two files" as a copy-paste hazard on the (now
   filename-based) id, so nothing was lost by not adding F6's framing on top of it.
-- **`stage2.md` inheriting F1** (filename-parser unification) — moot; already fixed within stage 1
-  itself (`c293114`), not something for stage 2 to inherit.
+- **`stage4.md` inheriting F1** (filename-parser unification) — moot; already fixed within stage 1
+  itself (`c293114`), not something for stage 4 to inherit.
 - **§U4's out-of-scope list "should name `fsync`"** — `dispatch.md`'s U4 ruling text itself says to
   "name [untested things] in the run log," not to edit the ruling. Applied by naming `fsync` as
   untested-by-construction in this log (What shipped, and the Timings mutation-count note) rather than
@@ -291,5 +291,5 @@ U8's 'flipped to blocking at seal.'" No edit was needed or made.
   above were, but it was not on the list of ratified corrections for this seal, so it is left as-is
   and flagged here.
 - `runs/stage1/dispatch.md`'s dispatch log has no entries for waves 3, 4, or any of the three fix
-  rounds — see Deviations and the Waves table above. Worth closing before stage 2's dispatch log is
+  rounds — see Deviations and the Waves table above. Worth closing before stage 4's dispatch log is
   written, so this role isn't reconstructing model attribution from a routing table again next time.

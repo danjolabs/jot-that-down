@@ -24,7 +24,7 @@ cannot yet be *found*.
 <workspace_root>/
   .jot/
     workspace.toml            # identity + config
-    index.db                  # stage 2
+    index.db                  # stage 4
     .trash/                   # trashed notes keep their filename
     tmp/                      # staging area for atomic writes
     .gitignore                # index.db*, tmp/
@@ -53,7 +53,7 @@ filename = "uuid"      # "uuid" | "uuid_slug" — deferred decision, see overvie
 `id` is what makes the directory self-identifying: registering a workspace is pointing at a folder,
 and moving the folder loses nothing.
 
-**v4, not v7** — changed post stage 4, see `runs/post-stage4/log.md`. This originally said UUIDv7,
+**v4, not v7** — changed post stage 3, see `runs/post-stage3/log.md`. This originally said UUIDv7,
 by inheritance from note ids rather than by argument: the self-identifying property this paragraph
 describes holds for any UUID version. A **note** id must be v7, because `created_at` is decoded from
 it and id order is creation order. A workspace id is asked for neither, and v7 actively cost two

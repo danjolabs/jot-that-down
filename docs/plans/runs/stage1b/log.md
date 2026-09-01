@@ -16,8 +16,8 @@ about the run rather than a gap to fill in later. What that costs is stated plai
 suite is not independent evidence. The mutation spot-check is what partially compensates, and it is
 the reason that section of `verification.md` is longer than it would otherwise be.
 
-Recommendation for stage 2: go back to the loop, or at minimum dispatch the verifier separately.
-Stage 2 builds the index over this format, and `overview.md` calls the derived-index invariant "the
+Recommendation for stage 4: go back to the loop, or at minimum dispatch the verifier separately.
+Stage 4 builds the index over this format, and `overview.md` calls the derived-index invariant "the
 project's foundation".
 
 ## Decisions ratified during the run
@@ -163,7 +163,7 @@ Removed, each with the key or rule it was about: `NoteIdMismatch`, `MissingId`, 
 `ReplyCycle` is new scope the doc did not mention and could not avoid: recomputing a root walks
 `relation:reply_to` upward, and a hand-written cycle would hang. Dangling references are a designed
 state; a cycle is corruption, and it is reported naming both the file and the note it returns to.
-`stage3.md` already expects this ("A hand-written cycle in `reply_to` produces an error naming both
+`stage2.md` already expects this ("A hand-written cycle in `reply_to` produces an error naming both
 notes, and no hang"), so the variant arrives one stage early rather than out of nowhere.
 
 ### Fixture corpus
@@ -181,14 +181,14 @@ an editor or a formatter ever strips it, criteria 3 and 11 go quietly weaker rat
 - **Two files claiming one identity.** `<uuid>.md` beside `<uuid>_slug.md` is two files claiming to
   be one note. Nothing detects it; `note_path` returns the first match. Pinned as a characterization
   by `probe_b_two_files_claiming_one_identity_both_enumerate_without_complaint`, and written into
-  `stage2.md`'s problems list.
-- **`note_path` is a linear scan.** Every `open_note` walks the vault. Correct and slow; stage 2's
+  `stage4.md`'s problems list.
+- **`note_path` is a linear scan.** Every `open_note` walks the vault. Correct and slow; stage 4's
   index is the fix.
 - **Concurrent external edit.** `open_note` reads, renders, and writes without re-stat'ing. Promoted
   from `stage1b.md`'s open questions to `overview.md`'s, because it is no longer specific to one
   stage.
 - **The rebuild-invariant exemption for `edited_at`** was already written into `overview.md` before
-  this stage started. It is still there, and stage 2 must honour it rather than "fixing" rebuild to
+  this stage started. It is still there, and stage 4 must honour it rather than "fixing" rebuild to
   write mtime everywhere.
 
 ## Plan-doc write-backs
@@ -200,10 +200,10 @@ Per `overview.md`'s definition of done, item 4.
   convention, which flatly contradicted this stage ("filesystem mtime … never a fact about a note");
   the forward-compat bullet, which now has to say *how* the guarantee is carried; stage 7's
   deliverable, since part of it landed here; two open questions promoted from `stage1b.md`.
-- **`stage2.md`** — `created_at` nullable and decoded, `edited_at` and `trashed_at` from mtime;
+- **`stage4.md`** — `created_at` nullable and decoded, `edited_at` and `trashed_at` from mtime;
   `trashed_at` no longer read from frontmatter; `SyncReport.problems` loses id/filename
   disagreements and gains duplicate *filenames*; three constraints stage 1b imposed on the scanner.
-- **`stage3.md`** — the lifecycle table (`create` writes only relations; `trash`/`restore` write
+- **`stage2.md`** — the lifecycle table (`create` writes only relations; `trash`/`restore` write
   nothing); `root` assigned once, now `relation:root`, plus the filename-slug option; `edited_at`
   churn largely settled by making it mtime.
 - **`stage7.md`** — the reserved-fields list, four keys rather than eight, and the note that they
@@ -213,6 +213,6 @@ Per `overview.md`'s definition of done, item 4.
 
 ## Not done
 
-- `sync()` / `rebuild()` — stage 2, by the stage doc's own scope.
+- `sync()` / `rebuild()` — stage 4, by the stage doc's own scope.
 - An independent verifier. See the top of this file and of `verification.md`.
 - Linux. CI's business; every result recorded here is Windows.

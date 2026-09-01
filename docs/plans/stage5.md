@@ -11,7 +11,7 @@ here is a decision stage 6 does not have to relitigate, at a fraction of the cos
 
 ## Views
 
-The two views named in `docs/conversation.md`, plus the three supporting destinations.
+The two views named in `docs/conversation/initial.md`, plus the three supporting destinations.
 
 ### Timeline
 
@@ -43,7 +43,7 @@ A split view: list on the left, reader on the right.
 
 ### Thread detail
 
-The stage 3 projections, rendered:
+The stage 2 projections, rendered:
 
 - **Ancestors** above, linear, collapsed past three to `… 4 earlier notes`.
 - **Focus** in the middle, full body.
@@ -94,7 +94,7 @@ anything longer. Do not build a text editor — shelling out is correct here and
 - [ ] Async loading so a large vault never blocks the first paint; render a skeleton and fill in.
 - [ ] Undo toast for trash — a five-second window that calls `restore`. Cheap, and it is the single
       biggest confidence gain for destructive keys.
-- [ ] Reference placeholders rendered per stage 3's three states: `Present`, `Trashed` (dimmed, with
+- [ ] Reference placeholders rendered per stage 2's three states: `Present`, `Trashed` (dimmed, with
       restore), `Deleted` (id only).
 - [ ] Snapshot tests over the ratatui buffer for each view (`insta`), so layout changes are deliberate.
 - [ ] Windows Terminal check: box drawing, unicode width, and color behave.

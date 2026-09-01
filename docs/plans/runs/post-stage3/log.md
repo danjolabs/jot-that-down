@@ -1,9 +1,14 @@
-# Post stage 4 — dogfooding log
+# Post stage 3 — dogfooding log
 
-Changes made after stage 4 landed, driven by using `jot` rather than by a stage document. Each entry
+> **Renumbered.** This log was written when the index was stage 2 and this work was stages 3 and 4.
+> The stages were later renumbered so that what was actually built comes first: the domain is now
+> stage 2, the CLI stage 3, and the SQLite index stage 4. Stage numbers in this file have been
+> updated to the new scheme; quoted words have not.
+
+Changes made after stage 3 landed, driven by using `jot` rather than by a stage document. Each entry
 records what real use exposed, what was decided, and what it cost.
 
-`stage4.md` says everything wanted during the first week should land in a list, not in the code.
+`stage3.md` says everything wanted during the first week should land in a list, not in the code.
 These are the ones that were not feature requests but **defects or design errors the CLI made
 visible** — the category that stage doc explicitly wants acted on.
 
@@ -17,7 +22,7 @@ refer to by short id.
 
 Replaced with the shortest prefix unique in the set an id is displayed beside, floored at 8, which is
 what git actually does. Lives in `jot_core::shortid` because there are two callers and both are
-UUIDv7. Written up in `stage4.md`.
+UUIDv7. Written up in `stage3.md`.
 
 ## 2. `jot ws ls` could not be read
 
@@ -152,17 +157,17 @@ knows the tool, and `--help` is read by someone who does not. It also disambigua
 `remove`s: `jot remove` versus `jot workspace remove` is legible where `jot rm` versus `jot ws rm` is
 two characters. Nothing was taken away — both spellings work and both show in help.
 
-## 8. The stage 3 and 4 acceptance suites are deliberately deferred
+## 8. The stage 2 and 3 acceptance suites are deliberately deferred
 
-`runs/stage3-4/log.md` recommended dispatching a verifier to write them retroactively before stage 2
+`runs/stage2-3/log.md` recommended dispatching a verifier to write them retroactively before stage 4
 builds on this domain. **That recommendation was considered and declined**, at the user's direction,
 to keep the iteration cycle short. It is a decision rather than an oversight, and it is recorded here
 so that a later reader does not mistake it for one.
 
 The reasoning, and it is visible in this log's own contents: every entry above came from *using* the
 tool, and four of them changed something a stage document had already settled — the short-id design,
-the workspace id version, the workspace selector, the command names. A suite written against stages 3
-and 4 before that dogfooding would have been written against a design still moving under it, and each
+the workspace id version, the workspace selector, the command names. A suite written against stages 2
+and 3 before that dogfooding would have been written against a design still moving under it, and each
 of those findings would have arrived as a suite to rewrite as well as an implementation to change.
 Acceptance criteria are worth most when they pin something settled; written too early they mostly pin
 the author's current opinion, and they make changing that opinion expensive at exactly the moment it
@@ -172,51 +177,51 @@ is cheapest to change.
 
 Stated plainly, because the cost is real and is not reduced by the decision being deliberate.
 
-- **`orchestration.md` rule 2 does not hold for stages 3 and 4.** Everything in them was written and
-  judged by the same author. `crates/jot-cli/tests/cli.rs` covers the stage 4 criteria but is not
+- **`orchestration.md` rule 2 does not hold for stages 2 and 3.** Everything in them was written and
+  judged by the same author. `crates/jot-cli/tests/cli.rs` covers the stage 3 criteria but is not
   independent evidence, which is precisely what the acceptance crate exists to provide.
 - **The thread algebra has no independent check.** The routing table calls it "the crown jewel…
   wrong is invisible", and its invariants are asserted over eight fixed shapes rather than the
-  several thousand generated trees `stage3.md` asks for.
+  several thousand generated trees `stage2.md` asks for.
 - **Entry 4 is the demonstration.** The one blocking acceptance test that *did* exist caught a real
   conflict with a documented decision immediately — and the resolution was an implementer editing a
-  verifier-owned file. That is what the absent suites would otherwise be doing for stages 3 and 4:
+  verifier-owned file. That is what the absent suites would otherwise be doing for stages 2 and 3:
   catching this class of thing without a person having to notice.
 
 ### What partially compensates
 
-- The thread algebra is checked against the worked example **printed in `stage3.md`** — both
+- The thread algebra is checked against the worked example **printed in `stage2.md`** — both
   projections, exact sequences. An external oracle rather than a self-consistent one.
-- The stage 1b acceptance suite is still blocking and still green, so nothing below stage 3 has
+- The stage 1b acceptance suite is still blocking and still green, so nothing below stage 2 has
   silently regressed under all of this.
 - 459 tests, fmt and clippy clean, on every commit.
 
 ### When to revisit
 
-**Before stage 2**, which is where the cost stops being theoretical: the index is built on top of
+**Before stage 4**, which is where the cost stops being theoretical: the index is built on top of
 this domain, `overview.md` calls the derived-index invariant "the project's foundation", and a stage
-3 rule that turns out wrong is far more expensive to correct once queries depend on it. The
+2 rule that turns out wrong is far more expensive to correct once queries depend on it. The
 iteration-speed argument above applies to a design still being discovered by use; it stops applying
 once something is being built on top.
 
 ## Still open
 
-- The stage 3 and 4 acceptance suites — deferred deliberately, see entry 8, and due before stage 2.
-- A reply cycle in `relation:reply_to` terminates but reports nothing. `stage3.md` requires "an error
+- The stage 2 and 3 acceptance suites — deferred deliberately, see entry 8, and due before stage 4.
+- A reply cycle in `relation:reply_to` terminates but reports nothing. `stage2.md` requires "an error
   naming both notes, and no hang"; there is no hang, but the read path renders a truncated tree
   instead of raising. `Error::ReplyCycle` exists and fires only in `Workspace::open_note`.
-- Property tests over generated trees, per `stage3.md`. The invariant bodies are generator-ready.
-- `insta` snapshots for the human output, and the `jot new` latency budget, which needs stage 2 and a
+- Property tests over generated trees, per `stage2.md`. The invariant bodies are generator-ready.
+- `insta` snapshots for the human output, and the `jot new` latency budget, which needs stage 4 and a
   large vault to mean anything.
 
 ## Where this is left
 
-`prototype`, green on both platforms. Stages 1–4 built, the CLI dogfoodable, 459 tests and 111
+`prototype`, green on both platforms. Stages 1–3 built, the CLI dogfoodable, 459 tests and 111
 acceptance passing, `fmt` and `clippy -D warnings` clean.
 
-**Stage 2 is next, and it is the reason entry 8 names a revisit point.** Everything above was built
+**Stage 4 is next, and it is the reason entry 8 names a revisit point.** Everything above was built
 against `snapshot::Snapshot` — a scan standing in for the index — so this stage is a *substitution
-behind an existing seam* rather than a greenfield build. `stage2.md` carries a "What the snapshot
+behind an existing seam* rather than a greenfield build. `stage4.md` carries a "What the snapshot
 leaves for this stage" section mapping each planned query to the method that already answers it, and
 one criterion that did not exist before:
 

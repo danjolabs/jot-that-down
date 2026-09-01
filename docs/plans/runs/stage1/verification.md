@@ -78,7 +78,7 @@ identical, leaves the body byte-identical, and is a fixed point. Notably:
   sound.
 - **Timestamps.** All six spellings I threw at it (`+09:00`, `-09:00`, subsecond, lowercase `z`,
   lowercase `t`) normalize to quoted `...Z` at second precision. Subsecond input is *truncated* —
-  the instant moves. That is §U2's ruling, not a bug, but it is a one-way loss the first time stage 3
+  the instant moves. That is §U2's ruling, not a bug, but it is a one-way loss the first time stage 2
   edits a note some other tool wrote with milliseconds, and it is now asserted explicitly
   (`probe_b_canonical_timestamps_normalize_to_the_one_form_u2_fixes`) rather than left implicit.
 - **Three rounds of canonicalization over the whole corpus** are byte-identical
@@ -98,7 +98,7 @@ Two small, real, accepted losses on the canonical path:
 
 **F1 — DEFECT. The two note-filename parsers disagree.** `note::load` parses the filename with a
 private `filename_id` in `note.rs`; `fs::parse_note_filename` is the public one. `note.rs` says the
-duplication is deliberate and adds "**Keep the two in step until** [stage 2 unifies them]". They are
+duplication is deliberate and adds "**Keep the two in step until** [stage 4 unifies them]". They are
 not in step. `defect_note_load_and_fs_parse_note_filename_accept_the_same_filenames` is red:
 
 ```
@@ -115,11 +115,11 @@ requires the 36-character hyphenated form and a literal `.md` suffix and rejects
 `_` (so an empty slug is accepted), and calls `Uuid::parse_str` (so the braced, URN, and unhyphenated
 forms are accepted).
 
-Why it matters now rather than in stage 2: three of the five divergent names end in `.md` and are
+Why it matters now rather than in stage 4: three of the five divergent names end in `.md` and are
 therefore returned by `fs::live_note_paths`. A vault containing
 `01a03d217c117a02b3de9f0e21c4a771.md` is a vault where enumeration hands the scanner a path,
 `parse_note_filename` calls it `InvalidNoteFilename`, and `Note::load` on the same path returns a
-perfectly good note. Two components disagree about whether a file is a note. Stage 2 inherits that
+perfectly good note. Two components disagree about whether a file is a note. Stage 4 inherits that
 as an ambiguity rather than a decision.
 
 **Fix, one pass:** delete `note.rs`'s private `filename_id` and have `Note::load` call
@@ -148,7 +148,7 @@ block.
 is the one that is correct after an edit; and the doc comment that says so is on `Frontmatter`, not
 on `Note::to_bytes` where the caller is standing. A doc comment is not a mitigation for a silent
 data-loss path — it is a note about one. Stage 1 cannot trigger it, so this is **not a reason to
-refuse the seal**, but it must not survive into stage 3 unaddressed. Options, in my order of
+refuse the seal**, but it must not survive into stage 2 unaddressed. Options, in my order of
 preference:
 
 1. Make the known fields private behind setters that call `forget_verbatim()`. Removes the hazard
@@ -156,7 +156,7 @@ preference:
 2. Have `to_preserved_string` compare the typed fields against a lazily-reparsed view of the retained
    block and fall back to canonical on any disagreement. Removes the hazard without an API change;
    costs a parse per write.
-3. Keep the shape, and make `Workspace::edit` in stage 3 the only sanctioned edit path, documented as
+3. Keep the shape, and make `Workspace::edit` in stage 2 the only sanctioned edit path, documented as
    *required* to use `to_canonical_bytes()`. Cheapest, but leaves a loaded gun in the public API for
    the CLI and TUI to find.
 
@@ -168,14 +168,14 @@ Nothing panics and nothing misbehaves: `has_verbatim()` is `false`, `verbatim()`
 `to_bytes()` falls back to `to_canonical_bytes()` byte-for-byte, and the result parses back with
 every field intact (`probe_b_a_note_meta_with_no_verbatim_writes_canonically_on_both_paths`,
 `probe_b_a_note_meta_built_field_by_field_emits_every_field_it_was_given`). The alias is sound for
-stage 2's read path.
+stage 4's read path.
 
 The hazard is the *write* path: `NoteMeta::new` gives you an empty unknown map, so a note
 reconstructed from SQLite and written back destroys every unknown key the file had — verified 2 → 0
 in `probe_b_known_hazard_a_note_meta_rebuilt_from_fields_carries_no_unknown_keys`. This is exactly
-`stage1.md`'s "expensive failure", displaced into stage 2. **Stage 2's plan must state that a write
+`stage1.md`'s "expensive failure", displaced into stage 4. **Stage 4's plan must state that a write
 never originates from an index row** — a write is always `load` → mutate → write, with the index used
-only to find the path. Worth writing into `stage2.md` before stage 2 is decomposed.
+only to find the path. Worth writing into `stage4.md` before stage 4 is decomposed.
 
 **F4 — `Frontmatter`'s public API leaks `yaml_serde` with no re-export.** `unknown()` /
 `unknown_mut()` return `&yaml_serde::Mapping`, and nothing in `jot-core` re-exports `yaml_serde`. A
@@ -193,8 +193,8 @@ its own error variant. `probe_b_a_utf8_bom_before_the_fence_is_rejected` pins th
 
 **F6 — Two notes may share one frontmatter `id` with no complaint.** Both files enumerate, both
 `load` cleanly (`probe_b_two_notes_sharing_one_frontmatter_id_both_load_without_complaint`). Correct
-for stage 1 — there is no cross-file pass — but it is stage 2's problem, inherited rather than
-introduced, and `stage2.md` should name it.
+for stage 1 — there is no cross-file pass — but it is stage 4's problem, inherited rather than
+introduced, and `stage4.md` should name it.
 
 **F7 — Self-reference and dangling links load without complaint.** A note whose `reply_to` is its own
 `id`, whose `quote` is its own `id`, and whose `root` points at a note that does not exist all parse
@@ -230,7 +230,7 @@ unique. A closing fence with trailing whitespace (`--- `) is accepted, as intend
 
 **F12 — A happy accident in the corpus, worth not losing.** The shared fixture vault contains **two**
 pairs of colliding 8-character id prefixes (`01a03d51`, `01a03d52`). `NoteId::short()` is documented
-as "not unique by construction", and stage 3's `resolve` therefore cannot be written as "first prefix
+as "not unique by construction", and stage 2's `resolve` therefore cannot be written as "first prefix
 match wins" and pass against this corpus. `probe_b_short_is_a_real_prefix_and_the_corpus_contains_a_collision`
 asserts the collision *exists*, so a future fixture cleanup cannot quietly remove it.
 
@@ -262,11 +262,11 @@ Everything above ran on Windows. CI's ubuntu leg has never run. Reading the `cfg
   `<vault>/sub/..`. Both `discover_finds_the_workspace_from_three_directories_deep` and
   `init_accepts_a_relative_path_and_reports_an_absolute_root` will still pass — the first compares
   after `canonicalize`, the second only asserts `is_absolute()` — so **this will not be caught by
-  CI**. It is cosmetic in stage 1 and becomes real in stage 2, where index paths are stored relative
+  CI**. It is cosmetic in stage 1 and becomes real in stage 4, where index paths are stored relative
   to `root()`. Cheap hardening: fall back to `canonicalize()` when the path exists.
 - Symlinks: `fs::is_dir` follows them, so on Linux a symlink to a `.md` file enumerates as a note and
   `atomic_write` renaming over it replaces the *link*, not its target. Out of scope for stage 1;
-  worth a line in stage 2's scanner plan.
+  worth a line in stage 4's scanner plan.
 - `.gitattributes` `text eol=lf` is a no-op on a Linux checkout, so
   `the_fixture_corpus_is_checked_out_with_lf_line_endings` will pass there trivially.
 
@@ -331,8 +331,8 @@ This is the important part of the table.
 | **M16 `init` does not create `.jot/tmp`** | none | none | **Equivalent mutant, not a gap.** Verified directly: `atomic_write`'s `ensure_dir(tmp_dir)` recreates `.jot/tmp` when the manifest is written, so `init` still produces the documented tree. Confirmed by instrumenting the mutant — `.jot/tmp` exists afterwards. M24 (delete it *after* writing) is the honest version and is caught. |
 | **M15 enumeration stops skipping dotfiles** | none | 4 (`live_note_paths_skips_dotfiles_...` and 3 others) | **Real acceptance gap.** The fixture vault contains no dotfile `.md` in its root, so the acceptance suite cannot see this regression. `probe_enumeration_lists_live_notes_...` computes its expectation from `read_dir` with the same filter it is testing, so it is self-confirming here. Fix: add a `tests/fixtures/vault/.hidden-note.md` fixture and assert it is *not* enumerated. |
 | **M29 `open` ignores the manifest `kind`, always reports `Jot`** | none | 3 | **Real acceptance gap.** Criterion 1 checks that the manifest *file* says `kind = "jot"`; nothing in the acceptance suite ever calls `Workspace::kind()`. A `plain` vault opening as `jot` would ship. Fix: `init(.., Plain)` → `open` → assert `kind() == Plain`. |
-| **M31 enumeration is unsorted** | none | 2 | **Real acceptance gap.** `probe_enumeration_lists_live_notes_...` sorts both sides before comparing, so ordering is asserted nowhere in the acceptance suite. `fs.rs` documents stable ordering as the thing that lets stage 2's rebuild walk the vault identically twice. Fix: assert `live_note_paths` returns a sorted vector, not a set. |
-| **M32 `init` mints a constant workspace id** | none | 2 | **Real acceptance gap, and a bad one.** Criterion 1 checks the id's shape but never that two `init`s differ. (Shape check amended post stage 4: workspace ids are v4 — `runs/post-stage4/log.md`.) U5 keys the entire registry by workspace id; a constant id collapses every vault a user owns into one entry. Fix: `init` two vaults, assert the ids differ. |
+| **M31 enumeration is unsorted** | none | 2 | **Real acceptance gap.** `probe_enumeration_lists_live_notes_...` sorts both sides before comparing, so ordering is asserted nowhere in the acceptance suite. `fs.rs` documents stable ordering as the thing that lets stage 4's rebuild walk the vault identically twice. Fix: assert `live_note_paths` returns a sorted vector, not a set. |
+| **M32 `init` mints a constant workspace id** | none | 2 | **Real acceptance gap, and a bad one.** Criterion 1 checks the id's shape but never that two `init`s differ. (Shape check amended post stage 3: workspace ids are v4 — `runs/post-stage3/log.md`.) U5 keys the entire registry by workspace id; a constant id collapses every vault a user owns into one entry. Fix: `init` two vaults, assert the ids differ. |
 | **M38 `Registry::save_to` swallows write failures** | none | none | **Real gap in both suites.** U5 says explicitly "save_to is **not** total … it propagates as an ordinary `Err`", and nothing tests it. `error.rs`'s `only_registry_reads_are_recoverable` checks the taxonomy, not the call. Fix: `save_to` into a path whose parent is a file, assert `Err`. |
 | **M43 registry load conflates a missing file with a corrupt one** | none | 1 (`missing_file_is_an_empty_registry_not_an_error`) | **Real acceptance gap.** `probe_registry_load_from_a_missing_path_...` asserts only that the call succeeds and creates nothing; it never checks `recovered().is_none()`. U5 draws the distinction explicitly ("not a degraded state"). Fix: add `assert!(registry.recovered().is_none())` to that probe. |
 | **M44 `init` writes the manifest with `std::fs::write` instead of `atomic_write`** | none | none | **Real gap in both suites**, low stakes. `workspace.rs`'s module doc says "Every file this module creates goes through `crate::fs::atomic_write`"; nothing enforces it. Hard to test without a seam. Acceptable to leave, but should be named rather than assumed. |
@@ -409,8 +409,8 @@ The three already queued, confirmed:
 2. **`orchestration.md`'s wave-0 example is wrong** about where phase A belongs. Confirmed by this
    stage: phase A written at wave 2 still had to guess five error-variant names, which the wave 2/3
    pin then reconciled. Writing it at wave 0 would have made that worse, not better.
-3. **Stage 3's `Workspace::edit` must use `to_canonical_bytes()`.** Confirmed necessary by F2, and
-   `stage3.md` should say it as a constraint rather than leaving it to the implementer. If option 1
+3. **Stage 2's `Workspace::edit` must use `to_canonical_bytes()`.** Confirmed necessary by F2, and
+   `stage2.md` should say it as a constraint rather than leaving it to the implementer. If option 1
    or 2 from F2 is taken instead, this constraint becomes unnecessary — record whichever.
 
 Four more this phase produced:
@@ -426,9 +426,9 @@ Four more this phase produced:
    claim as written is not quite true.
 6. **§U4's out-of-scope list should name `fsync`.** It names process-kill and full-disk; M39 shows
    that the `fsync` itself is equally unobservable and equally untested. One more clause.
-7. **`stage2.md` should inherit three things** before it is decomposed: a note may share its `id`
+7. **`stage4.md` should inherit three things** before it is decomposed: a note may share its `id`
    with another file (F6), a write must never originate from an index row (F3), and the filename
-   parsers must be unified (F1, whose fix is the unification stage 2 was already going to do).
+   parsers must be unified (F1, whose fix is the unification stage 4 was already going to do).
 
 ## Verdict
 
@@ -450,7 +450,7 @@ What must change before the seal:
    in `crates/jot-acceptance/tests/phase_b.rs` goes green when it is done, with no edit to the test.
 
 2. **The five real acceptance-suite gaps should be closed in the same pass**, because they are five
-   small tests and the alternative is stage 2 building on a suite that cannot see them: enumeration
+   small tests and the alternative is stage 4 building on a suite that cannot see them: enumeration
    skipping dotfiles (M15), `open` reporting the manifest's `kind` (M29), enumeration being sorted
    (M31), `init` minting a *distinct* id per workspace (M32), and `Registry::save_to` propagating a
    write failure (M38). M43's fix is one added assertion in an existing probe. I own
@@ -460,7 +460,7 @@ What must change before the seal:
 
 3. **A decision on F2 must be recorded, not deferred.** Not necessarily implemented in stage 1 —
    stage 1 cannot trigger it — but the choice among the three options must be written into
-   `stage3.md` before stage 2 starts, or stage 3 will inherit a silent data-loss path with a doc
+   `stage2.md` before stage 4 starts, or stage 2 will inherit a silent data-loss path with a doc
    comment in front of it.
 
 Everything else in this report is a write-back, a stage-2 inheritance, or a pinned characterization.
@@ -517,10 +517,10 @@ Notes on three of them, because the assertion is doing something less obvious th
 - **M32.** Beyond "three ids differ", it asserts each id survives a reopen (`init` returns what
   `open` reads back — the id is minted once and immutable) and that the three sort in creation
   order, which is the property that makes them v7 ids rather than merely unique ones.
-  **Superseded post stage 4**: workspace ids are UUIDv4 and no longer sort by creation time. The
+  **Superseded post stage 3**: workspace ids are UUIDv4 and no longer sort by creation time. The
   ordering was unused — nothing asks "which vault did I make most recently" — and it was the reason
   short workspace ids were long. Note ids are unaffected and remain v7. See
-  `runs/post-stage4/log.md`.
+  `runs/post-stage3/log.md`.
 - **M38.** The failure has to land on the *rename*, not earlier, or the test would pass against the
   mutant. Pointing `save_to` at a path whose parent is a file fails in `create_dir_all` and would
   prove nothing; pointing it at an existing **directory** lets `create_dir_all` and staging both
@@ -637,6 +637,6 @@ Two things for the fixer to watch, neither of which is my file to change:
 
 **FAIL until F1 lands**, and then PASS. The two items I flagged as not-blocking still stand: F2's
 design decision is yours and the user's to make and the two characterization tests are untouched as
-instructed; the seven `stage1.md` / `overview.md` / `stage2.md` write-backs in the section above are
+instructed; the seven `stage1.md` / `overview.md` / `stage4.md` write-backs in the section above are
 for the scribe. Nothing in this round changed the verdict — it changed how much the green suite is
 worth once the verdict clears.

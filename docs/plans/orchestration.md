@@ -133,7 +133,7 @@ The heuristic: **route by the shape of the task's failure mode.**
 | Frontend component scaffolding (S6) | sonnet | Layout from a described shell. |
 | Run logs, plan-doc edits | sonnet | Applying approved decisions. |
 
-Roughly: stages 1–3 are almost entirely opus, stage 4 splits, stages 5–6 have the most sonnet-shaped
+Roughly: stages 1–2 and 4 are almost entirely opus, stage 3 splits, stages 5–6 have the most sonnet-shaped
 work, stage 7 returns to opus.
 
 **Escape hatch.** If a sonnet-routed task comes back twice with the gate failing, re-dispatch it to
@@ -205,7 +205,7 @@ All three must pass. They fail differently on purpose, which is why there are th
 | Review | `/code-review high` on the stage diff | moderate | seam violations, N+1s, duplication, dead paths |
 
 The seam rule from `overview.md` — surfaces never touch the filesystem or SQLite — is a standing
-review item from stage 4 onward, and is worth a grep in the review prompt:
+review item from stage 3 onward, and is worth a grep in the review prompt:
 `rusqlite|std::fs` under `crates/jot-cli`, `crates/jot-tui`, `apps/desktop/src-tauri` should return
 nothing but the thin command layer.
 
@@ -228,7 +228,7 @@ Disjoint file ownership is necessary but not sufficient in a Cargo workspace. Th
 - **The `target/` lock.** Concurrent `cargo test` runs serialize on the build lock, so "parallel"
   agents queue anyway and each one's feedback loop lengthens. Fix: give test-heavy tasks
   `isolation: "worktree"`, which brings its own `target/`.
-- **The index schema.** In stage 2, migrations, scanner, and queries all depend on the schema. Land
+- **The index schema.** In stage 4, migrations, scanner, and queries all depend on the schema. Land
   the schema alone in wave 1; the other two are genuinely parallel afterward.
 
 **Worktree or in place?** In place when ownership is disjoint and the task is small — it avoids merge
@@ -243,7 +243,7 @@ more than the parallelism saves, and Fable's attention becomes the bottleneck ra
 - Subagents' tool output stays out of Fable's context — that is the point of dispatching. Fable reads
   **artifacts** in `runs/stage<N>/`, never transcripts.
 - Each agent receives its stage doc, the locked-decisions table, its task, and its ownership set.
-  It does not receive the design conversation. `docs/conversation.md` is history; the plan docs are
+  It does not receive the design conversation. `docs/conversation/initial.md` is history; the plan docs are
   the specification, and if something in the conversation matters it belongs in a plan doc.
 - Use `SendMessage` to continue an agent that already has the context — a fixer round on the task it
   just implemented. A fresh `Agent` call re-derives everything from cold.
@@ -395,7 +395,7 @@ where an agent marks a stage complete on the strength of the checks it happened 
 Stage 5's terminal work is partly reachable: drive the TUI through a pty and snapshot the ratatui
 buffer, which covers layout and state transitions. What it cannot cover is whether it feels good.
 
-Stages 4 and 5 are also where the plan stops being trustworthy. `stage4.md` says to let a week of
+Stages 3 and 5 are also where the plan stops being trustworthy. `stage3.md` says to let a week of
 dogfooding reorder everything after it — that instruction is addressed to Fable as much as to you.
 When real use contradicts stages 5–7, the plan docs get rewritten before the next stage is planned;
 they are not a schedule to be defended.

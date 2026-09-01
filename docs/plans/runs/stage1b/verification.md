@@ -35,7 +35,7 @@ A suite bent to fit its implementation tends to survive mutation, which is exact
 check worth more here than it would be under the orchestrated loop.
 
 Read the per-criterion table as "the criterion is encoded and green", and the mutation table as
-"the encoding is not vacuous". Neither is a substitute for an independent verifier on stage 2.
+"the encoding is not vacuous". Neither is a substitute for an independent verifier on stage 4.
 
 ## Per-criterion verdict
 
@@ -45,7 +45,7 @@ Read the per-criterion table as "the criterion is encoded and green", and the mu
 | 2 | `render → parse → render` is a fixed point | **PASS** | `render_parse_render_is_a_fixed_point`, over the whole corpus |
 | 3 | A note carrying `summary:` survives a title edit with its bytes unchanged, block scalar and nested mapping included | **PASS** | `a_note_carrying_summary_survives_a_title_edit_with_its_bytes_unchanged`, over two fixtures written for it |
 | 4 | A deleted `relation:root` is recomputed on open; a deleted `relation:reply_to` becomes top-level and is not written back as empty | **PASS** | `a_deleted_relation_root_is_recomputed_on_open`, `a_deleted_relation_reply_to_becomes_top_level_and_is_not_written_back_as_empty` |
-| 5 | `sync()` and `rebuild()` over a clean vault write nothing | **PARTIAL — deferred to stage 2** | `a_read_pass_over_a_clean_vault_writes_nothing` |
+| 5 | `sync()` and `rebuild()` over a clean vault write nothing | **PARTIAL — deferred to stage 4** | `a_read_pass_over_a_clean_vault_writes_nothing` |
 | 6 | Two notes created in the same millisecond get distinct filenames and distinct identities | **PASS** | `two_notes_created_in_the_same_millisecond_get_distinct_filenames_and_identities` |
 | 7 | `created_at` recovered from a note's filename UUID equals the creation time it was minted with | **PASS** | `created_at_recovered_from_the_filename_uuid_equals_the_mint_time` |
 | 8 | A workspace whose `schema.frontmatter` omits a relation key is rejected at `open` | **RATIFIED THE OTHER WAY** | `a_thin_schema_warns_and_opens_rather_than_being_rejected` |
@@ -56,19 +56,19 @@ Read the per-criterion table as "the criterion is encoded and green", and the mu
 ### Criterion 5 — what "partial" means
 
 `sync()` and `rebuild()` do not exist. `stage1b.md`'s own "Not in this stage" section puts SQLite in
-stage 2, so the criterion is forward-looking and cannot be closed here. What *is* closed is the
+stage 4, so the criterion is forward-looking and cannot be closed here. What *is* closed is the
 property those two functions will inherit and the design decision that lets them keep it:
 
 - A read pass over the whole corpus — `Workspace::open`, `live_note_paths`, `trashed_note_paths`,
   `Note::load` on every file — leaves every byte and the whole directory tree identical.
 - Repair is on `Workspace::open_note`, which is one file and one user action. It is deliberately
-  **not** in any vault-wide path, which is what makes the criterion reachable at all in stage 2.
+  **not** in any vault-wide path, which is what makes the criterion reachable at all in stage 4.
 - Opening a note twice writes at most once
   (`probe_b_opening_every_note_twice_writes_at_most_once`), so repair is itself a fixed point. A
   repair that were not would rewrite the vault on every open — a diff a day forever in a
   git-tracked vault.
 
-The criterion as written moves to stage 2's suite. Flagged rather than quietly dropped.
+The criterion as written moves to stage 4's suite. Flagged rather than quietly dropped.
 
 ### Criterion 8 — ratified the other way
 
@@ -160,7 +160,7 @@ ordering bug is a coupling worth knowing about, not a problem.
 - **Concurrent external edit.** `stage1b.md` leaves the mechanism unspecified and `open_note` is the
   first writer with the problem: it reads, renders, and writes without re-stat'ing. An external
   editor writing between the read and the write is clobbered. Recorded in `overview.md`'s open
-  questions and carried to stage 2, which is the first stage with the machinery (`files`: size,
+  questions and carried to stage 4, which is the first stage with the machinery (`files`: size,
   mtime, hash) to fix it.
 - **Ordering churn against another editor.** jot writes in schema order; Obsidian writes in its own.
   Alternating edits produce diff noise in a git-tracked vault. Unmeasured, and only measurable with

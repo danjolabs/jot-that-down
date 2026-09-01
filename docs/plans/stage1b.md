@@ -11,11 +11,11 @@ frontmatter looks like. One write path, ordered by the schema.
 
 **Why between 1 and 2.** Stage 1 proved the file plumbing — atomic writes, enumeration, workspace
 lifecycle — and all of that stands. What it also proved is that the *format* carries redundancy that
-becomes expensive once SQLite exists. Changing it before stage 2 builds an index over it costs a
+becomes expensive once SQLite exists. Changing it before stage 4 builds an index over it costs a
 rewrite of `frontmatter.rs`; changing it after costs a migration over a year of notes.
 
 **Not in this stage.** SQLite itself. This stage changes what is on disk and how it is written; stage
-2 builds the index over the result.
+4 builds the index over the result.
 
 ## What changed, and what did not
 
@@ -144,7 +144,7 @@ asks whether it trims to exactly `---`. That reproduces stage 1 on every case it
 is a decision the code makes rather than a guess about someone else's parser. The test this section
 asked for exists and asserts both halves — identical AST shape, two different errors.
 
-**Stage 3 is the reason to prefer this crate over `pulldown-cmark`.** `stage3.md` already requires a
+**Stage 2 is the reason to prefer this crate over `pulldown-cmark`.** `stage2.md` already requires a
 markdown parser for `[[uuid]]` extraction, so the dependency was arriving regardless. In markdown-rs's
 mdast a paragraph's `[[uuid|label]]` arrives as a single `Text` node with byte offsets, while fenced
 and inline code are distinct node kinds to skip; `pulldown-cmark` splits the same link across eight
@@ -239,7 +239,7 @@ means "something was here" and nothing can act on it.
 ### The rebuild invariant exemption
 
 `overview.md` makes "a full rebuild produces the same logical content as an incremental sync" a CI
-check from stage 2 onward. With `edited_at` populated from mtime, **that check will legitimately fail
+check from stage 4 onward. With `edited_at` populated from mtime, **that check will legitimately fail
 on that field.** The exemption must be written into the invariant now, not discovered by whoever
 hits it — the tempting "fix" is to make rebuild write mtime everywhere, which spreads the lossiness
 instead of containing it.
@@ -253,7 +253,7 @@ instead of containing it.
 - A note whose `relation:root` was deleted externally has it recomputed on open; one whose
   `relation:reply_to` was deleted becomes top-level and is not written back as empty.
 - `sync()` and `rebuild()` over a clean vault write nothing — `git status` stays empty.
-  *(**Deferred to stage 2** — neither function exists yet, by this stage's own "Not in this stage".
+  *(**Deferred to stage 4** — neither function exists yet, by this stage's own "Not in this stage".
   What is closed here is the property they inherit: a full read pass over the corpus changes no
   byte, and repair lives on `open_note`, one file and one user action, deliberately not in any
   vault-wide path.)*
@@ -285,7 +285,7 @@ instead of containing it.
   schema declaring all four interpreted keys.
 - **Concurrent edit.** *(Promoted to `overview.md`'s open questions — it is no longer specific to
   this stage.)* `Workspace::open_note` is the first writer with the problem: it reads, renders and
-  writes without re-stat'ing, so an external editor writing in between is clobbered. Stage 2's
+  writes without re-stat'ing, so an external editor writing in between is clobbered. Stage 4's
   `files` table (size, mtime, hash) is the first place with the machinery to fix it.
 - **Ordering churn.** jot writes in schema order; another editor writes in its own. Alternating edits
   produce diff noise in a git-tracked vault. Probably acceptable; worth measuring before deciding.

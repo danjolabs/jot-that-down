@@ -62,7 +62,7 @@ Same five as the TUI, with what a GUI can add:
 
 **Note card**, shared by every list: title or `Untitled`, relative time, edited marker, body clamped
 to ~10 lines with `show more`, embedded quote (one level, never recursive), and a footer of
-`reply · quote · link · copy id · open · trash` with counts. The three reference states from stage 3
+`reply · quote · link · copy id · open · trash` with counts. The three reference states from stage 2
 render exactly as specified there.
 
 ## Work
@@ -73,7 +73,7 @@ render exactly as specified there.
 - [ ] Editor for the body: plain textarea with markdown shortcuts is enough for v1. A rich editor is a
       separate project and does not belong in this stage.
 - [ ] Global hotkey registration, with a fallback when the OS refuses the binding.
-- [ ] `jot://<workspace-id>/note/<uuid>` protocol registration; `jot open <id>` from stage 4 hands off
+- [ ] `jot://<workspace-id>/note/<uuid>` protocol registration; `jot open <id>` from stage 3 hands off
       to it. This is the integration payoff — every other tool you use can now link into a note.
 - [ ] Workspace switcher backed by the registry; adding a workspace is a folder picker.
 - [ ] Window state, theme, and split sizes persisted.
@@ -84,14 +84,14 @@ render exactly as specified there.
 - Global hotkey → typed thought → saved, in under three seconds and without touching the mouse.
 - A note edited in the TUI updates the desktop view live, and vice versa.
 - Clicking a `jot://` link from outside opens the app focused on that note.
-- Thread rendering matches the TUI's for the worked example from stage 3.
+- Thread rendering matches the TUI's for the worked example from stage 2.
 - Quitting and reopening restores the workspace, view, and split sizes.
 - Deleting `.jot/index.db` while the app is closed loses nothing.
 
 ## Risks
 
 - **Logic leaking into the frontend.** The most likely failure of this stage, and the one that quietly
-  undoes stages 1–3. Review every new frontend function against the question "should the TUI have
+  undoes stages 1–4. Review every new frontend function against the question "should the TUI have
   this too?" — if yes, it belongs in core.
 - **Capture latency.** A cold Tauri window plus a cold workspace is seconds, which is fatal for the
   one feature that has to be instant. Solve it with a warm background process, and measure it.

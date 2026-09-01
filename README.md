@@ -13,24 +13,24 @@ git.
 
 ## Status
 
-**Usable from the command line.** Stages 1–4 of [`docs/plans/overview.md`](docs/plans/overview.md)
+**Usable from the command line.** Stages 1–3 of [`docs/plans/overview.md`](docs/plans/overview.md)
 are built.
 
 | | |
 | --- | --- |
 | ✅ Vault, frontmatter round-trip, atomic writes | stages 1 and 1b |
-| ✅ Note lifecycle, thread algebra, links | stage 3 |
-| ✅ `jot` CLI | stage 4 |
-| ⏳ SQLite index | stage 2, **deliberately deferred** — see below |
+| ✅ Note lifecycle, thread algebra, links | stage 2 |
+| ✅ `jot` CLI | stage 3 |
+| ⏳ SQLite index | stage 4, **deliberately deferred** — see below |
 | ⏳ TUI, desktop app, user-declared schema fields | stages 5–7 |
 
-Stages 3 and 4 were built **before** stage 2. Nothing in them needs a database: threads, reference
+Stages 2 and 3 were built **before** stage 4. Nothing in them needs a database: threads, reference
 resolution, links, and prefix resolution are all functions of the set of notes in the vault, and the
 index is a speed layer over that set. So `jot-core` reads the vault into memory instead, behind the
 same public API SQLite will sit behind later.
 
 The practical consequence: **every command rescans the whole vault.** That is instant at hundreds of
-notes and is what stage 2 exists to fix. It is a performance gap, not a correctness one.
+notes and is what stage 4 exists to fix. It is a performance gap, not a correctness one.
 
 ## Install
 
