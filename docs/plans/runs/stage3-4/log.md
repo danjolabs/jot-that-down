@@ -61,6 +61,11 @@ Recommendation for stage 2, restated more strongly than last time: dispatch the 
 and have it write stage 3 and 4 acceptance suites retroactively before building the index on top of
 them.
 
+> **Outcome, recorded after the fact:** this recommendation was considered and **declined** — see
+> `runs/post-stage4/log.md` §8 — to keep the iteration cycle short while dogfooding was still moving
+> the design. The deferral is deliberate and its cost is written up there. It remains due before
+> stage 2 for the reason given above.
+
 ## Findings
 
 ### 1. A fixed-width short id does not work for UUIDv7 — design changed
