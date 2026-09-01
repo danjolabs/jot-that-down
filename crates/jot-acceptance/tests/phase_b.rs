@@ -1293,10 +1293,23 @@ fn probe_b_open_reports_the_kind_the_manifest_records() {
 
 /// Kills **M32** (`init` mints a constant workspace id).
 ///
-/// The worst of the survivors. Criterion 1 asserts the id is *shaped* like a UUIDv7 but never that
+/// The worst of the survivors. Criterion 1 asserts the id is *shaped* like a UUID but never that
 /// two vaults get different ones. U5 keys the entire registry by this id and makes `path` a mutable
 /// field on the entry, so a constant id collapses every vault a user owns into a single
 /// registration — silently, and destructively on the first `upsert`.
+///
+/// **Amended post stage 4** (see `runs/post-stage4/log.md`): a workspace id is now **v4**, where a
+/// note id remains v7. Two assertions changed with it, and the mutation this probe exists to kill
+/// is untouched by either.
+///
+/// * The shape check is `is_uuid_v4`. What it is really guarding is unchanged — that `init` mints
+///   a real, well-formed, distinct id every time.
+/// * **The sort-order assertion is gone**, because the property is gone: v4 ids do not sort by
+///   creation time. It claimed to make "the vault I made most recently" answerable without a
+///   timestamp. Nothing ever asked that — `ws ls` prints in registry order and the registry carries
+///   `last_opened` for recency — so the property was unused, and it is not being quietly traded
+///   away: if vault creation time is ever wanted it belongs in the manifest as an explicit field,
+///   which survives the id and needs no decoding.
 #[test]
 fn probe_b_each_init_mints_a_distinct_workspace_id_that_survives_reopening() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1308,8 +1321,8 @@ fn probe_b_each_init_mints_a_distinct_workspace_id_that_survives_reopening() {
         let id = ws.id().to_string();
 
         assert!(
-            is_uuid_v7(&id),
-            "a workspace id must be a lowercase hyphenated UUIDv7, got {id:?}"
+            is_uuid_v4(&id),
+            "a workspace id must be a lowercase hyphenated UUIDv4, got {id:?}"
         );
         assert_eq!(
             Workspace::open(&root).unwrap().id(),
@@ -1331,14 +1344,15 @@ fn probe_b_each_init_mints_a_distinct_workspace_id_that_survives_reopening() {
          overwrites the first: {ids:?}"
     );
 
-    // The property that makes it a *v7* id rather than merely a unique one: ids minted later sort
-    // later, which is what makes "the vault I made most recently" answerable without a timestamp.
-    let mut sorted = ids.clone();
-    sorted.sort();
-    assert_eq!(
-        sorted, ids,
-        "workspace ids are UUIDv7 and must therefore sort by creation time: {ids:?}"
-    );
+    // No ordering assertion here, deliberately — see this test's doc comment. A v4 id carries no
+    // timestamp, so "minted later sorts later" is not a property a workspace id has, and asserting
+    // it would be asserting the thing the switch to v4 removed on purpose.
+    //
+    // What replaces it as the reason for v4 is structural rather than statistical, and the version
+    // check above is exactly it: a v4's bits are random from the first, so an eight-character
+    // prefix separates workspaces created in the same millisecond. That is what makes
+    // `jot ws use <prefix>` usable. Asserting the prefixes actually differ would be a ~1-in-10^9
+    // flake in a suite that blocks CI, so the deterministic version check is what is checked.
 }
 
 /// Kills **M38** (`Registry::save_to` swallows a write failure and reports success).

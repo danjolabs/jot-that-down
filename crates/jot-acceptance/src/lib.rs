@@ -280,9 +280,14 @@ fn collect_tree(root: &Path, dir: &Path, out: &mut Vec<String>) {
 // does, `NoteId`'s inner type and ours would be unrelated types and the suite would start lying
 // about what it compared.
 
-/// True for a lowercase hyphenated UUID whose version nibble is 7 and whose variant bits are RFC
-/// 4122.
-pub fn is_uuid_v7(s: &str) -> bool {
+/// True for a lowercase hyphenated UUID of `version` whose variant bits are RFC 4122.
+///
+/// Two versions are in use and the difference is deliberate — see
+/// `jot_core::workspace::Manifest::id`. A **note** id is v7, because `created_at` is decoded from
+/// it and id order is creation order. A **workspace** id is v4, because nothing reads a time out of
+/// it or sorts on it, and a random-from-bit-one id is what keeps a short id short for
+/// `jot ws use <prefix>`.
+pub fn is_uuid_of_version(s: &str, version: u8) -> bool {
     let bytes = s.as_bytes();
     if bytes.len() != 36 {
         return false;
@@ -297,7 +302,17 @@ pub fn is_uuid_v7(s: &str) -> bool {
             return false;
         }
     }
-    bytes[14] == b'7' && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+    bytes[14] == b'0' + version && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+}
+
+/// True for a lowercase hyphenated UUIDv4 — the shape of a **workspace** id.
+pub fn is_uuid_v4(s: &str) -> bool {
+    is_uuid_of_version(s, 4)
+}
+
+/// True for a lowercase hyphenated UUIDv7 — the shape of a **note** id.
+pub fn is_uuid_v7(s: &str) -> bool {
+    is_uuid_of_version(s, 7)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -505,6 +520,22 @@ mod harness_self_tests {
             "an unquoted value must not be mistaken for a quoted one"
         );
         assert_eq!(top_level_value(block, "missing"), None);
+    }
+
+    #[test]
+    fn is_uuid_v4_accepts_a_workspace_id_and_rejects_a_note_id() {
+        // The two shapes are not interchangeable, and the checker must not blur them.
+        assert!(is_uuid_v4("b4b4856a-e5db-4f9b-bd87-658b0be50741"));
+        assert!(
+            !is_uuid_v4("01a03d4c-3680-7c70-aade-6c016dd177d2"),
+            "that is a v7"
+        );
+        assert!(
+            !is_uuid_v7("b4b4856a-e5db-4f9b-bd87-658b0be50741"),
+            "that is a v4"
+        );
+        // The variant nibble is checked for both.
+        assert!(!is_uuid_v4("b4b4856a-e5db-4f9b-0d87-658b0be50741"));
     }
 
     #[test]

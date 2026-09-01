@@ -163,6 +163,24 @@ pub struct Manifest {
     /// The version of the manifest format this file was written against.
     pub schema_version: u32,
     /// Minted at `init`, immutable thereafter. What makes the directory self-identifying.
+    ///
+    /// **UUIDv4, where a note id is v7**, and the asymmetry is the point. A note id is v7 because
+    /// two things read the timestamp out of it: `created_at` is decoded from the identity, and id
+    /// order *is* creation order, which is what sibling ordering, the timeline, and keyset
+    /// pagination all rest on. A workspace id is asked for none of that — nothing in the crate
+    /// decodes its time or sorts on it.
+    ///
+    /// Using v7 anyway would cost two things and buy nothing:
+    ///
+    /// * **Short ids stop working.** A v7's leading 48 bits are a millisecond timestamp, so two
+    ///   workspaces created in the same minute share their first eight hex characters and
+    ///   `jot ws ls` has to widen the abbreviation to tell them apart. A v4 is random from its
+    ///   first bit, so eight characters separate every workspace anyone will have.
+    /// * **It leaks a date.** This id is written into `workspace.toml`, which people commit, and
+    ///   a v7 encodes when the vault was created.
+    ///
+    /// Reading is unaffected either way — `open` parses any UUID version — so vaults created
+    /// before this are correct and stay correct.
     pub id: Uuid,
     /// `jot` or `plain`.
     pub kind: WorkspaceKind,
@@ -430,7 +448,8 @@ impl Workspace {
 
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
-            id: Uuid::now_v7(),
+            // v4, deliberately, where a note id is v7 — see `Manifest::id`.
+            id: Uuid::new_v4(),
             kind,
             name: default_name(&root),
             schema: FrontmatterSchema::jot_default(),
@@ -1404,12 +1423,15 @@ mod tests {
     }
 
     #[test]
-    fn init_mints_a_uuid_v7_workspace_id() {
+    fn init_mints_a_uuid_v4_workspace_id() {
         let tmp = tempfile::tempdir().unwrap();
         let a = Workspace::init(&dir(tmp.path(), "a"), WorkspaceKind::Jot).unwrap();
         let b = Workspace::init(&dir(tmp.path(), "b"), WorkspaceKind::Jot).unwrap();
 
-        assert_eq!(a.id().get_version_num(), 7, "workspace ids are UUIDv7");
+        // v4 rather than a note's v7: nothing decodes a workspace's creation time or sorts on it,
+        // and a random-from-bit-one id is what keeps `jot ws ls`'s short ids short. See
+        // `Manifest::id`.
+        assert_eq!(a.id().get_version_num(), 4, "workspace ids are UUIDv4");
         assert_ne!(a.id(), b.id(), "each workspace mints its own id");
         assert_eq!(
             a.id().to_string(),
@@ -1738,6 +1760,29 @@ mod tests {
     /// A stage-1 manifest still carries `[notes] filename`. It is not an error — `serde`
     /// ignores unknown fields, which is the same forward-compat courtesy the note format
     /// extends to unknown frontmatter keys — and the vault opens on the default schema.
+    #[test]
+    fn a_workspace_id_of_any_uuid_version_still_opens() {
+        // Vaults created before the switch carry a v7 id, and an id is only ever compared and
+        // displayed. Reading must not care which version it is.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dir(tmp.path(), "vault");
+        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+
+        let path = root.join(".jot").join("workspace.toml");
+        let v7 = Uuid::now_v7();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("id = "))
+            .unwrap()
+            .to_owned();
+        std::fs::write(&path, text.replace(&line, &format!("id = \"{v7}\""))).unwrap();
+
+        let reopened = Workspace::open(&root).unwrap();
+        assert_eq!(reopened.id(), v7);
+        assert_eq!(reopened.id().get_version_num(), 7);
+    }
+
     #[test]
     fn a_stage_one_manifest_opens_on_the_default_schema() {
         let tmp = tempfile::tempdir().unwrap();

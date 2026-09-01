@@ -42,7 +42,7 @@ premise buys you free history if you want it.
 schema_version = 1
 
 [workspace]
-id   = "01a03d20-a54c-7977-a1f4-1a88b38855dd"   # UUIDv7, minted at init, immutable
+id   = "b4b4856a-e5db-4f9b-bd87-658b0be50741"   # UUIDv4, minted at init, immutable
 kind = "jot"                                     # "jot" | "plain"
 name = "Thoughts"                                # display only
 
@@ -52,6 +52,14 @@ filename = "uuid"      # "uuid" | "uuid_slug" — deferred decision, see overvie
 
 `id` is what makes the directory self-identifying: registering a workspace is pointing at a folder,
 and moving the folder loses nothing.
+
+**v4, not v7** — changed post stage 4, see `runs/post-stage4/log.md`. This originally said UUIDv7,
+by inheritance from note ids rather than by argument: the self-identifying property this paragraph
+describes holds for any UUID version. A **note** id must be v7, because `created_at` is decoded from
+it and id order is creation order. A workspace id is asked for neither, and v7 actively cost two
+things — its timestamp prefix made short ids long, which broke `jot ws use <prefix>` for vaults
+created in the same minute, and it wrote a creation date into a file people commit. Reading is
+unaffected: `open` parses any version, so vaults minted before the change keep their v7 ids.
 
 ### Note format
 

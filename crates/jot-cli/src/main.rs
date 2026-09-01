@@ -41,6 +41,7 @@ use serde_json::json;
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use uuid::Uuid;
 
 /// Exit code for "the thing you named does not exist".
 const EXIT_NOT_FOUND: u8 = 3;
@@ -268,10 +269,11 @@ struct SearchArgs {
 enum WsCommand {
     /// List registered workspaces.
     Ls,
-    /// Make the named workspace current.
+    /// Make a workspace current, by name or by id.
     Use {
-        /// The workspace's name.
-        name: String,
+        /// The workspace's name, or its id (or a unique prefix of it).
+        #[arg(value_name = "NAME_OR_ID")]
+        target: String,
     },
     /// Register an existing workspace.
     Add {
@@ -877,18 +879,12 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
             }
         }
 
-        WsCommand::Use { name } => {
-            let entry = registry
-                .entries()
-                .find(|entry| entry.name() == name)
-                .ok_or_else(|| Failure {
-                    error: anyhow::anyhow!("no registered workspace named `{name}`"),
-                    code: EXIT_NOT_FOUND,
-                })?;
-            let id = entry.id();
+        WsCommand::Use { target } => {
+            let id = resolve_workspace(&registry, target)?;
             registry.set_current(id);
             context::save_registry(&registry)?;
-            eprintln!("jot: now using `{name}`");
+            let name = registry.get(id).map_or(target.as_str(), Entry::name);
+            eprintln!("jot: now using `{name}` ({id})");
         }
 
         WsCommand::Add { path } => {
@@ -916,6 +912,69 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
     }
     let _ = style;
     Ok(())
+}
+
+/// Find the workspace `target` names: an exact name, or an id prefix.
+///
+/// Name first, because that is what people type and what `ws new` prints. An id prefix is the
+/// fallback, and it is not a nicety — **two workspaces can share a name**, since the registry keys
+/// on id and a vault deleted and remade is a second entry. Without this, the second one is
+/// unreachable: matching by name alone would silently pick whichever came first, which is the
+/// "never guess between your things" rule broken in the one place it decides where notes land.
+///
+/// Ambiguity is reported with ids and paths and exits 4, exactly as an ambiguous note prefix does.
+fn resolve_workspace(
+    registry: &jot_core::registry::Registry,
+    target: &str,
+) -> Result<Uuid, Failure> {
+    let by_name: Vec<&Entry> = registry
+        .entries()
+        .filter(|entry| entry.name() == target)
+        .collect();
+    if by_name.len() == 1 {
+        return Ok(by_name[0].id());
+    }
+    if by_name.len() > 1 {
+        return Err(ambiguous_workspace(target, &by_name, "share that name"));
+    }
+
+    let needle = target.trim().to_ascii_lowercase();
+    let by_id: Vec<&Entry> = registry
+        .entries()
+        .filter(|entry| !needle.is_empty() && entry.id().to_string().starts_with(&needle))
+        .collect();
+    match by_id.len() {
+        1 => Ok(by_id[0].id()),
+        0 => Err(Failure {
+            error: anyhow::anyhow!(
+                "no registered workspace named `{target}`, and no id starts with it\n\
+                 hint: `jot ws ls` lists them"
+            ),
+            code: EXIT_NOT_FOUND,
+        }),
+        _ => Err(ambiguous_workspace(target, &by_id, "start with that id")),
+    }
+}
+
+/// The candidate listing both ambiguity paths print.
+fn ambiguous_workspace(target: &str, candidates: &[&Entry], why: &str) -> Failure {
+    let mut listing = format!(
+        "`{target}` is ambiguous: {} workspaces {why}:\n",
+        candidates.len()
+    );
+    for entry in candidates {
+        listing.push_str(&format!(
+            "  {}  {}  {}\n",
+            entry.id(),
+            entry.name(),
+            entry.path().display()
+        ));
+    }
+    listing.push_str("hint: name one by its id, or a unique prefix of it");
+    Failure {
+        error: anyhow::anyhow!(listing),
+        code: EXIT_AMBIGUOUS,
+    }
 }
 
 /// Add a workspace to the registry and make it current.

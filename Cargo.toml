@@ -26,7 +26,10 @@ markdown = "1.0.0"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 toml = "1.1"
-uuid = { version = "1.26", features = ["serde", "v7"] }
+# `v4` for workspace ids, `v7` for note ids. The asymmetry is deliberate and argued in
+# `workspace::Manifest::id`: only a note has its creation time and its ordering read back out of
+# its identity, and v7's timestamp prefix is what makes a short id long.
+uuid = { version = "1.26", features = ["serde", "v4", "v7"] }
 yaml_serde = "0.10.7"
 
 # Surface-only, added for stage 4's CLI. None of these may reach `jot-core`: `anyhow` is the

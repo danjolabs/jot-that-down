@@ -104,6 +104,18 @@ impl Vault {
 // =============================================================================================
 
 #[test]
+fn a_workspace_id_is_a_uuid_v4_so_short_ids_stay_short() {
+    // Unlike a note id: nothing decodes a workspace's creation time or sorts on it, and a v7's
+    // timestamp prefix would make two workspaces created in one minute share eight characters.
+    let vault = Vault::new();
+    let id = vault.json(&["ws", "ls"])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(&id[14..15], "4", "version nibble of {id}");
+}
+
+#[test]
 fn ws_new_creates_the_documented_tree_and_nothing_else() {
     let vault = Vault::new();
     for expected in [".jot", ".jot/workspace.toml", ".jot/.trash", ".jot/tmp"] {
@@ -188,6 +200,73 @@ fn the_test_suite_never_touches_the_real_registry() {
 
     // And the listing shows this vault alone, not whatever else the machine has registered.
     assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn ws_use_accepts_a_name_or_an_id_prefix() {
+    let vault = Vault::new();
+    let other = vault.dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    vault.run(&["ws", "new", other.to_str().unwrap()]);
+
+    let entries = vault.json(&["ws", "ls"]);
+    let first = entries.as_array().unwrap()[0].clone();
+    let id = first["id"].as_str().unwrap();
+    let name = first["name"].as_str().unwrap();
+
+    // By name.
+    vault.run(&["ws", "use", name]);
+    assert_eq!(current(&vault)["id"], id);
+
+    // By full id, after switching away.
+    vault.run(&["ws", "use", "other"]);
+    assert_ne!(current(&vault)["id"], id);
+    vault.run(&["ws", "use", id]);
+    assert_eq!(current(&vault)["id"], id);
+
+    // By id prefix.
+    vault.run(&["ws", "use", "other"]);
+    vault.run(&["ws", "use", &id[..8]]);
+    assert_eq!(current(&vault)["id"], id);
+}
+
+#[test]
+fn ws_use_can_reach_a_workspace_whose_name_is_not_unique() {
+    // The gap this closes: matching on name alone made the second `notes` unreachable.
+    let vault = Vault::new();
+    let mut ids = Vec::new();
+    for parent in ["a", "b"] {
+        let path = vault.dir.path().join(parent).join("notes");
+        std::fs::create_dir_all(&path).unwrap();
+        vault.run(&["ws", "new", path.to_str().unwrap()]);
+        ids.push(current(&vault)["id"].as_str().unwrap().to_owned());
+    }
+
+    // The shared name is refused rather than guessed at.
+    let assertion = vault
+        .cmd()
+        .args([
+            "--workspace",
+            vault.path().to_str().unwrap(),
+            "ws",
+            "use",
+            "notes",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(assertion.get_output().status.code(), Some(4));
+
+    // Either one is reachable by id.
+    for id in &ids {
+        vault.run(&["ws", "use", id]);
+        assert_eq!(current(&vault)["id"].as_str().unwrap(), id);
+    }
+}
+
+#[test]
+fn ws_use_on_something_unknown_exits_not_found() {
+    let vault = Vault::new();
+    assert_eq!(vault.code(&["ws", "use", "no-such-workspace"]), 3);
 }
 
 #[test]
@@ -776,6 +855,18 @@ fn bare_jot_prints_help_rather_than_failing() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Usage:"));
+}
+
+/// The registry's current workspace, as JSON.
+fn current(vault: &Vault) -> Value {
+    vault
+        .json(&["ws", "ls"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["current"] == true)
+        .expect("a current workspace")
+        .clone()
 }
 
 /// The id token of a `jot ws ls` row, skipping the `*` current-workspace marker.

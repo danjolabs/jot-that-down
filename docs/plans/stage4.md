@@ -25,7 +25,7 @@ jot trash              # list what is in the trash
 jot search <query> [--since] [--until]
 jot links <id>         # backlinks and quoted-by
 jot open <id>          # hands off to the desktop app (stage 6)
-jot ws ls | use <name> | add <path> | new <path> [--kind jot|plain]
+jot ws ls | use <name|id> | add <path> | new <path> [--kind jot|plain]
 jot index status | rebuild
 ```
 
@@ -72,6 +72,9 @@ and exits non-zero; it never guesses. Every command that prints an id prints the
 > - **The width is a property of the set, not of the id.** It can change when a note is written.
 >   So it is a display convenience only and never appears in `--json`, which always carries full
 >   UUIDs. Stages 5 and 6 inherit this rule.
+> - **Workspace ids are v4, not v7** — see below. That is the same finding applied at its source:
+>   where an id has no need to carry a timestamp, not putting one in it is better than abbreviating
+>   around it.
 > - **An id the vault does not hold cannot be abbreviated at all** — a dangling `reply_to`, a link to
 >   a purged note. There is nothing for it to be unique against, so it renders as a full UUID.
 >   Pinned by `a_printed_short_id_can_always_be_handed_straight_back`.
@@ -197,3 +200,36 @@ injection.
   order visible and make `jot ws` output unambiguous.
 - **Feature creep from dogfooding.** Everything you want during that first week should land in a list,
   not in the code. Stages 5 and 6 are where they get built.
+
+## Two findings from dogfooding the workspace commands
+
+### `jot ws use` takes an id, because a name is not unique
+
+The registry keys on workspace **id** — correct, since the id lives in `workspace.toml` and survives
+the folder being moved. But that means two entries can share a name: two `notes` directories under
+different parents, or one vault deleted and remade. `ws use <name>` matched on name alone and took
+the first hit, which made the second workspace **unreachable** and, worse, silently picked one of
+them. That is the "never guess between your things" rule broken in the one place that decides where
+notes get captured.
+
+`ws use` now takes a name **or** an id prefix. A shared name is reported with ids and paths and
+exits 4, like an ambiguous note prefix. Nothing guesses.
+
+### Workspace ids are UUIDv4; note ids stay UUIDv7
+
+A note id is v7 because two things read the timestamp back out of it: `created_at` is decoded from
+the identity, and id order *is* creation order, which sibling ordering, the timeline, and keyset
+pagination all rest on.
+
+A workspace id is asked for none of that. Nothing in the crate decodes its time or sorts on it — the
+only thing that referenced its version was a test asserting the version. Minting it v7 anyway cost
+two things and bought nothing:
+
+- **Short ids stopped working.** Two workspaces created in one minute shared their first eight hex
+  characters, so `jot ws ls` had to widen the abbreviation to tell them apart — the same problem as
+  notes, in a place with no reason to have it. With v4 the id is random from its first bit and eight
+  characters separate every workspace anyone will have.
+- **It leaked a date.** The id is written into `workspace.toml`, which people commit to git.
+
+Reading is unaffected: `open` parses any UUID version, so vaults created before this keep their v7
+ids and stay correct. Pinned by `a_workspace_id_of_any_uuid_version_still_opens`.
