@@ -9,7 +9,7 @@ would treat a change to a database schema.
 - **One JSON document on stdout**, pretty-printed, newline-terminated. Nothing else is ever written
   to stdout in `--json` mode.
 - **Warnings and errors go to stderr.** A vault with an unparseable file still emits valid JSON on
-  stdout and complains on stderr, so `jot ls --json | jq` keeps working while a problem is being
+  stdout and complains on stderr, so `jot list --json | jq` keeps working while a problem is being
   reported.
 - **Ids are always full UUIDs**, regardless of `--long`. A short id is a *reading* convenience whose
   width depends on the other notes in the vault (see below); putting one in a machine-readable
@@ -22,7 +22,8 @@ would treat a change to a database schema.
 
 ## Short ids are *not* in JSON, and why
 
-`jot` prints an abbreviated id in human output — for notes, and for workspaces in `jot ws ls`. It is
+`jot` prints an abbreviated id in human output — for notes, and for workspaces in
+`jot workspace list`. It is
 not a fixed eight characters, and it is not in the JSON.
 
 Git's short ids work because a SHA is random from its first bit. **A UUIDv7's leading 48 bits are a
@@ -75,7 +76,7 @@ An array of `notemeta`, each extended with:
 whose parent is gone would be present in the vault and absent from every view.
 
 ```console
-$ jot ls --json | jq -r '.[] | select(.replies > 0) | "\(.id)  \(.title)"'
+$ jot list --json | jq -r '.[] | select(.replies > 0) | "\(.id)  \(.title)"'
 ```
 
 ## `ref` — a reference in its three states
@@ -146,7 +147,8 @@ normally and resolves to `"deleted"`.
 vault.
 
 `id` is a **UUIDv4**, unlike a note's v7: nothing reads a creation time out of a workspace id or
-sorts on it, and a random-from-bit-one id keeps `jot ws ls`'s short ids short. Vaults created before
+sorts on it, and a random-from-bit-one id keeps `jot workspace list`'s short ids short. Vaults
+created before
 that change carry a v7 id and are read normally.
 
 Command names are full words — `list`, `remove`, `workspace` — with `ls`, `rm` and `ws` as aliases.

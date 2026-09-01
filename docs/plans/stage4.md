@@ -96,7 +96,7 @@ and exits non-zero; it never guesses. Every command that prints an id prints the
 ### Output
 
 - **Human** by default: title or `Untitled`, relative time, short id, and the first line of the body.
-  `jot ws ls` follows the same shape — `<id>  <name>  <path>` — because a workspace listing answers
+  `jot workspace list` follows the same shape — `<id>  <name>  <path>` — because it answers
   the same question a note listing does: *which one of these do I mean?* Found during dogfooding:
   without an id the listing is genuinely ambiguous, since the registry keys on workspace id and a
   vault deleted and remade therefore appears twice under one name.
@@ -196,9 +196,12 @@ injection.
 - `jot new --reply <prefix>` produces a note whose `root` matches its parent's.
 - `jot thread` on the worked example renders the tree from stage 3 correctly.
 - An ambiguous prefix lists candidates and exits `4`.
-- `jot rm` then `jot ls` hides the note; `jot trash` shows it; `jot restore` brings it back with
-  `trashed_at` gone from the frontmatter.
-- `jot ls --json | jq` round-trips; the schema is documented in [`docs/cli-json.md`](../cli-json.md).
+- `jot remove` then `jot list` hides the note; `jot trash` shows it; `jot restore` brings it back.
+  *(Amended: this originally ended "with `trashed_at` gone from the frontmatter". Stage 1b deleted
+  that key — the directory the file sits in **is** the state — so the criterion named a field that
+  no longer exists. What replaces it is stronger and is tested: a trash-and-restore round trip
+  leaves the file byte-identical, because nothing about trashing is written into it at all.)*
+- `jot list --json | jq` round-trips; the schema is documented in [`docs/cli-json.md`](../cli-json.md).
 - Every command works from a subdirectory of the workspace.
 - One full week of real capture with no data loss and no manual index repair. **Open** — this is the
   dogfooding criterion and it can only be closed by time.
