@@ -37,9 +37,12 @@ impl Vault {
         let mut cmd = Command::cargo_bin("jot").unwrap();
         cmd.env("NO_COLOR", "1")
             .env_remove("JOT_WORKSPACE")
-            // A registry write must never touch the developer's real one.
-            .env("XDG_CONFIG_HOME", self.dir.path().join(".config"))
-            .env("HOME", self.dir.path())
+            // A registry write must never touch the developer's real one, and `JOT_REGISTRY` is
+            // the only thing that guarantees it. `XDG_CONFIG_HOME`/`HOME` were tried first and
+            // isolate on Linux only: `directories` reads `FOLDERID_RoamingAppData` through a
+            // syscall on Windows, so every test in this file was writing into the developer's
+            // real `%APPDATA%` registry — and seeing the other tests' workspaces in `ws ls`.
+            .env("JOT_REGISTRY", self.dir.path().join("registry.toml"))
             .current_dir(self.dir.path());
         cmd
     }
@@ -144,17 +147,47 @@ fn ws_ls_leads_with_an_id_the_way_ls_does() {
 
 #[test]
 fn two_workspaces_with_one_name_are_told_apart_by_their_ids() {
-    // The registry keys on workspace id, so a directory deleted and remade is a second entry with
-    // the same name. Without an id in the listing the two rows are indistinguishable.
+    // The registry keys on workspace id, so two vaults can share a name — a `notes` directory
+    // under two parents, or one deleted and remade. Without an id the rows are indistinguishable,
+    // which is the confusion this listing format exists to remove.
     let vault = Vault::new();
-    let other = vault.dir.path().join("second");
-    std::fs::create_dir_all(&other).unwrap();
-    vault.run(&["ws", "new", other.to_str().unwrap()]);
+    let mut paths = Vec::new();
+    for parent in ["a", "b"] {
+        let path = vault.dir.path().join(parent).join("notes");
+        std::fs::create_dir_all(&path).unwrap();
+        vault.run(&["ws", "new", path.to_str().unwrap()]);
+        paths.push(path);
+    }
 
     let listing = vault.run_short(&["ws", "ls"]);
-    let ids: Vec<&str> = listing.lines().map(row_id).collect();
-    assert_eq!(ids.len(), 2, "{listing}");
+    let named: Vec<&str> = listing
+        .lines()
+        .filter(|line| line.contains("  notes  "))
+        .collect();
+    assert_eq!(named.len(), 2, "both vaults are named `notes`:\n{listing}");
+
+    let ids: Vec<&str> = named.iter().map(|line| row_id(line)).collect();
     assert_ne!(ids[0], ids[1], "the two rows must be distinguishable");
+    for (id, path) in ids.iter().zip(&paths) {
+        assert!(listing.contains(path.to_str().unwrap()), "{listing}");
+        assert!(!id.is_empty());
+    }
+}
+
+#[test]
+fn the_test_suite_never_touches_the_real_registry() {
+    // Guards the isolation the two tests above depend on, and that every test registering a
+    // workspace depends on. Without `JOT_REGISTRY` this passes on Linux and silently writes into
+    // the developer's `%APPDATA%` on Windows.
+    let vault = Vault::new();
+    let registry = vault.dir.path().join("registry.toml");
+    assert!(registry.is_file(), "`ws new` wrote the redirected registry");
+
+    let text = std::fs::read_to_string(&registry).unwrap();
+    assert!(text.contains(vault.path().to_str().unwrap()), "{text}");
+
+    // And the listing shows this vault alone, not whatever else the machine has registered.
+    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 1);
 }
 
 #[test]

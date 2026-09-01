@@ -154,6 +154,14 @@ vault.
 `problems` is an array of human-readable strings: per-file parse failures, and two files claiming
 one id. A problem never blocks a command.
 
+## Environment
+
+| Variable | Effect |
+| --- | --- |
+| `JOT_WORKSPACE` | The workspace to act on, between `--workspace` and directory discovery. |
+| `JOT_REGISTRY` | Where the workspace registry file lives, overriding the OS config directory. |
+| `NO_COLOR` | Any value disables colour. |
+
 ## Exit codes
 
 | Code | Meaning |

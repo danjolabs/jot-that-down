@@ -114,6 +114,14 @@ case.
 - [ ] Workspace resolution order: `--workspace` flag → `JOT_WORKSPACE` env → `discover()` from cwd →
       registry's current. Print which one was chosen under `--verbose`; ambiguity about *where a note
       landed* is the worst possible CLI bug here.
+- [ ] `JOT_REGISTRY` moves the registry itself. Added after a Windows-only CI failure: `directories`
+      resolves the config dir through `SHGetKnownFolderPath` there, a syscall rather than an
+      environment variable, so `XDG_CONFIG_HOME` and `HOME` isolate on Linux **only** and this
+      suite was writing into the developer's real `%APPDATA%` registry — and reading other tests'
+      workspaces back out of it. The escape hatch `registry::default_path`'s own docs anticipated;
+      also useful for a portable install or separate work and personal registries. Policy lives in
+      the CLI, since `jot-core` keeps `directories` behind one function and takes explicit paths
+      everywhere else.
 - [ ] `sync()` before every read command; report problems from `SyncReport` on stderr without
       blocking the command.
 - [ ] `$EDITOR` integration: temp file, wait, detect no-change and empty-body.

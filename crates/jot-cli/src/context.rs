@@ -17,6 +17,22 @@ use std::path::{Path, PathBuf};
 /// The environment variable consulted between `--workspace` and discovery.
 pub const ENV_VAR: &str = "JOT_WORKSPACE";
 
+/// The environment variable that moves the workspace registry somewhere else.
+///
+/// The escape hatch `registry::default_path`'s own documentation anticipates. Two uses:
+///
+/// * **Tests.** `default_path` resolves through `directories`, which on Windows reads
+///   `FOLDERID_RoamingAppData` through `SHGetKnownFolderPath` — a syscall, not an environment
+///   variable. `XDG_CONFIG_HOME` and `HOME` therefore isolate nothing there, and a test suite that
+///   registers workspaces would write into the developer's real registry. This is the only way to
+///   redirect it on every platform.
+/// * **People.** A portable install, or keeping work and personal vaults in separate registries.
+///
+/// Policy lives here rather than in `jot-core`: the crate deliberately keeps `directories` behind
+/// one function and takes explicit paths everywhere else, so *which* path a surface uses is the
+/// surface's decision.
+pub const REGISTRY_ENV_VAR: &str = "JOT_REGISTRY";
+
 /// Which rule chose the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -134,13 +150,22 @@ impl Context {
     }
 }
 
-/// Load the registry from its default location.
+/// Where the registry lives for this invocation: [`REGISTRY_ENV_VAR`], else the OS config
+/// directory.
+pub fn registry_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os(REGISTRY_ENV_VAR).filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    registry::default_path().context("cannot locate the workspace registry")
+}
+
+/// Load the registry.
 ///
 /// A registry that cannot be read or parsed recovers to an empty one — that is the crate's
 /// documented behavior and the right one here: a corrupt list of workspaces must not stop you
 /// capturing a note into the vault you are standing in.
 pub fn load_registry() -> Result<Registry> {
-    let path = registry::default_path().context("cannot locate the workspace registry")?;
+    let path = registry_path()?;
     let registry = Registry::load_from(&path)?;
     if let Some(err) = registry.recovered() {
         eprintln!("jot: warning: {err}; starting from an empty registry");
@@ -148,9 +173,15 @@ pub fn load_registry() -> Result<Registry> {
     Ok(registry)
 }
 
-/// Save the registry back to its default location.
+/// Save the registry back where [`registry_path`] says it lives.
 pub fn save_registry(registry: &Registry) -> Result<()> {
-    let path = registry::default_path().context("cannot locate the workspace registry")?;
+    let path = registry_path()?;
+    if let Some(parent) = path.parent() {
+        // `Registry::save_to` writes the file, but a redirected registry may name a directory that
+        // does not exist yet — a fresh profile, or a test's temp dir.
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create `{}`", parent.display()))?;
+    }
     registry.save_to(&path)?;
     Ok(())
 }
