@@ -152,8 +152,11 @@ that change carry a v7 id and are read normally.
 Command names are full words — `list`, `remove`, `workspace` — with `ls`, `rm` and `ws` as aliases.
 Both spellings are stable; scripts may use either.
 
-`jot workspace use` accepts a name or an id prefix. Names are not unique — the registry keys on id — so a
-shared name is reported with candidates and exits 4 rather than picking one.
+`jot workspace use` and `jot workspace remove` take an **id** as a bare argument (or `--id`), and a
+name only via `--name`. The two are exclusive and one is required. A bare argument is never looked up
+as a name: names are not unique — the registry keys on id — and an argument whose meaning depended on
+what happened to be registered would be worse than an explicit flag. A `--name` matching several
+entries is reported with candidates and exits 4 rather than picking one.
 
 ## `index status`
 

@@ -25,8 +25,9 @@ jot trash              # list what is in the trash
 jot search <query> [--since] [--until]
 jot links <id>         # backlinks and quoted-by
 jot open <id>          # hands off to the desktop app (stage 6)
-jot workspace list | use <name|id> | add <path> | new <path> [--kind jot|plain]
-              | remove <name|id> | prune            # alias: ws, and ls/rm within
+jot workspace list | use <id> | --id <id> | --name <name>
+              | add <path> | new <path> [--kind jot|plain]
+              | remove <id> | --id <id> | --name <name> | prune   # alias: ws, and ls/rm within
 jot index status | rebuild
 ```
 
@@ -233,17 +234,39 @@ looks like ceremony and is not. "Stale" is `!path.exists()`, and an external dri
 for a vault whose notes are perfectly fine, and getting it back means finding the path again. The
 prompt lists the candidates and says so; `--yes` skips it for scripts.
 
-### `jot workspace use` takes an id, because a name is not unique
+### Selecting a workspace: an id by default, a name only when asked for
 
 The registry keys on workspace **id** — correct, since the id lives in `workspace.toml` and survives
 the folder being moved. But that means two entries can share a name: two `notes` directories under
-different parents, or one vault deleted and remade. `ws use <name>` matched on name alone and took
-the first hit, which made the second workspace **unreachable** and, worse, silently picked one of
+different parents, or one vault deleted and remade. `ws use <name>` originally matched on name alone
+and took the first hit, which made the second workspace **unreachable** and silently picked one of
 them. That is the "never guess between your things" rule broken in the one place that decides where
 notes get captured.
 
-`ws use` now takes a name **or** an id prefix. A shared name is reported with ids and paths and
-exits 4, like an ambiguous note prefix. Nothing guesses.
+The first fix accepted a name **or** an id prefix, trying the name first. That removed the silent
+pick but introduced a subtler fault: **what the argument means depended on what happened to be
+registered.** `workspace use notes` was a name lookup right up until someone registered a vault
+whose id began `notes`, at which point the same command meant something else. A selector whose
+interpretation shifts under you is the same class of problem as an id that stops resolving.
+
+Settled shape — the two are an exclusive, required pair, enforced by a clap `ArgGroup`:
+
+```text
+jot workspace use <ID>          # a bare argument is an id, or a unique prefix
+jot workspace use --id <ID>     # the same, said explicitly
+jot workspace use --name <NAME> # a name, which may match several
+```
+
+`workspace remove` takes the same selector, from the same type, so the two cannot drift apart. The
+resolver is split into `resolve_workspace_by_id` and `resolve_workspace_by_name` so neither can
+quietly reacquire the other's fallback. A name matching several entries still exits 4 with the
+candidates listed; nothing guesses.
+
+**The cost, recorded:** selecting by name is the common case — a name is what `workspace new` prints
+and what people remember — and it now needs a flag, while the rarer disambiguation-by-id case gets
+the bare argument. The trade was made deliberately, for a bare argument that means exactly one thing
+regardless of what is registered. If dogfooding says the flag is friction, flipping which of the two
+is bare is a one-line change to the `ArgGroup` and nothing else moves.
 
 ### Workspace ids are UUIDv4; note ids stay UUIDv7
 
