@@ -58,9 +58,15 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
-use crate::frontmatter::FrontmatterSchema;
-use crate::fs;
-use crate::note::{Note, NoteId};
+use crate::frontmatter::{Frontmatter, FrontmatterSchema};
+use crate::fs::{self, FilenameSlug};
+use crate::link::{self, Link};
+use crate::note::{Note, NoteId, NoteMeta};
+use crate::query::{
+    Draft, Edit, FileSort, Page, Ref, Resolution, Row, SearchQuery, State, TimelineQuery,
+};
+use crate::snapshot::{Snapshot, SyncReport};
+use crate::thread::Thread;
 
 /// The manifest schema version this build writes, and the highest it will open.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -375,15 +381,19 @@ impl std::fmt::Display for Warning {
 // Workspace
 // =============================================================================================
 
-/// An opened workspace: a root directory and the manifest that identifies it.
+/// An opened workspace: a root directory, the manifest that identifies it, and an in-memory view
+/// of the notes inside it.
 ///
-/// Holding one says nothing about the index — that arrives in stage 2. In stage 1 a `Workspace` is
-/// exactly the answer to "which directory, and what is it".
+/// The view is a [`Snapshot`] — a scan, standing in for stage 2's SQLite index. Every read method
+/// answers from it and every mutation updates it, so the seam the whole project rests on is the
+/// same one it will be when a database is behind it: **surfaces call these methods and never touch
+/// the filesystem.**
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     root: PathBuf,
     manifest: Manifest,
     warnings: Vec<Warning>,
+    snapshot: Snapshot,
 }
 
 impl Workspace {
@@ -427,7 +437,7 @@ impl Workspace {
         };
 
         match Self::write_new_tree(&root, &jot, &manifest) {
-            Ok(()) => Ok(Workspace::assembled(root, manifest)),
+            Ok(()) => Workspace::assembled(root, manifest).synced(),
             Err(e) => {
                 // `.jot/` did not exist a moment ago — this call made it — so removing it takes
                 // nothing that was not ours.
@@ -483,7 +493,7 @@ impl Workspace {
         })?;
 
         let manifest = Manifest::from_toml(&text, &manifest_path, &default_name(&root))?;
-        Ok(Workspace::assembled(root, manifest))
+        Workspace::assembled(root, manifest).synced()
     }
 
     /// Walks up from `from` looking for a `.jot/` directory, and opens the first one found.
@@ -605,7 +615,17 @@ impl Workspace {
             root,
             manifest,
             warnings,
+            // Populated by `synced`, which `init` and `open` both run before handing a workspace
+            // out. Assembling one with an empty snapshot and returning it would make every read
+            // silently answer "nothing here".
+            snapshot: Snapshot::default(),
         }
+    }
+
+    /// Scan the vault once, so a freshly opened workspace is never stale.
+    fn synced(mut self) -> Result<Self> {
+        self.sync()?;
+        Ok(self)
     }
 
     // ------------------------------------------------------------------ opening a single note
@@ -719,6 +739,380 @@ impl Workspace {
         }
         // No `relation:reply_to` at all: the note is its own root.
         Ok(note.id)
+    }
+
+    // =========================================================================================
+    // The vault snapshot
+    // =========================================================================================
+
+    /// Bring the in-memory view of the vault up to date, and report what moved.
+    ///
+    /// Every read below answers from this snapshot, so a surface calls `sync` before reading —
+    /// which `init` and `open` have already done once, so a freshly opened workspace is never
+    /// stale.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReadDir`] if the vault root or the trash cannot be listed. A single unreadable
+    /// *note* is a [`Problem`] on the report, not an error: one bad file must not make the vault
+    /// unusable.
+    pub fn sync(&mut self) -> Result<SyncReport> {
+        let fresh = Snapshot::scan(&self.root)?;
+        let report = fresh.diff(&self.snapshot);
+        self.snapshot = fresh;
+        Ok(report)
+    }
+
+    /// Discard the in-memory view and build it again from the files.
+    ///
+    /// Identical to [`Workspace::sync`] **in this build**, because the snapshot has no persistent
+    /// half to be wrong: every scan is a cold one. The method exists anyway, and is called by
+    /// `jot index rebuild`, because it is the operation whose meaning must not change when stage 2
+    /// puts SQLite behind this seam — at which point `sync` becomes incremental and this one stops
+    /// being its synonym. The rebuild invariant (`overview.md`) is the property that the two agree,
+    /// and it is trivially true here.
+    pub fn rebuild(&mut self) -> Result<SyncReport> {
+        self.snapshot = Snapshot::default();
+        self.sync()
+    }
+
+    /// The current in-memory view of the vault.
+    #[must_use]
+    pub fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    // =========================================================================================
+    // Note lifecycle
+    // =========================================================================================
+
+    /// Write a new note and return it.
+    ///
+    /// Mints the id here rather than taking one, because a UUIDv7 minted at write time is what
+    /// makes the id's embedded timestamp the note's real creation time — the only place
+    /// `created_at` is ever recorded.
+    ///
+    /// # `relation:root`, assigned once
+    ///
+    /// A top-level note's root is its own id. A reply copies its parent's root, or falls back to
+    /// the parent's id if the parent's own root is missing. It is **never recomputed afterwards**,
+    /// which is what keeps a subtree grouped when a note in the middle of it is purged.
+    ///
+    /// # What is refused
+    ///
+    /// A `reply_to` naming a note the vault does not hold, with [`Error::ReplyTargetMissing`].
+    /// Replying to a **trashed** note is allowed: it is still a real note, trash never cascades,
+    /// and refusing would make the trash a place replies go to die.
+    ///
+    /// A `quote`, by contrast, is not checked at all. A quote is a cross-tree reference like a
+    /// link, dangling references are a designed state, and there is no structural invariant for a
+    /// missing quote target to break.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ReplyTargetMissing`], plus [`Error::Write`] or [`Error::Rename`] if the file
+    /// cannot be written.
+    pub fn create(&mut self, draft: Draft) -> Result<Note> {
+        let id = NoteId::new();
+        let root = match draft.reply_to {
+            None => id,
+            Some(parent) => {
+                let record = self.snapshot.get(parent).ok_or(Error::ReplyTargetMissing {
+                    id: parent.as_uuid(),
+                })?;
+                record.meta.root.unwrap_or(parent)
+            }
+        };
+
+        let mut frontmatter = Frontmatter::new();
+        frontmatter.title = draft.title.clone();
+        frontmatter.root = Some(root);
+        frontmatter.reply_to = draft.reply_to;
+        frontmatter.quote = draft.quote;
+
+        let note = Note::new(id, frontmatter, body_text(&draft.body));
+        let path = self.root.join(fs::note_filename(
+            id.as_uuid(),
+            draft.title.as_deref(),
+            draft.slug,
+        ));
+
+        let bytes = note.try_to_bytes(&self.manifest.schema)?;
+        fs::atomic_write(&path, &self.tmp_dir(), &bytes)?;
+        self.snapshot.reindex(id, &path, State::Active);
+        Ok(note)
+    }
+
+    /// Apply an edit to an existing note and return it as it now stands.
+    ///
+    /// # The one write path
+    ///
+    /// Always `load(path)` → mutate → write. Never `NoteMeta` → write: a record from a query
+    /// carries no unknown frontmatter keys, so writing one back would delete every key jot does not
+    /// interpret — the "expensive failure" stage 2's risk table exists to prevent. Reloading the
+    /// file also means an edit picks up whatever an external editor changed in the meantime,
+    /// rather than clobbering it wholesale.
+    ///
+    /// # No-op edits do not write
+    ///
+    /// The rendered bytes are compared with the file's, and an identical result is not written.
+    /// `edited_at` is filesystem mtime, and mtime moves even for an identical write, so writing a
+    /// no-op would make every note look recently touched and poison the "recently edited" sort.
+    ///
+    /// # Re-slugging
+    ///
+    /// A title change re-derives the filename's slug **only for a note whose filename already has
+    /// one**. The file chose its own form at creation and an edit does not overrule it. Renaming is
+    /// safe either way: identity is the UUID and the reader ignores everything after it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoteNotFound`] if the vault holds no such note, plus whatever loading and writing
+    /// the file raise.
+    pub fn edit(&mut self, id: NoteId, edit: Edit) -> Result<Note> {
+        let record = self
+            .snapshot
+            .get(id)
+            .ok_or(Error::NoteNotFound { id: id.as_uuid() })?;
+        let path = record.path.clone();
+        let state = record.state;
+
+        let before = std::fs::read(&path).map_err(|source| Error::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let mut note = Note::parse_at(&path, &before)?;
+
+        edit.title.clone().apply(&mut note.frontmatter.title);
+        edit.quote.clone().apply(&mut note.frontmatter.quote);
+        if let Some(body) = &edit.body {
+            note.body = body_text(body);
+        }
+
+        let after = note.try_to_bytes(&self.manifest.schema)?;
+        let target = self.renamed_for(&path, &note);
+
+        if after == before && target == path {
+            return Ok(note);
+        }
+
+        fs::atomic_write(&target, &self.tmp_dir(), &after)?;
+        if target != path {
+            // The new name is on disk before the old one goes, so a crash between the two leaves
+            // two files claiming one id — which the next scan reports as a `DuplicateId` problem
+            // and a person can resolve — rather than leaving no file at all.
+            std::fs::remove_file(&path).map_err(|source| Error::Remove {
+                path: path.clone(),
+                source,
+            })?;
+        }
+        self.snapshot.reindex(id, &target, state);
+        Ok(note)
+    }
+
+    /// The path `note` should live at, given where it currently lives.
+    ///
+    /// Unchanged unless the file already carries a slug and the title has moved.
+    fn renamed_for(&self, current: &Path, note: &Note) -> PathBuf {
+        let bare = fs::note_filename(note.id.as_uuid(), None, FilenameSlug::None);
+        let has_slug = current
+            .file_name()
+            .is_some_and(|name| name != bare.as_str());
+        if !has_slug {
+            return current.to_path_buf();
+        }
+        let parent = current.parent().unwrap_or(&self.root);
+        parent.join(fs::note_filename(
+            note.id.as_uuid(),
+            note.frontmatter.title.as_deref(),
+            FilenameSlug::FromTitle,
+        ))
+    }
+
+    /// Move a note into `.jot/.trash/`.
+    ///
+    /// **Never cascades.** Trashing a note with replies moves exactly one file; the replies stay
+    /// live and render a trashed-parent placeholder from [`Ref::Trashed`]. That is both the stated
+    /// design and the only behavior that survives a rebuild without extra bookkeeping.
+    ///
+    /// The move *is* the state change — there is no frontmatter stamp to write — so this is one
+    /// rename and nothing else.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoteNotFound`], [`Error::AlreadyTrashed`], or [`Error::Rename`].
+    pub fn trash(&mut self, id: NoteId) -> Result<()> {
+        let record = self
+            .snapshot
+            .get(id)
+            .ok_or(Error::NoteNotFound { id: id.as_uuid() })?;
+        if record.state == State::Trashed {
+            return Err(Error::AlreadyTrashed { id: id.as_uuid() });
+        }
+        let from = record.path.clone();
+        let to = self.trash_dir().join(file_name_of(&from));
+        self.relocate(id, &from, &to, State::Trashed)
+    }
+
+    /// Move a note out of `.jot/.trash/` and back into the vault root.
+    ///
+    /// The file keeps its name in the trash, so a restore puts it back exactly where it was.
+    /// Nothing in the frontmatter changes, because nothing in the frontmatter recorded the trashing.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoteNotFound`], [`Error::NotTrashed`], or [`Error::Rename`].
+    pub fn restore(&mut self, id: NoteId) -> Result<()> {
+        let record = self
+            .snapshot
+            .get(id)
+            .ok_or(Error::NoteNotFound { id: id.as_uuid() })?;
+        if record.state == State::Active {
+            return Err(Error::NotTrashed { id: id.as_uuid() });
+        }
+        let from = record.path.clone();
+        let to = self.root.join(file_name_of(&from));
+        self.relocate(id, &from, &to, State::Active)
+    }
+
+    /// The rename shared by [`Workspace::trash`] and [`Workspace::restore`].
+    ///
+    /// Filesystem first, then the snapshot — the order `stage3.md` requires, so that an
+    /// interruption leaves the index stale rather than the vault wrong. Stale is repaired by the
+    /// next [`Workspace::sync`]; wrong is not repairable at all.
+    fn relocate(&mut self, id: NoteId, from: &Path, to: &Path, state: State) -> Result<()> {
+        if let Some(parent) = to.parent() {
+            create_dir(parent)?;
+        }
+        std::fs::rename(from, to).map_err(|source| Error::Rename {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+            source,
+        })?;
+        self.snapshot.reindex(id, to, state);
+        Ok(())
+    }
+
+    /// Delete a note's file for good.
+    ///
+    /// **The only irreversible operation in the crate**, which is why every surface confirms before
+    /// calling it. It removes exactly one file: replies keep their now-dangling `reply_to`, which
+    /// is the [`Ref::Deleted`] state, and they stay grouped under the original `relation:root`
+    /// because that field is assigned at creation and never recomputed.
+    ///
+    /// A note may be purged from either state — the trash is a convenience, not a required stop.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoteNotFound`] or [`Error::Remove`].
+    pub fn purge(&mut self, id: NoteId) -> Result<()> {
+        let record = self
+            .snapshot
+            .get(id)
+            .ok_or(Error::NoteNotFound { id: id.as_uuid() })?;
+        let path = record.path.clone();
+        std::fs::remove_file(&path).map_err(|source| Error::Remove {
+            path: path.clone(),
+            source,
+        })?;
+        self.snapshot.forget(id);
+        Ok(())
+    }
+
+    // =========================================================================================
+    // Reading
+    // =========================================================================================
+
+    /// Load one note in full, body included.
+    ///
+    /// Reads the file rather than answering from the snapshot, because the snapshot deliberately
+    /// does not keep bodies.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Note::load`] raises.
+    pub fn get(&self, id: NoteId) -> Result<Option<Note>> {
+        match self.snapshot.get(id) {
+            None => Ok(None),
+            Some(record) => Note::load(&record.path).map(Some),
+        }
+    }
+
+    /// Resolve a git-style id prefix to a note. See [`Snapshot::resolve`].
+    #[must_use]
+    pub fn resolve(&self, prefix: &str) -> Resolution {
+        self.snapshot.resolve(prefix)
+    }
+
+    /// Resolve an id to [`Ref::Present`], [`Ref::Trashed`], or [`Ref::Deleted`].
+    #[must_use]
+    pub fn reference(&self, id: NoteId) -> Ref {
+        self.snapshot.reference(id)
+    }
+
+    /// A page of the timeline. See [`Snapshot::timeline`].
+    #[must_use]
+    pub fn timeline(&self, query: &TimelineQuery) -> Page<Row> {
+        self.snapshot.timeline(query)
+    }
+
+    /// The thread a note sits in — ancestors and subtree. See [`Snapshot::thread`].
+    #[must_use]
+    pub fn thread(&self, id: NoteId) -> Option<Thread> {
+        self.snapshot.thread(id)
+    }
+
+    /// Every active note, flat, in the requested order.
+    #[must_use]
+    pub fn files(&self, sort: FileSort) -> Vec<Row> {
+        self.snapshot.files(sort)
+    }
+
+    /// Title-and-metadata search. See [`Snapshot::search`].
+    #[must_use]
+    pub fn search(&self, query: &SearchQuery) -> Vec<Row> {
+        self.snapshot.search(query)
+    }
+
+    /// Everything in the trash, most recently trashed first.
+    #[must_use]
+    pub fn trashed(&self) -> Vec<Row> {
+        self.snapshot.trashed()
+    }
+
+    /// Notes whose body links to this one.
+    #[must_use]
+    pub fn backlinks(&self, id: NoteId) -> Vec<NoteMeta> {
+        self.snapshot.backlinks(id)
+    }
+
+    /// Notes whose `relation:quote` names this one.
+    #[must_use]
+    pub fn quoted_by(&self, id: NoteId) -> Vec<NoteMeta> {
+        self.snapshot.quoted_by(id)
+    }
+
+    /// The links in one note's body, with their byte offsets and their resolved state.
+    ///
+    /// Re-reads the file, because offsets belong to a body and the snapshot keeps only the edge
+    /// set. Extraction still never consults the index — the resolution is applied afterwards, to
+    /// each target, which is what lets a link to a purged note extract normally and resolve to
+    /// [`Ref::Deleted`].
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Note::load`] raises.
+    pub fn links_in(&self, id: NoteId) -> Result<Vec<(Link, Ref)>> {
+        let Some(note) = self.get(id)? else {
+            return Ok(Vec::new());
+        };
+        Ok(link::extract(&note.body)
+            .into_iter()
+            .map(|link| {
+                let target = self.reference(link.target);
+                (link, target)
+            })
+            .collect())
     }
 }
 
@@ -845,6 +1239,30 @@ fn default_name(root: &Path) -> String {
 }
 
 /// `create_dir_all`, with the path named on failure.
+/// A body as it is written into a file: separated from the closing fence by a blank line, and
+/// newline-terminated.
+///
+/// Applied when a caller *supplies* a body — [`Workspace::create`], and an [`Edit`] that sets one.
+/// It is not a markdown transformation and nothing is re-rendered: an edit that leaves the body
+/// alone does not pass through here at all, which is what keeps "the write path leaves the body
+/// alone" true. Idempotent, so re-saving an unchanged body produces identical bytes and therefore
+/// no write.
+fn body_text(text: &str) -> String {
+    let trimmed = text.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        String::from("\n")
+    } else {
+        format!("\n{trimmed}\n")
+    }
+}
+
+/// The final component of a note path. Every path this is called with came from an enumerator that
+/// already parsed a UUID out of its filename, so the fallback cannot be reached in practice.
+fn file_name_of(path: &Path) -> PathBuf {
+    path.file_name()
+        .map_or_else(|| path.to_path_buf(), PathBuf::from)
+}
+
 fn create_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(|source| Error::CreateDir {
         path: path.to_path_buf(),
@@ -2090,5 +2508,639 @@ frontmatter = [
                 path.display()
             );
         }
+    }
+}
+
+/// Stage 3's note lifecycle: `create`, `edit`, `trash`, `restore`, `purge`, and the reads that
+/// have to keep agreeing with them.
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::query::FileSort;
+
+    fn workspace() -> (tempfile::TempDir, Workspace) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace::init(tmp.path(), WorkspaceKind::Jot).unwrap();
+        (tmp, ws)
+    }
+
+    fn bytes_of(ws: &Workspace, id: NoteId) -> Vec<u8> {
+        std::fs::read(&ws.snapshot().get(id).unwrap().path).unwrap()
+    }
+
+    fn mtime_of(ws: &Workspace, id: NoteId) -> std::time::SystemTime {
+        std::fs::metadata(&ws.snapshot().get(id).unwrap().path)
+            .unwrap()
+            .modified()
+            .unwrap()
+    }
+
+    fn file_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().filter(|e| e.path().is_file()).count())
+            .unwrap_or(0)
+    }
+
+    // ------------------------------------------------------------------------------- create
+
+    #[test]
+    fn create_writes_a_file_named_by_the_id_it_minted() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("a thought")).unwrap();
+
+        let path = ws.root().join(format!("{}.md", note.id));
+        assert!(path.exists(), "the note is at its bare-uuid filename");
+        assert_eq!(fs::parse_note_filename(&path).unwrap(), note.id.as_uuid());
+    }
+
+    #[test]
+    fn a_created_note_is_immediately_readable_without_a_sync() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("a thought").title("t")).unwrap();
+
+        assert_eq!(ws.get(note.id).unwrap().unwrap().body, note.body);
+        assert!(matches!(ws.reference(note.id), Ref::Present(_)));
+        assert_eq!(ws.timeline(&TimelineQuery::new()).len(), 1);
+    }
+
+    #[test]
+    fn created_at_comes_from_the_minted_id_and_is_in_no_file() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("x")).unwrap();
+
+        assert!(note.created_at().is_some());
+        let text = String::from_utf8(bytes_of(&ws, note.id)).unwrap();
+        assert!(!text.contains("created_at"), "{text}");
+        assert!(!text.contains("id:"), "{text}");
+    }
+
+    #[test]
+    fn a_top_level_notes_root_is_its_own_id() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("x")).unwrap();
+        assert_eq!(note.frontmatter.root, Some(note.id));
+        assert_eq!(note.frontmatter.reply_to, None);
+    }
+
+    #[test]
+    fn a_reply_copies_the_thread_root_rather_than_pointing_at_its_parent() {
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root")).unwrap();
+        let mid = ws.create(Draft::new("mid").reply_to(root.id)).unwrap();
+        let deep = ws.create(Draft::new("deep").reply_to(mid.id)).unwrap();
+
+        assert_eq!(mid.frontmatter.root, Some(root.id));
+        assert_eq!(
+            deep.frontmatter.root,
+            Some(root.id),
+            "root is the thread's, not the parent's"
+        );
+        assert_eq!(deep.frontmatter.reply_to, Some(mid.id));
+    }
+
+    #[test]
+    fn replying_to_a_note_that_does_not_exist_is_refused() {
+        let (_tmp, mut ws) = workspace();
+        let missing = NoteId::new();
+        let err = ws
+            .create(Draft::new("orphan").reply_to(missing))
+            .unwrap_err();
+
+        assert!(matches!(err, Error::ReplyTargetMissing { id } if id == missing.as_uuid()));
+        assert_eq!(file_count(ws.root()), 0, "nothing was written");
+    }
+
+    #[test]
+    fn replying_to_a_trashed_note_is_allowed_because_it_is_still_a_real_note() {
+        let (_tmp, mut ws) = workspace();
+        let parent = ws.create(Draft::new("parent")).unwrap();
+        ws.trash(parent.id).unwrap();
+
+        let reply = ws.create(Draft::new("reply").reply_to(parent.id)).unwrap();
+        assert_eq!(reply.frontmatter.reply_to, Some(parent.id));
+        assert_eq!(reply.frontmatter.root, Some(parent.id));
+    }
+
+    #[test]
+    fn a_quote_is_never_validated_and_never_changes_the_root() {
+        let (_tmp, mut ws) = workspace();
+        let dangling = NoteId::new();
+        let note = ws.create(Draft::new("x").quote(dangling)).unwrap();
+
+        assert_eq!(note.frontmatter.quote, Some(dangling));
+        assert_eq!(
+            note.frontmatter.root,
+            Some(note.id),
+            "not the quoted note's"
+        );
+        assert!(matches!(ws.reference(dangling), Ref::Deleted(_)));
+    }
+
+    #[test]
+    fn a_quote_does_not_join_the_quoted_notes_thread() {
+        let (_tmp, mut ws) = workspace();
+        let quoted = ws.create(Draft::new("quoted")).unwrap();
+        let quoting = ws.create(Draft::new("quoting").quote(quoted.id)).unwrap();
+
+        let tree = ws.thread(quoted.id).unwrap().tree;
+        assert_eq!(tree.len(), 1, "the quoting note is not in the tree");
+        assert_eq!(ws.quoted_by(quoted.id)[0].id, quoting.id);
+    }
+
+    #[test]
+    fn the_slug_option_decides_the_filename_and_the_id_still_parses_back() {
+        let (_tmp, mut ws) = workspace();
+        let bare = ws.create(Draft::new("x").title("Hello There")).unwrap();
+        let slugged = ws
+            .create(Draft::new("x").title("Hello There").slugged())
+            .unwrap();
+
+        assert!(ws.root().join(format!("{}.md", bare.id)).exists());
+        let path = ws.root().join(format!("{}_hello_there.md", slugged.id));
+        assert!(path.exists(), "slug derived from the title");
+        assert_eq!(
+            fs::parse_note_filename(&path).unwrap(),
+            slugged.id.as_uuid()
+        );
+    }
+
+    #[test]
+    fn a_created_note_round_trips_through_the_parser() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("body text").title("A title")).unwrap();
+
+        let reloaded = ws.get(note.id).unwrap().unwrap();
+        assert_eq!(reloaded, note);
+        assert_eq!(reloaded.frontmatter.title.as_deref(), Some("A title"));
+        assert!(reloaded.body.contains("body text"));
+    }
+
+    #[test]
+    fn an_empty_body_still_produces_a_well_formed_note() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("")).unwrap();
+        assert!(ws.get(note.id).unwrap().is_some(), "it parses back");
+    }
+
+    // --------------------------------------------------------------------------------- edit
+
+    #[test]
+    fn editing_a_title_changes_the_file_and_the_snapshot() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("b").title("before")).unwrap();
+
+        let edited = ws.edit(note.id, Edit::new().title("after")).unwrap();
+        assert_eq!(edited.frontmatter.title.as_deref(), Some("after"));
+        assert_eq!(
+            ws.snapshot().get(note.id).unwrap().meta.title.as_deref(),
+            Some("after")
+        );
+    }
+
+    #[test]
+    fn editing_a_body_leaves_the_frontmatter_alone_and_the_reverse() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("before").title("t")).unwrap();
+
+        let edited = ws.edit(note.id, Edit::new().body("after")).unwrap();
+        assert!(edited.body.contains("after"));
+        assert_eq!(edited.frontmatter.title.as_deref(), Some("t"));
+        assert_eq!(edited.frontmatter.root, note.frontmatter.root);
+    }
+
+    #[test]
+    fn clearing_a_title_removes_the_key_rather_than_writing_it_empty() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("b").title("gone")).unwrap();
+
+        ws.edit(note.id, Edit::new().clear_title()).unwrap();
+        let text = String::from_utf8(bytes_of(&ws, note.id)).unwrap();
+        assert!(!text.contains("title"), "{text}");
+        assert!(ws.get(note.id).unwrap().is_some(), "still parses");
+    }
+
+    #[test]
+    fn an_edit_never_touches_reply_to_or_root() {
+        // Re-parenting is not supported, and must not happen as a side effect of an edit.
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root")).unwrap();
+        let reply = ws.create(Draft::new("reply").reply_to(root.id)).unwrap();
+
+        let edited = ws.edit(reply.id, Edit::new().title("new")).unwrap();
+        assert_eq!(edited.frontmatter.reply_to, Some(root.id));
+        assert_eq!(edited.frontmatter.root, Some(root.id));
+    }
+
+    #[test]
+    fn an_unknown_frontmatter_key_survives_an_edit_byte_for_byte() {
+        // The expensive failure, guarded: an edit that rebuilt the file from a query result would
+        // drop every key jot does not interpret. `load -> mutate -> write` is what prevents it.
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("b").title("t")).unwrap();
+        let path = ws.snapshot().get(note.id).unwrap().path.clone();
+
+        let original = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+        let hand_edited = original.replace(
+            "title: t",
+            "title: t\nsource: obsidian-import\ntags:\n  - migration",
+        );
+        std::fs::write(&path, &hand_edited).unwrap();
+        ws.sync().unwrap();
+
+        ws.edit(note.id, Edit::new().title("retitled")).unwrap();
+
+        let after = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+        assert!(after.contains("source: obsidian-import"), "{after}");
+        assert!(after.contains("- migration"), "{after}");
+        assert!(after.contains("title: retitled"), "{after}");
+    }
+
+    #[test]
+    fn an_edit_that_changes_nothing_does_not_write() {
+        // `edited_at` is mtime, so an identical write would still make the note look touched.
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("body").title("t")).unwrap();
+        let before = mtime_of(&ws, note.id);
+        let bytes = bytes_of(&ws, note.id);
+
+        ws.edit(note.id, Edit::new().title("t")).unwrap();
+        ws.edit(note.id, Edit::new().body("body")).unwrap();
+        ws.edit(note.id, Edit::new()).unwrap();
+
+        assert_eq!(bytes_of(&ws, note.id), bytes);
+        assert_eq!(mtime_of(&ws, note.id), before, "mtime did not move");
+    }
+
+    #[test]
+    fn editing_a_note_the_vault_does_not_hold_is_an_error() {
+        let (_tmp, mut ws) = workspace();
+        let missing = NoteId::new();
+        let err = ws.edit(missing, Edit::new().title("x")).unwrap_err();
+        assert!(matches!(err, Error::NoteNotFound { id } if id == missing.as_uuid()));
+    }
+
+    #[test]
+    fn a_slugged_file_is_renamed_on_a_title_change_and_keeps_its_identity() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws
+            .create(Draft::new("b").title("First Title").slugged())
+            .unwrap();
+        assert!(
+            ws.root()
+                .join(format!("{}_first_title.md", note.id))
+                .exists()
+        );
+
+        ws.edit(note.id, Edit::new().title("Second Title")).unwrap();
+
+        assert!(
+            !ws.root()
+                .join(format!("{}_first_title.md", note.id))
+                .exists()
+        );
+        assert!(
+            ws.root()
+                .join(format!("{}_second_title.md", note.id))
+                .exists()
+        );
+        assert_eq!(file_count(ws.root()), 1, "the old name is gone");
+        assert!(matches!(ws.reference(note.id), Ref::Present(_)), "same id");
+    }
+
+    #[test]
+    fn a_bare_filename_is_not_given_a_slug_by_an_edit() {
+        // The file chose its form at creation; an edit does not overrule it.
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("b").title("First")).unwrap();
+
+        ws.edit(note.id, Edit::new().title("Second")).unwrap();
+        assert!(ws.root().join(format!("{}.md", note.id)).exists());
+        assert_eq!(file_count(ws.root()), 1);
+    }
+
+    #[test]
+    fn a_quote_can_be_set_and_cleared_by_an_edit() {
+        let (_tmp, mut ws) = workspace();
+        let quoted = ws.create(Draft::new("quoted")).unwrap();
+        let note = ws.create(Draft::new("x")).unwrap();
+
+        let set = ws.edit(note.id, Edit::new().quote(quoted.id)).unwrap();
+        assert_eq!(set.frontmatter.quote, Some(quoted.id));
+        assert_eq!(ws.quoted_by(quoted.id).len(), 1);
+
+        let cleared = ws.edit(note.id, Edit::new().clear_quote()).unwrap();
+        assert_eq!(cleared.frontmatter.quote, None);
+        assert!(ws.quoted_by(quoted.id).is_empty());
+    }
+
+    // -------------------------------------------------------------------------------- trash
+
+    #[test]
+    fn trashing_moves_exactly_one_file_and_flips_the_state() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("x")).unwrap();
+
+        ws.trash(note.id).unwrap();
+
+        assert_eq!(file_count(ws.root()), 0);
+        assert_eq!(file_count(&ws.trash_dir()), 1);
+        assert!(matches!(ws.reference(note.id), Ref::Trashed(_)));
+    }
+
+    #[test]
+    fn trash_never_cascades_and_the_replies_report_a_trashed_parent() {
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root")).unwrap();
+        let mid = ws.create(Draft::new("mid").reply_to(root.id)).unwrap();
+        let leaf = ws.create(Draft::new("leaf").reply_to(mid.id)).unwrap();
+
+        ws.trash(mid.id).unwrap();
+
+        assert!(matches!(ws.reference(root.id), Ref::Present(_)));
+        assert!(matches!(ws.reference(mid.id), Ref::Trashed(_)));
+        assert!(
+            matches!(ws.reference(leaf.id), Ref::Present(_)),
+            "children stay live"
+        );
+        assert_eq!(ws.trashed().len(), 1);
+        assert_eq!(
+            ws.thread(root.id).unwrap().tree.len(),
+            3,
+            "the thread is still whole"
+        );
+    }
+
+    #[test]
+    fn a_trashed_note_leaves_the_timeline_but_keeps_its_replies_in_it() {
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root")).unwrap();
+        let reply = ws.create(Draft::new("reply").reply_to(root.id)).unwrap();
+
+        ws.trash(root.id).unwrap();
+        let flat = ws.timeline(&TimelineQuery::new().flat());
+        let ids: Vec<NoteId> = flat.items.iter().map(|r| r.note.id).collect();
+
+        assert!(!ids.contains(&root.id));
+        assert!(ids.contains(&reply.id));
+    }
+
+    #[test]
+    fn trashing_twice_is_an_error_rather_than_a_second_move() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("x")).unwrap();
+        ws.trash(note.id).unwrap();
+
+        let err = ws.trash(note.id).unwrap_err();
+        assert!(matches!(err, Error::AlreadyTrashed { id } if id == note.id.as_uuid()));
+        assert_eq!(file_count(&ws.trash_dir()), 1);
+    }
+
+    #[test]
+    fn trashing_a_note_that_does_not_exist_is_an_error() {
+        let (_tmp, mut ws) = workspace();
+        let missing = NoteId::new();
+        assert!(matches!(
+            ws.trash(missing).unwrap_err(),
+            Error::NoteNotFound { .. }
+        ));
+    }
+
+    // ------------------------------------------------------------------------------ restore
+
+    #[test]
+    fn restore_puts_the_file_back_under_the_name_it_left_with() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws
+            .create(Draft::new("x").title("Some Title").slugged())
+            .unwrap();
+        let name = ws
+            .snapshot()
+            .get(note.id)
+            .unwrap()
+            .path
+            .file_name()
+            .unwrap()
+            .to_owned();
+
+        ws.trash(note.id).unwrap();
+        ws.restore(note.id).unwrap();
+
+        assert!(ws.root().join(&name).exists());
+        assert_eq!(file_count(&ws.trash_dir()), 0);
+        assert!(matches!(ws.reference(note.id), Ref::Present(_)));
+    }
+
+    #[test]
+    fn a_trash_and_restore_round_trip_leaves_the_bytes_untouched() {
+        // The directory is the state; there is no stamp to write or wipe.
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("body").title("t")).unwrap();
+        let before = bytes_of(&ws, note.id);
+
+        ws.trash(note.id).unwrap();
+        ws.restore(note.id).unwrap();
+
+        assert_eq!(bytes_of(&ws, note.id), before);
+    }
+
+    #[test]
+    fn restoring_a_note_that_is_not_in_the_trash_is_an_error() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("x")).unwrap();
+        assert!(matches!(
+            ws.restore(note.id).unwrap_err(),
+            Error::NotTrashed { .. }
+        ));
+    }
+
+    // -------------------------------------------------------------------------------- purge
+
+    #[test]
+    fn purging_removes_one_file_and_leaves_the_children_live_and_grouped() {
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root")).unwrap();
+        let mid = ws.create(Draft::new("mid").reply_to(root.id)).unwrap();
+        let leaf = ws.create(Draft::new("leaf").reply_to(mid.id)).unwrap();
+
+        ws.purge(mid.id).unwrap();
+
+        assert!(matches!(ws.reference(mid.id), Ref::Deleted(_)));
+        assert!(matches!(ws.reference(leaf.id), Ref::Present(_)));
+        assert_eq!(
+            ws.get(leaf.id).unwrap().unwrap().frontmatter.root,
+            Some(root.id),
+            "the subtree is still grouped under the original root"
+        );
+        assert_eq!(file_count(ws.root()), 2);
+    }
+
+    #[test]
+    fn purging_the_root_leaves_its_children_as_orphan_roots_in_the_timeline() {
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root")).unwrap();
+        let a = ws.create(Draft::new("a").reply_to(root.id)).unwrap();
+        let b = ws.create(Draft::new("b").reply_to(root.id)).unwrap();
+
+        ws.purge(root.id).unwrap();
+
+        let ids: Vec<NoteId> = ws
+            .timeline(&TimelineQuery::new())
+            .items
+            .iter()
+            .map(|r| r.note.id)
+            .collect();
+        assert!(ids.contains(&a.id) && ids.contains(&b.id), "{ids:?}");
+    }
+
+    #[test]
+    fn a_note_can_be_purged_straight_from_the_vault_or_out_of_the_trash() {
+        let (_tmp, mut ws) = workspace();
+        let live = ws.create(Draft::new("live")).unwrap();
+        let binned = ws.create(Draft::new("binned")).unwrap();
+        ws.trash(binned.id).unwrap();
+
+        ws.purge(live.id).unwrap();
+        ws.purge(binned.id).unwrap();
+
+        assert_eq!(file_count(ws.root()), 0);
+        assert_eq!(file_count(&ws.trash_dir()), 0);
+        assert!(ws.snapshot().is_empty());
+    }
+
+    #[test]
+    fn a_link_to_a_purged_note_still_extracts_and_resolves_to_deleted() {
+        let (_tmp, mut ws) = workspace();
+        let target = ws.create(Draft::new("target")).unwrap();
+        let linking = ws
+            .create(Draft::new(format!("see [[{}]]", target.id)))
+            .unwrap();
+        assert_eq!(ws.backlinks(target.id).len(), 1);
+
+        ws.purge(target.id).unwrap();
+
+        let links = ws.links_in(linking.id).unwrap();
+        assert_eq!(links.len(), 1, "extraction never consults the index");
+        assert!(matches!(links[0].1, Ref::Deleted(_)));
+        assert_eq!(ws.backlinks(target.id).len(), 1, "the edge still exists");
+    }
+
+    // --------------------------------------------------------------------- sync and repair
+
+    #[test]
+    fn a_file_moved_into_the_trash_by_hand_is_picked_up_by_the_next_sync() {
+        // This is the "killed between the file move and the index write" case: the vault is
+        // correct and the snapshot is stale, and a sync is all it takes to agree again.
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("x")).unwrap();
+        let from = ws.snapshot().get(note.id).unwrap().path.clone();
+
+        std::fs::rename(&from, ws.trash_dir().join(from.file_name().unwrap())).unwrap();
+        assert!(
+            matches!(ws.reference(note.id), Ref::Present(_)),
+            "still stale"
+        );
+
+        let report = ws.sync().unwrap();
+        assert_eq!(report.updated, vec![note.id]);
+        assert!(matches!(ws.reference(note.id), Ref::Trashed(_)));
+    }
+
+    #[test]
+    fn a_file_deleted_by_hand_drops_out_on_the_next_sync_and_its_children_survive() {
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root")).unwrap();
+        let reply = ws.create(Draft::new("reply").reply_to(root.id)).unwrap();
+
+        std::fs::remove_file(&ws.snapshot().get(root.id).unwrap().path).unwrap();
+        let report = ws.sync().unwrap();
+
+        assert_eq!(report.removed, vec![root.id]);
+        assert!(matches!(ws.reference(root.id), Ref::Deleted(_)));
+        assert!(matches!(ws.reference(reply.id), Ref::Present(_)));
+    }
+
+    #[test]
+    fn rebuild_and_sync_agree_after_a_sequence_of_mutations() {
+        // The rebuild invariant, in the form this build can state it: the two produce the same
+        // logical content. `edited_at` is exempt everywhere else and needs no exemption here,
+        // because neither path writes and both read the same mtimes.
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root").title("r")).unwrap();
+        let a = ws.create(Draft::new("a").reply_to(root.id)).unwrap();
+        let b = ws.create(Draft::new("b").reply_to(a.id)).unwrap();
+        ws.edit(a.id, Edit::new().title("edited")).unwrap();
+        ws.trash(b.id).unwrap();
+        let doomed = ws.create(Draft::new("doomed")).unwrap();
+        ws.purge(doomed.id).unwrap();
+
+        let incremental = ws.snapshot().clone();
+        ws.rebuild().unwrap();
+        assert_eq!(&incremental, ws.snapshot());
+    }
+
+    #[test]
+    fn every_mutation_keeps_the_snapshot_and_the_disk_in_agreement() {
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root")).unwrap();
+        let reply = ws.create(Draft::new("reply").reply_to(root.id)).unwrap();
+        ws.edit(reply.id, Edit::new().title("t")).unwrap();
+        ws.trash(reply.id).unwrap();
+        ws.restore(reply.id).unwrap();
+
+        let in_memory = ws.snapshot().clone();
+        let on_disk = Snapshot::scan(ws.root()).unwrap();
+        assert_eq!(in_memory, on_disk);
+    }
+
+    #[test]
+    fn the_reads_all_agree_about_a_vault_after_a_realistic_session() {
+        let (_tmp, mut ws) = workspace();
+        let root = ws.create(Draft::new("root").title("Root note")).unwrap();
+        let one = ws.create(Draft::new("one").reply_to(root.id)).unwrap();
+        let _two = ws.create(Draft::new("two").reply_to(one.id)).unwrap();
+        let three = ws.create(Draft::new("three").reply_to(root.id)).unwrap();
+        ws.trash(three.id).unwrap();
+
+        assert_eq!(ws.files(FileSort::Created).len(), 3);
+        assert_eq!(ws.trashed().len(), 1);
+        assert_eq!(ws.timeline(&TimelineQuery::new()).len(), 1);
+        assert_eq!(ws.timeline(&TimelineQuery::new().flat()).len(), 3);
+        assert_eq!(ws.search(&SearchQuery::new("root")).len(), 1);
+        assert_eq!(ws.thread(root.id).unwrap().tree.len(), 4);
+        assert_eq!(
+            ws.resolve(&root.id.to_string()).unique().unwrap().id,
+            root.id
+        );
+    }
+
+    #[test]
+    fn a_short_prefix_over_notes_captured_together_is_ambiguous_not_unique() {
+        // A finding, pinned rather than worked around. Git's short ids work because a SHA is
+        // random from its first bit; a UUIDv7's leading 48 bits are a **millisecond timestamp**,
+        // so notes captured in the same session share a long prefix and only the random tail
+        // separates them. Eight characters — git's default, and `NoteId::short`'s length — cover
+        // only the top 32 bits of that timestamp, so a burst of captures collides every time.
+        //
+        // Ambiguity is handled correctly: it lists candidates and never guesses. But a surface
+        // that prints `short()` and then accepts it back will hand people an id that does not
+        // resolve, which is a stage 4 problem and is written up in `docs/plans/stage4.md`.
+        let (_tmp, mut ws) = workspace();
+        let first = ws.create(Draft::new("one")).unwrap();
+        let second = ws.create(Draft::new("two")).unwrap();
+        assert_eq!(
+            first.id.short(),
+            second.id.short(),
+            "two captures in one millisecond share their first eight characters"
+        );
+
+        assert!(matches!(
+            ws.resolve(&first.id.short()),
+            Resolution::Ambiguous(_)
+        ));
+        // The full id always works, which is why `--long` exists.
+        assert_eq!(
+            ws.resolve(&first.id.to_string()).unique().unwrap().id,
+            first.id
+        );
     }
 }

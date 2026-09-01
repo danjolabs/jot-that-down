@@ -6,6 +6,10 @@
 pub mod error;
 pub mod frontmatter;
 pub mod fs;
+pub mod link;
 pub mod note;
+pub mod query;
 pub mod registry;
+pub mod snapshot;
+pub mod thread;
 pub mod workspace;

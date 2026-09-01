@@ -175,6 +175,29 @@ pub enum Error {
     #[error("`{path}`: reply chain cycles back to note `{id}`")]
     ReplyCycle { path: PathBuf, id: Uuid },
 
+    // --------------------------------------------------------------- note lifecycle
+    /// A command named a note the vault does not hold, in either state. Distinct from a *dangling
+    /// reference*, which is a designed state and never an error: this is a person asking for a
+    /// note that is not there.
+    #[error("no note `{id}` in this workspace")]
+    NoteNotFound { id: Uuid },
+
+    /// `create` was given a `reply_to` naming a note that does not exist.
+    ///
+    /// Separate from [`Error::NoteNotFound`] because the subject is different: the note being
+    /// asked for is fine, and it is the *parent* that is missing. Replying to a **trashed** note
+    /// is allowed — it is still a real note — so only outright absence lands here.
+    #[error("cannot reply to note `{id}`: no such note in this workspace")]
+    ReplyTargetMissing { id: Uuid },
+
+    /// `trash` was called on a note that is already in `.jot/.trash/`.
+    #[error("note `{id}` is already in the trash")]
+    AlreadyTrashed { id: Uuid },
+
+    /// `restore` was called on a note that is not in the trash.
+    #[error("note `{id}` is not in the trash")]
+    NotTrashed { id: Uuid },
+
     // ---------------------------------------------------------------- workspace
     /// The path is not a workspace: it has no `.jot/` directory.
     #[error("`{path}` is not a jot workspace: no `.jot/` directory")]
@@ -241,9 +264,11 @@ pub enum Error {
 impl Error {
     /// The filesystem path this error is about, if it is about one.
     ///
-    /// `None` for exactly two variants: [`Error::SerializeFrontmatter`], which names a frontmatter
-    /// key on a block that may never have had a file, and [`Error::ConfigDirUnavailable`], which
-    /// fires precisely because there is no path to name.
+    /// `None` for the variants that are about a *note* rather than a file — the four note-lifecycle
+    /// errors, which name an id because the whole problem is that no file carries it — plus
+    /// [`Error::SerializeFrontmatter`], which names a frontmatter key on a block that may never
+    /// have had a file, and [`Error::ConfigDirUnavailable`], which fires precisely because there is
+    /// no path to name.
     ///
     /// For [`Error::Rename`] this is the *target* — the file the caller was trying to produce.
     pub fn path(&self) -> Option<&Path> {
@@ -275,7 +300,12 @@ impl Error {
             | Error::RegistrySerialize { path, .. } => Some(path),
             Error::Rename { to, .. } => Some(to),
             Error::WorkspaceNotFound { from } => Some(from),
-            Error::SerializeFrontmatter { .. } | Error::ConfigDirUnavailable { .. } => None,
+            Error::SerializeFrontmatter { .. }
+            | Error::ConfigDirUnavailable { .. }
+            | Error::NoteNotFound { .. }
+            | Error::ReplyTargetMissing { .. }
+            | Error::AlreadyTrashed { .. }
+            | Error::NotTrashed { .. } => None,
         }
     }
 
@@ -379,6 +409,10 @@ mod tests {
                 key: "title".into(),
                 message: "recursion limit exceeded".into(),
             },
+            Error::NoteNotFound { id: uuid_b() },
+            Error::ReplyTargetMissing { id: uuid_b() },
+            Error::AlreadyTrashed { id: uuid_b() },
+            Error::NotTrashed { id: uuid_b() },
             Error::NotAWorkspace {
                 path: "somewhere".into(),
             },
@@ -452,11 +486,13 @@ mod tests {
         // Bump deliberately when the taxonomy changes. Stage 1 froze it at 32; stage 1b
         // removed five (`NoteIdMismatch`, `MissingId`, `MissingCreatedAt`, `MissingRoot`,
         // `InvalidTimestamp` — all of them about keys the format no longer carries) and
-        // added two (`UnpreservableFrontmatter`, `ReplyCycle`).
+        // added two (`UnpreservableFrontmatter`, `ReplyCycle`), reaching 29. Stage 3 added the
+        // four note-lifecycle errors, which are the first errors in the crate about a *note*
+        // rather than a file.
         assert_eq!(
             samples.len(),
-            29,
-            "the stage-1b error taxonomy has 29 variants"
+            33,
+            "the stage-3 error taxonomy has 33 variants"
         );
     }
 
@@ -475,9 +511,21 @@ mod tests {
         }
     }
 
-    /// The two variants with no path must still identify what they concern.
+    /// Every variant with no path must still identify what it concerns.
     #[test]
     fn pathless_variants_still_identify_their_subject() {
+        // The note-lifecycle errors name an id, which is the whole of what is known: the failure
+        // is precisely that no file carries it.
+        for e in [
+            Error::NoteNotFound { id: uuid_b() },
+            Error::ReplyTargetMissing { id: uuid_b() },
+            Error::AlreadyTrashed { id: uuid_b() },
+            Error::NotTrashed { id: uuid_b() },
+        ] {
+            assert!(e.path().is_none(), "{e}");
+            assert!(e.to_string().contains(B), "{e}");
+        }
+
         let e = Error::SerializeFrontmatter {
             key: "title".into(),
             message: "boom".into(),
