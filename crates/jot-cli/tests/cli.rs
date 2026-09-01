@@ -172,7 +172,7 @@ fn ws_remove_unregisters_without_touching_the_directory() {
     vault.run(&["ws", "new", other.to_str().unwrap()]);
     assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 2);
 
-    vault.run(&["workspace", "remove", "other"]);
+    vault.run(&["workspace", "remove", "--name", "other"]);
 
     assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 1);
     // The whole point: unregistering is not deleting.
@@ -188,7 +188,7 @@ fn removing_the_current_workspace_clears_current_rather_than_dangling() {
     vault.run(&["ws", "new", other.to_str().unwrap()]);
     assert_eq!(current(&vault)["name"], "other");
 
-    vault.run(&["ws", "rm", "other"]);
+    vault.run(&["ws", "rm", "--name", "other"]);
 
     let entries = vault.json(&["ws", "ls"]);
     assert!(
@@ -209,7 +209,9 @@ fn ws_remove_accepts_an_id_and_rejects_an_unknown_target() {
         .unwrap()
         .to_owned();
 
-    assert_eq!(vault.code(&["ws", "rm", "no-such-thing"]), 3);
+    assert_eq!(vault.code(&["ws", "rm", "ffffffff"]), 3);
+    assert_eq!(vault.code(&["ws", "rm", "--name", "no-such-thing"]), 3);
+    // A bare argument is an id, here a prefix of one.
     vault.run(&["ws", "rm", &id[..8]]);
     assert!(vault.json(&["ws", "ls"]).as_array().unwrap().is_empty());
 }
@@ -333,7 +335,7 @@ fn the_test_suite_never_touches_the_real_registry() {
 }
 
 #[test]
-fn ws_use_accepts_a_name_or_an_id_prefix() {
+fn ws_use_selects_by_id_by_default_and_by_name_only_when_asked() {
     let vault = Vault::new();
     let other = vault.dir.path().join("other");
     std::fs::create_dir_all(&other).unwrap();
@@ -344,20 +346,44 @@ fn ws_use_accepts_a_name_or_an_id_prefix() {
     let id = first["id"].as_str().unwrap();
     let name = first["name"].as_str().unwrap();
 
-    // By name.
-    vault.run(&["ws", "use", name]);
-    assert_eq!(current(&vault)["id"], id);
+    let away = |v: &Vault| v.run(&["ws", "use", "--name", "other"]);
 
-    // By full id, after switching away.
-    vault.run(&["ws", "use", "other"]);
-    assert_ne!(current(&vault)["id"], id);
+    // A bare argument is an id.
+    away(&vault);
     vault.run(&["ws", "use", id]);
     assert_eq!(current(&vault)["id"], id);
 
-    // By id prefix.
-    vault.run(&["ws", "use", "other"]);
-    vault.run(&["ws", "use", &id[..8]]);
+    // …and so is `--id`, with a prefix.
+    away(&vault);
+    vault.run(&["ws", "use", "--id", &id[..8]]);
     assert_eq!(current(&vault)["id"], id);
+
+    // A name is only ever reached through `--name`.
+    away(&vault);
+    vault.run(&["ws", "use", "--name", name]);
+    assert_eq!(current(&vault)["id"], id);
+}
+
+#[test]
+fn a_name_passed_as_a_bare_argument_is_not_looked_up_as_a_name() {
+    // The point of the change: an argument's *meaning* must not depend on what is registered.
+    // `notes` is a real workspace name here and still fails, because a bare argument is an id.
+    let vault = Vault::new();
+    let path = vault.dir.path().join("notes");
+    std::fs::create_dir_all(&path).unwrap();
+    vault.run(&["ws", "new", path.to_str().unwrap()]);
+
+    assert_eq!(vault.code(&["ws", "use", "notes"]), 3);
+    vault.run(&["ws", "use", "--name", "notes"]);
+    assert_eq!(current(&vault)["name"], "notes");
+}
+
+#[test]
+fn ws_use_refuses_both_a_name_and_an_id_and_refuses_neither() {
+    let vault = Vault::new();
+    // clap's own XOR group: usage errors, exit 2.
+    assert_eq!(vault.code(&["ws", "use", "--id", "x", "--name", "y"]), 2);
+    assert_eq!(vault.code(&["ws", "use"]), 2);
 }
 
 #[test]
@@ -373,18 +399,9 @@ fn ws_use_can_reach_a_workspace_whose_name_is_not_unique() {
     }
 
     // The shared name is refused rather than guessed at.
-    let assertion = vault
-        .cmd()
-        .args([
-            "--workspace",
-            vault.path().to_str().unwrap(),
-            "ws",
-            "use",
-            "notes",
-        ])
-        .assert()
-        .failure();
-    assert_eq!(assertion.get_output().status.code(), Some(4));
+    assert_eq!(vault.code(&["ws", "use", "--name", "notes"]), 4);
+    // And as a bare argument it is an id, which nothing matches — not a silent fallback to a name.
+    assert_eq!(vault.code(&["ws", "use", "notes"]), 3);
 
     // Either one is reachable by id.
     for id in &ids {
@@ -396,7 +413,8 @@ fn ws_use_can_reach_a_workspace_whose_name_is_not_unique() {
 #[test]
 fn ws_use_on_something_unknown_exits_not_found() {
     let vault = Vault::new();
-    assert_eq!(vault.code(&["ws", "use", "no-such-workspace"]), 3);
+    assert_eq!(vault.code(&["ws", "use", "ffffffff"]), 3);
+    assert_eq!(vault.code(&["ws", "use", "--name", "no-such-workspace"]), 3);
 }
 
 #[test]

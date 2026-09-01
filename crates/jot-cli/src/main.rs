@@ -267,17 +267,60 @@ struct SearchArgs {
     trashed: bool,
 }
 
+/// How a command names the workspace it acts on: **by id, or by name, never both**.
+///
+/// # Why id is the default
+///
+/// A workspace name is display-only. It is seeded from the directory's basename at `init`,
+/// `workspace.toml` says it is "safe to edit by hand", and **nothing enforces uniqueness** — two
+/// vaults called `notes` under different parents are a normal state, as is one vault deleted and
+/// remade. The id is the identity: minted once, immutable, and what the registry keys on.
+///
+/// So a bare `jot workspace use <ID>` means the id, and a name has to be asked for explicitly. The
+/// previous behaviour — try the name, fall back to an id prefix — made the *meaning* of an argument
+/// depend on what happened to be registered, which is the wrong thing to be clever about when the
+/// answer decides where your notes get captured.
+#[derive(clap::Args)]
+#[command(group(
+    clap::ArgGroup::new("selector")
+        .required(true)
+        .args(["target", "id", "name"])
+))]
+struct WorkspaceSelector {
+    /// The workspace's id, or a unique prefix of it. Same as `--id`.
+    #[arg(value_name = "ID")]
+    target: Option<String>,
+
+    /// Select by id, or a unique prefix of it.
+    #[arg(long, value_name = "ID")]
+    id: Option<String>,
+
+    /// Select by name. Names are not unique, so this fails if more than one matches.
+    #[arg(long, value_name = "NAME")]
+    name: Option<String>,
+}
+
+impl WorkspaceSelector {
+    /// Resolve to exactly one registered workspace.
+    ///
+    /// The `ArgGroup` above makes the three forms mutually exclusive and requires one, so this
+    /// cannot see an empty or over-specified selector.
+    fn resolve(&self, registry: &jot_core::registry::Registry) -> Result<Uuid, Failure> {
+        match (&self.name, self.id.as_ref().or(self.target.as_ref())) {
+            (Some(name), _) => resolve_workspace_by_name(registry, name),
+            (None, Some(id)) => resolve_workspace_by_id(registry, id),
+            (None, None) => unreachable!("the `selector` group requires one of the three"),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum WsCommand {
     /// List registered workspaces.
     #[command(visible_alias = "ls")]
     List,
-    /// Make a workspace current, by name or by id.
-    Use {
-        /// The workspace's name, or its id (or a unique prefix of it).
-        #[arg(value_name = "NAME_OR_ID")]
-        target: String,
-    },
+    /// Make a workspace current.
+    Use(WorkspaceSelector),
     /// Register an existing workspace.
     Add {
         /// The directory holding `.jot/`.
@@ -293,11 +336,7 @@ enum WsCommand {
     },
     /// Unregister a workspace. The directory and its notes are left alone.
     #[command(visible_alias = "rm")]
-    Remove {
-        /// The workspace's name, or its id (or a unique prefix of it).
-        #[arg(value_name = "NAME_OR_ID")]
-        target: String,
-    },
+    Remove(WorkspaceSelector),
     /// Unregister every workspace whose directory is gone.
     Prune {
         /// Skip the confirmation prompt.
@@ -888,11 +927,11 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
             }
         }
 
-        WsCommand::Use { target } => {
-            let id = resolve_workspace(&registry, target)?;
+        WsCommand::Use(selector) => {
+            let id = selector.resolve(&registry)?;
             registry.set_current(id);
             context::save_registry(&registry)?;
-            let name = registry.get(id).map_or(target.as_str(), Entry::name);
+            let name = registry.get(id).map_or("?", Entry::name);
             eprintln!("jot: now using `{name}` ({id})");
         }
 
@@ -904,11 +943,11 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
             eprintln!("jot: registered `{}`", workspace.name());
         }
 
-        WsCommand::Remove { target } => {
-            let id = resolve_workspace(&registry, target)?;
+        WsCommand::Remove(selector) => {
+            let id = selector.resolve(&registry)?;
             let entry = registry
                 .remove(id)
-                .expect("resolve_workspace returned a live id");
+                .expect("the selector returned a live id");
             // `Registry::remove` deliberately leaves a dangling `current` alone — that is its
             // documented behaviour and right for a library — so the surface is what has to notice.
             // A `current` pointing at an entry that no longer exists would make the next bare
@@ -990,45 +1029,59 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
     Ok(())
 }
 
-/// Find the workspace `target` names: an exact name, or an id prefix.
+/// Find the workspace whose id starts with `prefix`.
 ///
-/// Name first, because that is what people type and what `ws new` prints. An id prefix is the
-/// fallback, and it is not a nicety — **two workspaces can share a name**, since the registry keys
-/// on id and a vault deleted and remade is a second entry. Without this, the second one is
-/// unreachable: matching by name alone would silently pick whichever came first, which is the
-/// "never guess between your things" rule broken in the one place it decides where notes land.
-///
-/// Ambiguity is reported with ids and paths and exits 4, exactly as an ambiguous note prefix does.
-fn resolve_workspace(
+/// The default path, because the id is the identity. Matching is case-insensitive against the
+/// hyphenated form, so a full id and a short prefix both work — the same rule
+/// [`Snapshot::resolve`](jot_core::snapshot::Snapshot::resolve) uses for notes.
+fn resolve_workspace_by_id(
     registry: &jot_core::registry::Registry,
-    target: &str,
+    prefix: &str,
 ) -> Result<Uuid, Failure> {
-    let by_name: Vec<&Entry> = registry
-        .entries()
-        .filter(|entry| entry.name() == target)
-        .collect();
-    if by_name.len() == 1 {
-        return Ok(by_name[0].id());
-    }
-    if by_name.len() > 1 {
-        return Err(ambiguous_workspace(target, &by_name, "share that name"));
-    }
-
-    let needle = target.trim().to_ascii_lowercase();
-    let by_id: Vec<&Entry> = registry
+    let needle = prefix.trim().to_ascii_lowercase();
+    let matched: Vec<&Entry> = registry
         .entries()
         .filter(|entry| !needle.is_empty() && entry.id().to_string().starts_with(&needle))
         .collect();
-    match by_id.len() {
-        1 => Ok(by_id[0].id()),
+
+    match matched.len() {
+        1 => Ok(matched[0].id()),
         0 => Err(Failure {
             error: anyhow::anyhow!(
-                "no registered workspace named `{target}`, and no id starts with it\n\
-                 hint: `jot ws ls` lists them"
+                "no registered workspace has an id starting with `{prefix}`\n\
+                 hint: `jot workspace list` shows the ids, or select by name with \
+                 `--name {prefix}`"
             ),
             code: EXIT_NOT_FOUND,
         }),
-        _ => Err(ambiguous_workspace(target, &by_id, "start with that id")),
+        _ => Err(ambiguous_workspace(prefix, &matched, "start with that id")),
+    }
+}
+
+/// Find the workspace called `name`.
+///
+/// Only ever an exact match, and it can legitimately find several: a workspace name is display-only
+/// and **nothing enforces uniqueness**, so two vaults can answer to one name. That is reported with
+/// their ids rather than guessed at, which is the whole reason the id is what a bare argument means.
+fn resolve_workspace_by_name(
+    registry: &jot_core::registry::Registry,
+    name: &str,
+) -> Result<Uuid, Failure> {
+    let matched: Vec<&Entry> = registry
+        .entries()
+        .filter(|entry| entry.name() == name)
+        .collect();
+
+    match matched.len() {
+        1 => Ok(matched[0].id()),
+        0 => Err(Failure {
+            error: anyhow::anyhow!(
+                "no registered workspace is named `{name}`\n\
+                 hint: `jot workspace list` shows the names"
+            ),
+            code: EXIT_NOT_FOUND,
+        }),
+        _ => Err(ambiguous_workspace(name, &matched, "share that name")),
     }
 }
 
@@ -1046,7 +1099,7 @@ fn ambiguous_workspace(target: &str, candidates: &[&Entry], why: &str) -> Failur
             entry.path().display()
         ));
     }
-    listing.push_str("hint: name one by its id, or a unique prefix of it");
+    listing.push_str("hint: select one by its id, or a unique prefix of it");
     Failure {
         error: anyhow::anyhow!(listing),
         code: EXIT_AMBIGUOUS,

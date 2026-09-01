@@ -29,8 +29,18 @@ really is a second entry. The listing now leads with the id, the same shape `jot
 
 Following from 2: `ws use <name>` matched on name and took the first hit, so the second workspace was
 **unreachable**, and one of two was picked silently. That is "never guess between your things" broken
-in the place that decides where notes get captured. It now takes a name **or** an id prefix, and a
-shared name is reported with candidates and exits 4.
+in the place that decides where notes get captured.
+
+The first fix accepted a name **or** an id prefix, trying the name first. That removed the
+unreachability but kept a subtler version of the same fault: the *meaning* of the argument depended
+on what happened to be registered. `jot workspace use notes` was a name lookup right up until
+someone registered a vault whose id started `notes`.
+
+**Settled**: id is what a bare argument means, with `--id` and `--name` as an exclusive, required
+`ArgGroup`. A workspace name is display-only — seeded from the directory basename, documented as
+safe to hand-edit, unique by no rule — so it is not a thing to resolve against by default. `--name`
+is an exact match that may find several and says so, exiting 4. `workspace remove` shares the
+selector so the two cannot drift.
 
 ## 4. Workspace ids are UUIDv4 — a ratified change to a stage 1 decision
 
