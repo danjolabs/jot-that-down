@@ -149,7 +149,10 @@ vault.
 sorts on it, and a random-from-bit-one id keeps `jot ws ls`'s short ids short. Vaults created before
 that change carry a v7 id and are read normally.
 
-`jot ws use` accepts a name or an id prefix. Names are not unique — the registry keys on id — so a
+Command names are full words — `list`, `remove`, `workspace` — with `ls`, `rm` and `ws` as aliases.
+Both spellings are stable; scripts may use either.
+
+`jot workspace use` accepts a name or an id prefix. Names are not unique — the registry keys on id — so a
 shared name is reported with candidates and exits 4 rather than picking one.
 
 ## `index status`

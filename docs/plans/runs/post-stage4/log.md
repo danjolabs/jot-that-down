@@ -117,9 +117,25 @@ edit. Now trimmed at both ends, which makes it idempotent — the property `edit
 on, since an unchanged body must re-render to identical bytes or every save moves mtime and
 `edited_at` with it.
 
-## Still open
+## 7. Nothing could unregister a workspace, and the names were abbreviations first
 
-- No `jot ws rm` or `jot ws prune`, so a stale registry entry can only go by hand-editing the file.
-  Found while looking at entry 2; not yet built.
+`workspace remove <name|id>` and `workspace prune` close the gap entry 2 opened: a stale registry
+entry could previously only go by hand-editing `workspaces.toml`.
+
+`prune` confirms before acting, which is worth defending because it looks like ceremony. `is_stale`
+is `!path.exists()`, so an external drive that is merely **unmounted** presents exactly as a deleted
+vault. Pruning it throws away the registration for a vault whose notes are fine. The prompt lists
+what will go and names that hazard; `--yes` skips it.
+
+`remove` says "the directory is untouched" on every run rather than only in `--help`. There are now
+two `remove`s and the other one moves a file.
+
+At the same time the command names were flipped: **the full word is the command, and `ls`/`rm`/`ws`
+are aliases**, where it used to be the reverse. Abbreviations are only obvious to someone who already
+knows the tool, and `--help` is read by someone who does not. It also disambiguates the two
+`remove`s: `jot remove` versus `jot workspace remove` is legible where `jot rm` versus `jot ws rm` is
+two characters. Nothing was taken away — both spellings work and both show in help.
+
+## Still open
 - The stage 3 and 4 acceptance suites still do not exist, and entry 4 is the second time that has
   mattered. `runs/stage3-4/log.md` recommends a verifier pass; this log restates it.

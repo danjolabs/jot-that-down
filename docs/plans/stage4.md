@@ -14,20 +14,33 @@ teaches. Plans written past this point are guesses; the CLI is where they start 
 
 ```text
 jot new [-t <title>] [--reply <id>] [--quote <id>] [-m <body>]
-jot ls [--flat] [--since <when>] [--limit <n>]
+jot list [--flat] [--since <when>] [--limit <n>]        # alias: ls
 jot show <id> [--raw]
-jot thread <id> [--tree | --path]
+jot thread <id> [--tree | --path | --segments]
 jot edit <id>
-jot rm <id>            # trash
+jot remove <id>        # trash; alias: rm
 jot restore <id>
 jot purge <id>         # irreversible; confirms
 jot trash              # list what is in the trash
 jot search <query> [--since] [--until]
 jot links <id>         # backlinks and quoted-by
 jot open <id>          # hands off to the desktop app (stage 6)
-jot ws ls | use <name|id> | add <path> | new <path> [--kind jot|plain]
+jot workspace list | use <name|id> | add <path> | new <path> [--kind jot|plain]
+              | remove <name|id> | prune            # alias: ws, and ls/rm within
 jot index status | rebuild
 ```
+
+### Names are words; the short forms are aliases
+
+**The full word is the command; `ls`, `rm` and `ws` are `visible_alias`es.** This was the other way
+around until dogfooding, and the reason for the flip is that abbreviations are only obvious to
+someone who already knows the tool. `jot remove` reads correctly to a person who has never run it;
+`jot rm` is muscle memory for a person who has. Both work, both appear in `--help`, and nothing is
+taken away — but the name that *teaches* is the one the help text leads with.
+
+It also removes a genuine ambiguity now that there are two `remove`s: `jot remove` trashes a note and
+`jot workspace remove` unregisters a workspace. Spelled out, the difference is legible; as `jot rm`
+and `jot ws rm` it is a diff of two characters.
 
 ### Input paths for `jot new`
 
@@ -203,7 +216,24 @@ injection.
 
 ## Two findings from dogfooding the workspace commands
 
-### `jot ws use` takes an id, because a name is not unique
+### `jot workspace remove` and `prune`, and why `prune` confirms
+
+Nothing could unregister a workspace: a stale entry could only go by hand-editing
+`workspaces.toml`. Two commands close that.
+
+`workspace remove <name|id>` unregisters one. It says *"the directory is untouched"* every time,
+unprompted, because there are now two `remove`s and the other one moves a file — someone arriving
+from `jot remove` should not have to wonder which kind this is. If the removed entry was current,
+the surface clears `current`: `Registry::remove` deliberately leaves a dangling one, which is right
+for a library and wrong to leave for the next bare `jot new`.
+
+`workspace prune` unregisters every entry whose directory is gone — and **confirms first**, which
+looks like ceremony and is not. "Stale" is `!path.exists()`, and an external drive that is merely
+*unmounted* is indistinguishable from a vault that was deleted. Pruning it discards the registration
+for a vault whose notes are perfectly fine, and getting it back means finding the path again. The
+prompt lists the candidates and says so; `--yes` skips it for scripts.
+
+### `jot workspace use` takes an id, because a name is not unique
 
 The registry keys on workspace **id** — correct, since the id lives in `workspace.toml` and survives
 the folder being moved. But that means two entries can share a name: two `notes` directories under

@@ -135,6 +135,136 @@ fn ws_new_on_an_existing_workspace_refuses_rather_than_overwriting() {
 }
 
 #[test]
+fn every_command_answers_to_its_full_word_and_its_short_alias() {
+    // The short forms are what the tests above use throughout, so this is the other half: the
+    // full word is the real name and must work everywhere the alias does.
+    let vault = Vault::new();
+    vault.new_note(&["-m", "a thought"]);
+
+    assert_eq!(vault.run(&["list"]), vault.run(&["ls"]));
+
+    // `remove` and its alias both trash, so they need separate notes.
+    for name in ["remove", "rm"] {
+        let id = vault.new_note(&["-m", "temporary"]);
+        vault.run(&[name, &id]);
+        assert_eq!(
+            vault.json(&["show", &id])["state"],
+            "trashed",
+            "`{name}` must trash"
+        );
+    }
+
+    // And nested, on both halves independently: `workspace`/`ws` and `list`/`ls`.
+    let expected = vault.run(&["ws", "ls"]);
+    for spelling in [["workspace", "list"], ["workspace", "ls"], ["ws", "list"]] {
+        assert_eq!(vault.run(&spelling), expected, "{spelling:?}");
+    }
+
+    // A group with no subcommand is a usage error, which is clap's behaviour and stays so.
+    assert_eq!(vault.code(&["workspace"]), 2);
+}
+
+#[test]
+fn ws_remove_unregisters_without_touching_the_directory() {
+    let vault = Vault::new();
+    let other = vault.dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    vault.run(&["ws", "new", other.to_str().unwrap()]);
+    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 2);
+
+    vault.run(&["workspace", "remove", "other"]);
+
+    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 1);
+    // The whole point: unregistering is not deleting.
+    assert!(other.join(".jot").is_dir(), "the vault survives");
+}
+
+#[test]
+fn removing_the_current_workspace_clears_current_rather_than_dangling() {
+    // `Registry::remove` leaves a dangling `current` by design, so the surface has to notice.
+    let vault = Vault::new();
+    let other = vault.dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    vault.run(&["ws", "new", other.to_str().unwrap()]);
+    assert_eq!(current(&vault)["name"], "other");
+
+    vault.run(&["ws", "rm", "other"]);
+
+    let entries = vault.json(&["ws", "ls"]);
+    assert!(
+        entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["current"] == false),
+        "no entry may still be marked current: {entries}"
+    );
+}
+
+#[test]
+fn ws_remove_accepts_an_id_and_rejects_an_unknown_target() {
+    let vault = Vault::new();
+    let id = vault.json(&["ws", "ls"])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    assert_eq!(vault.code(&["ws", "rm", "no-such-thing"]), 3);
+    vault.run(&["ws", "rm", &id[..8]]);
+    assert!(vault.json(&["ws", "ls"]).as_array().unwrap().is_empty());
+}
+
+#[test]
+fn ws_prune_removes_only_the_workspaces_whose_directory_is_gone() {
+    let vault = Vault::new();
+    let doomed = vault.dir.path().join("doomed");
+    std::fs::create_dir_all(&doomed).unwrap();
+    vault.run(&["ws", "new", doomed.to_str().unwrap()]);
+    std::fs::remove_dir_all(&doomed).unwrap();
+    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 2);
+
+    vault.run(&["ws", "prune", "--yes"]);
+
+    let entries = vault.json(&["ws", "ls"]);
+    let entries = entries.as_array().unwrap();
+    assert_eq!(entries.len(), 1, "only the missing one goes");
+    assert_eq!(entries[0]["path"], vault.path().to_str().unwrap());
+}
+
+#[test]
+fn ws_prune_confirms_first_and_declining_keeps_everything() {
+    // "Stale" is `!path.exists()`, and an unmounted drive looks exactly like a deleted vault, so
+    // this prompt is load-bearing rather than ceremonial.
+    let vault = Vault::new();
+    let doomed = vault.dir.path().join("doomed");
+    std::fs::create_dir_all(&doomed).unwrap();
+    vault.run(&["ws", "new", doomed.to_str().unwrap()]);
+    std::fs::remove_dir_all(&doomed).unwrap();
+
+    vault
+        .cmd()
+        .args(["--workspace", vault.path().to_str().unwrap(), "ws", "prune"])
+        .write_stdin("n\n")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("cancelled"));
+
+    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn ws_prune_on_a_healthy_registry_does_nothing_and_says_so() {
+    let vault = Vault::new();
+    vault
+        .cmd()
+        .args(["--workspace", vault.path().to_str().unwrap(), "ws", "prune"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("nothing to prune"));
+    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn ws_ls_marks_the_current_workspace() {
     let vault = Vault::new();
     let listing = vault.run(&["ws", "ls"]);

@@ -119,7 +119,8 @@ enum Command {
     /// Write a new note.
     New(NewArgs),
     /// List notes, newest first.
-    Ls(LsArgs),
+    #[command(visible_alias = "ls")]
+    List(LsArgs),
     /// Print one note in full.
     Show(ShowArgs),
     /// Print the thread a note belongs to.
@@ -127,7 +128,8 @@ enum Command {
     /// Change a note's title or body.
     Edit(EditArgs),
     /// Move a note to the trash.
-    Rm(IdArgs),
+    #[command(visible_alias = "rm")]
+    Remove(IdArgs),
     /// Bring a note back out of the trash.
     Restore(IdArgs),
     /// Delete a note for good. Irreversible.
@@ -139,8 +141,8 @@ enum Command {
     /// Show a note's links, backlinks, and quotes.
     Links(IdArgs),
     /// Manage workspaces.
-    #[command(subcommand)]
-    Ws(WsCommand),
+    #[command(subcommand, visible_alias = "ws")]
+    Workspace(WsCommand),
     /// Inspect the vault index.
     #[command(subcommand)]
     Index(IndexCommand),
@@ -268,7 +270,8 @@ struct SearchArgs {
 #[derive(Subcommand)]
 enum WsCommand {
     /// List registered workspaces.
-    Ls,
+    #[command(visible_alias = "ls")]
+    List,
     /// Make a workspace current, by name or by id.
     Use {
         /// The workspace's name, or its id (or a unique prefix of it).
@@ -287,6 +290,19 @@ enum WsCommand {
         /// `jot` for threaded UUID-named notes, `plain` for folders and free names.
         #[arg(long, default_value = "jot")]
         kind: String,
+    },
+    /// Unregister a workspace. The directory and its notes are left alone.
+    #[command(visible_alias = "rm")]
+    Remove {
+        /// The workspace's name, or its id (or a unique prefix of it).
+        #[arg(value_name = "NAME_OR_ID")]
+        target: String,
+    },
+    /// Unregister every workspace whose directory is gone.
+    Prune {
+        /// Skip the confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 }
 
@@ -320,7 +336,7 @@ fn run() -> Result<(), Failure> {
             clap_complete::generate(*shell, &mut command, name, &mut std::io::stdout());
             return Ok(());
         }
-        Command::Ws(ws) => return workspaces(ws, &cli, &style),
+        Command::Workspace(ws) => return workspaces(ws, &cli, &style),
         _ => {}
     }
 
@@ -332,18 +348,18 @@ fn run() -> Result<(), Failure> {
 
     match command {
         Command::New(args) => new(&mut context.workspace, args, &cli, &style),
-        Command::Ls(args) => list(&context.workspace, args, &cli, &style),
+        Command::List(args) => list(&context.workspace, args, &cli, &style),
         Command::Show(args) => show(&context.workspace, args, &cli, &style),
         Command::Thread(args) => thread(&context.workspace, args, &cli, &style),
         Command::Edit(args) => edit(&mut context.workspace, args, &cli, &style),
-        Command::Rm(args) => remove(&mut context.workspace, args, &style),
+        Command::Remove(args) => remove(&mut context.workspace, args, &style),
         Command::Restore(args) => restore(&mut context.workspace, args, &style),
         Command::Purge(args) => purge(&mut context.workspace, args, &style),
         Command::Trash => trash(&context.workspace, &cli, &style),
         Command::Search(args) => search(&context.workspace, args, &cli, &style),
         Command::Links(args) => links(&context.workspace, args, &cli, &style),
         Command::Index(args) => index(&mut context.workspace, args, &cli),
-        Command::Ws(_) | Command::Completions { .. } => unreachable!("handled above"),
+        Command::Workspace(_) | Command::Completions { .. } => unreachable!("handled above"),
     }
 }
 
@@ -711,16 +727,9 @@ fn purge(workspace: &mut Workspace, args: &PurgeArgs, style: &Style) -> Result<(
         let title = meta
             .and_then(|meta| meta.title.clone())
             .unwrap_or_else(|| "Untitled".into());
-        eprint!("jot: permanently delete {id} ({title})? this cannot be undone [y/N] ");
-        std::io::stderr().flush().map_err(anyhow::Error::from)?;
-
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .context("cannot read a confirmation")
-            .map_err(Failure::runtime)?;
-        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            eprintln!("jot: cancelled");
+        if !confirm(&format!(
+            "permanently delete {id} ({title})? this cannot be undone"
+        ))? {
             return Ok(());
         }
     }
@@ -842,7 +851,7 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
     let mut registry = context::load_registry()?;
 
     match command {
-        WsCommand::Ls => {
+        WsCommand::List => {
             let entries: Vec<&Entry> = registry.entries().collect();
             if cli.json {
                 emit(&json!(
@@ -893,6 +902,73 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
                 .map_err(Failure::runtime)?;
             register(&mut registry, &workspace)?;
             eprintln!("jot: registered `{}`", workspace.name());
+        }
+
+        WsCommand::Remove { target } => {
+            let id = resolve_workspace(&registry, target)?;
+            let entry = registry
+                .remove(id)
+                .expect("resolve_workspace returned a live id");
+            // `Registry::remove` deliberately leaves a dangling `current` alone — that is its
+            // documented behaviour and right for a library — so the surface is what has to notice.
+            // A `current` pointing at an entry that no longer exists would make the next bare
+            // `jot new` fail with nothing to act on.
+            if registry.current() == Some(id) {
+                registry.clear_current();
+            }
+            context::save_registry(&registry)?;
+
+            eprintln!("jot: unregistered `{}` ({id})", entry.name());
+            // Said every time, unprompted. `remove` is about the *registry*, and someone typing it
+            // after `jot rm` — which does move a file — should not have to wonder.
+            eprintln!(
+                "jot: the directory is untouched: {}",
+                entry.path().display()
+            );
+        }
+
+        WsCommand::Prune { yes } => {
+            let stale: Vec<(Uuid, String, PathBuf)> = registry
+                .stale_entries()
+                .map(|entry| {
+                    (
+                        entry.id(),
+                        entry.name().to_owned(),
+                        entry.path().to_path_buf(),
+                    )
+                })
+                .collect();
+
+            if stale.is_empty() {
+                eprintln!("jot: nothing to prune — every registered workspace is present");
+                return Ok(());
+            }
+
+            for (id, name, path) in &stale {
+                eprintln!("  {id}  {name}  {}", path.display());
+            }
+            // Confirmed even though nothing on disk is deleted, because "stale" is
+            // `!path.exists()` — and an external drive that is merely **unmounted** looks exactly
+            // like a vault that is gone. Pruning that loses the registration for a vault whose
+            // notes are perfectly fine, and re-adding it means finding the path again.
+            if !yes
+                && !confirm(&format!(
+                    "unregister {} workspace(s) whose directory is missing? \
+                     check that none is on an unmounted drive",
+                    stale.len()
+                ))?
+            {
+                return Ok(());
+            }
+
+            for (id, _, _) in &stale {
+                registry.remove(*id);
+                if registry.current() == Some(*id) {
+                    registry.clear_current();
+                }
+            }
+            context::save_registry(&registry)?;
+            eprintln!("jot: pruned {} workspace(s)", stale.len());
         }
 
         WsCommand::New { path, kind } => {
@@ -1011,6 +1087,27 @@ fn register(registry: &mut jot_core::registry::Registry, workspace: &Workspace) 
 // =============================================================================================
 // Shared helpers
 // =============================================================================================
+
+/// Ask a yes/no question on stderr. `false` means the caller should stop.
+///
+/// Defaults to no, and anything that is not `y`/`yes` is a no: a prompt that proceeds on a stray
+/// keystroke is not a confirmation. The question goes to stderr so a piped stdout stays clean.
+fn confirm(question: &str) -> Result<bool, Failure> {
+    eprint!("jot: {question} [y/N] ");
+    std::io::stderr().flush().map_err(anyhow::Error::from)?;
+
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .context("cannot read a confirmation")
+        .map_err(Failure::runtime)?;
+
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Ok(true);
+    }
+    eprintln!("jot: cancelled");
+    Ok(false)
+}
 
 /// Write a JSON value to stdout, one document, newline-terminated.
 fn emit(value: &serde_json::Value) -> Result<(), Failure> {
