@@ -76,6 +76,9 @@ jot-that-down/
 
 The shape every stage builds toward. Stages 1–3 fill it in; stages 4–6 only consume it.
 
+**Built as of stages 3–4** (see the build-order note below). Three signatures moved from the
+original sketch; each is marked and explained.
+
 ```rust
 impl Workspace {
     // lifecycle of the workspace itself
@@ -84,6 +87,7 @@ impl Workspace {
     fn discover(from: &Path) -> Result<Self>;   // walk up looking for .jot/
     fn sync(&mut self) -> Result<SyncReport>;   // incremental; cheap, run before reads
     fn rebuild(&mut self) -> Result<SyncReport>;// from scratch
+    fn snapshot(&self) -> &Snapshot;            // the in-memory vault view
 
     // lifecycle of a note
     fn create(&mut self, draft: Draft) -> Result<Note>;
@@ -94,16 +98,29 @@ impl Workspace {
 
     // reading
     fn get(&self, id: NoteId) -> Result<Option<Note>>;
-    fn resolve(&self, prefix: &str) -> Result<Resolution>;  // git-style short ids
-    fn timeline(&self, q: TimelineQuery) -> Result<Page<NoteMeta>>;
-    fn thread(&self, id: NoteId) -> Result<Thread>;         // ancestors + descendant tree
-    fn files(&self, sort: FileSort) -> Result<Vec<NoteMeta>>;
-    fn search(&self, q: SearchQuery) -> Result<Vec<NoteMeta>>;
-    fn backlinks(&self, id: NoteId) -> Result<Vec<NoteMeta>>;
-    fn quoted_by(&self, id: NoteId) -> Result<Vec<NoteMeta>>;
-    fn trashed(&self) -> Result<Vec<NoteMeta>>;
+    fn resolve(&self, prefix: &str) -> Resolution;      // CHANGED: infallible
+    fn reference(&self, id: NoteId) -> Ref;             // the three-state resolution
+    fn timeline(&self, q: &TimelineQuery) -> Page<Row>; // CHANGED: Row, not NoteMeta
+    fn thread(&self, id: NoteId) -> Option<Thread>;     // CHANGED: Option, not Result
+    fn files(&self, sort: FileSort) -> Vec<Row>;
+    fn search(&self, q: &SearchQuery) -> Vec<Row>;
+    fn backlinks(&self, id: NoteId) -> Vec<NoteMeta>;
+    fn quoted_by(&self, id: NoteId) -> Vec<NoteMeta>;
+    fn trashed(&self) -> Vec<Row>;
+    fn links_in(&self, id: NoteId) -> Result<Vec<(Link, Ref)>>;
 }
 ```
+
+Three deliberate departures from the sketch:
+
+- **The reads are not `Result`.** They answer from an in-memory snapshot that `sync()` already
+  built, so there is nothing left to fail. `Result` on a read that cannot fail is a lie the caller
+  pays for at every call site. The two that stayed fallible — `get` and `links_in` — genuinely
+  re-read the file, because bodies are not in the snapshot.
+- **`timeline`, `files`, `search`, and `trashed` return `Row`, not `NoteMeta`.** A list view needs
+  its reply counts and its parent's state, and computing those per row is the N+1 stage 3 names as
+  its performance trap. `Row` carries them, filled during the same pass that selects the rows.
+- **`thread` returns `Option`, not `Result`.** "No note with this id" is an answer, not a failure.
 
 ## Stages
 
@@ -126,6 +143,24 @@ to skip ahead: every shortcut taken in 1–3 is paid for three times over in 4�
 
 The first moment the app is genuinely usable is **the end of stage 4**. Dogfood from there; let real
 use reorder everything after it.
+
+### Build order changed: 1b → 3 → 4 → 2
+
+Stages 3 and 4 were built **before** stage 2, and stage 2's SQLite index does not exist yet.
+
+The reason it was safe: nothing in stages 3 or 4 is *only* obtainable from a database. Threads,
+reference resolution, links, backlinks, and prefix resolution are all functions of the set of notes
+in the vault, and the index is a **speed** layer over that set. So `jot-core` grew
+`snapshot::Snapshot` — one scan of the vault into a `BTreeMap`, deliberately shaped like the tables
+it stands in for, with `Snapshot::get`/`thread`/`resolve`/`backlinks` mirroring the queries
+`stage2.md` specifies. The public `Workspace` API is the one above either way, which makes stage 2 a
+substitution behind the seam rather than a rewrite in front of it.
+
+What this bought: the domain got exercised against a real surface, by hand, weeks earlier — which is
+the whole argument `stage4.md` makes for building the CLI early, applied one stage further back.
+What it costs is written up in [stage2.md](stage2.md) under "What the snapshot leaves for this
+stage". The costs are all *performance* costs, which is the correct shape for a deferred index. If
+they were correctness costs the deferral would have been a mistake.
 
 ## Cross-cutting conventions
 

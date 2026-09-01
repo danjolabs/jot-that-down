@@ -9,6 +9,11 @@ to hold now and impossible to retrofit once queries start depending on state the
 **Not in this stage.** Note creation, threads, links-as-a-feature. This stage reads what stage 1
 writes and answers "what is in this vault?".
 
+> **Reordered.** Stages 3 and 4 were built before this one, against `snapshot::Snapshot` — a scan of
+> the vault into memory, shaped like the tables below. See "What the snapshot leaves for this stage"
+> at the foot of this file before starting: this stage is now a **substitution behind an existing
+> seam**, not a greenfield build, and the acceptance criteria below are joined by a new one.
+
 ## Schema
 
 ```sql
@@ -160,3 +165,47 @@ Enough to prove the schema; the surfaces come later.
   keep the lexicographically-first path; do not silently pick one.
 - **mtime granularity** differs across filesystems. The hash fallback covers it; never make mtime alone
   authoritative.
+
+## What the snapshot leaves for this stage
+
+Stages 3 and 4 shipped against `jot-core`'s `snapshot::Snapshot` rather than SQLite. Everything the
+domain needs turned out to be a function of the set of notes in the vault, so the index was never
+load-bearing for *correctness* — only for speed. That is the right shape for a deferred index, and
+it makes this stage a swap rather than a rewrite.
+
+### What already exists, and maps one-to-one
+
+| This stage's query | Already implemented as |
+| --- | --- |
+| `SELECT … WHERE id = ?` | `Snapshot::get` |
+| `tree(root_id)` | `Snapshot::thread`, `Snapshot::ancestors` |
+| `resolve_prefix(prefix)` | `Snapshot::resolve` |
+| `timeline_roots` / `timeline_flat` | `Snapshot::timeline` (with the orphan clause) |
+| `search(title_like, …)` | `Snapshot::search` |
+| `links` / `backlinks(id)` | `Record::links`, `Snapshot::backlinks` |
+| `SyncReport { added, updated, removed, unchanged, problems }` | `Snapshot::diff` |
+
+`Workspace::sync` and `Workspace::rebuild` already exist with the right signatures and are already
+called by the CLI before reads. **Their meanings must not change** when SQLite lands: today they are
+synonyms because every scan is a cold one, and the moment `sync` becomes incremental the rebuild
+invariant stops being trivially true and starts being the thing to test.
+
+### What the snapshot does *not* do — this stage's actual work
+
+- **No `files` table.** There is no `(size, mtime_ns, content_hash)` fast path, so every `sync()`
+  reads and reparses every note. This is the whole performance story and the reason the stage
+  exists. "Touching a file without changing its content produces zero reparses" is currently
+  **false**, and is an acceptance criterion here.
+- **No persistence.** The scan is per-process. A CLI invocation pays a full vault read at startup —
+  fine at hundreds of notes, and the thing to measure at 10k. `stage4.md` budgets `jot new` at under
+  100 ms warm; that budget is currently met by the vault being small, not by the code being fast.
+- **No hash fallback**, so mtime granularity is not yet a concern — and must become one.
+- **Bodies are read and discarded** on every scan, for link extraction. Stage 2's `links` table is
+  what stops that being paid repeatedly.
+
+### One new acceptance criterion
+
+- **The swap is invisible.** With SQLite behind it, the whole of `crates/jot-cli` and every existing
+  `jot-core` test must pass **unchanged**. The 423 tests that exist at the end of stage 4 are the
+  regression suite for this stage; if any public signature has to move to accommodate a database,
+  the seam was in the wrong place and that is the finding, not the change.

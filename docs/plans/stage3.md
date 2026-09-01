@@ -9,6 +9,12 @@ implicit here gets reimplemented three times, slightly differently.
 
 **Not in this stage.** Anything a person can type at. Still library-only.
 
+> **Built, and built before stage 2.** Everything below is implemented in `jot-core` against
+> `snapshot::Snapshot` rather than SQLite — see [overview.md](overview.md), "Build order changed".
+> No rule in this document was weakened to make that work; the index was only ever the *fast* way to
+> get the note set, and a scan is the slow way to get the same one. Two findings from the build are
+> recorded at the foot of this file.
+
 ## Note lifecycle
 
 | Operation | Filesystem | Index | Frontmatter |
@@ -174,3 +180,22 @@ call the renderer.
   which `Workspace::open_note` already does. The original concern, kept for the shape of it:
   bumping it on a no-op save makes every note look recently touched and
   poisons the "recently edited" sort in stage 5. Compare content before writing.
+
+## Findings from the build
+
+### `relation:root` on a reply to a note whose own root is missing
+
+`create` copies the parent's `relation:root`. A parent that is itself missing that key — hand-edited,
+or written by something else — leaves nothing to copy. The rule implemented: **fall back to the
+parent's own id.** It keeps the reply grouped with the only ancestor actually known, and it never
+invents a root by walking, because walking is `open_note`'s repair job and doing it here would make
+`create` a write to a second file.
+
+### The reply-to-a-trashed-note case is load-bearing
+
+`create` rejects a `reply_to` that resolves to nothing and **permits** one that resolves to a
+trashed note, exactly as this document specifies. Worth keeping the reason visible: trash never
+cascades, so a trashed note is still a real note with live replies underneath it, and refusing to
+reply to one would make the trash a place threads go to die. `Error::ReplyTargetMissing` is
+therefore about absence only, and is a separate variant from `Error::NoteNotFound` because the
+subject differs — the note you asked for is fine, it is the parent that is gone.
