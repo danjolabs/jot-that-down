@@ -53,6 +53,7 @@
 //! read *before* the rest of the manifest is deserialized, so a future manifest that also adds
 //! required keys still reports "written by a newer version" rather than an unhelpful parse error.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
@@ -65,7 +66,7 @@ use crate::note::{Note, NoteId, NoteMeta};
 use crate::query::{
     Draft, Edit, FileSort, Page, Ref, Resolution, Row, SearchQuery, State, TimelineQuery,
 };
-use crate::snapshot::{Snapshot, SyncReport};
+use crate::snapshot::{Problem, Snapshot, SyncReport};
 use crate::thread::Thread;
 
 /// The manifest schema version this build writes, and the highest it will open.
@@ -795,10 +796,61 @@ impl Workspace {
         self.sync()
     }
 
-    /// The current in-memory view of the vault.
-    #[must_use]
-    pub fn snapshot(&self) -> &Snapshot {
+    /// The in-memory view, for this module's own tests only.
+    ///
+    /// **Deliberately not public.** It used to be, and `jot-cli` reached through it for four
+    /// different things — which made the index's *representation* part of the API. Stage 2 puts
+    /// SQLite here, and there is no `&Snapshot` to hand back once it does; the four methods below
+    /// are what the surfaces actually needed, and each of them is answerable by a query. See
+    /// `docs/plans/stage2.md`, "the swap is invisible".
+    #[cfg(test)]
+    fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+
+    /// How many notes the vault holds, as `(active, trashed)`.
+    #[must_use]
+    pub fn counts(&self) -> (usize, usize) {
+        self.snapshot.counts()
+    }
+
+    /// What the last scan could not make sense of.
+    ///
+    /// Never empty-by-error: a problem is something to tell a person about, not something that
+    /// stops a command. The full list from the current scan, not a diff.
+    #[must_use]
+    pub fn problems(&self) -> &[Problem] {
+        self.snapshot.problems()
+    }
+
+    /// The shortest id prefix that is unique *in this vault*, per note, floored at `min`.
+    ///
+    /// A property of the vault rather than of any one id, which is why it is asked of the
+    /// workspace and why it never enters `--json`. See [`crate::shortid`].
+    #[must_use]
+    pub fn abbreviations(&self, min: usize) -> BTreeMap<NoteId, String> {
+        self.snapshot.abbreviations(min)
+    }
+
+    /// A note's indexed metadata, without touching the file.
+    ///
+    /// This is the cheap read. [`Workspace::get`] is the one that re-reads the file and so is the
+    /// only one a write may be built from — an index row carries no unknown frontmatter keys, and
+    /// writing one back would destroy them.
+    ///
+    /// `None` when the vault holds no note with this id.
+    #[must_use]
+    pub fn meta(&self, id: NoteId) -> Option<&NoteMeta> {
+        self.snapshot.get(id).map(|record| &record.meta)
+    }
+
+    /// Whether a note is active or trashed, decided by the directory its file is in.
+    ///
+    /// `None` when the vault holds no note with this id — which a caller rendering a dangling
+    /// reference must distinguish from [`State::Active`].
+    #[must_use]
+    pub fn state_of(&self, id: NoteId) -> Option<State> {
+        self.snapshot.get(id).map(|record| record.state)
     }
 
     // =========================================================================================

@@ -383,7 +383,7 @@ fn run() -> Result<(), Failure> {
     report_problems(&context.workspace);
     // Short ids are only meaningful against the vault they have to be distinct from, so the table
     // is built once here, after the workspace is open and before anything is rendered.
-    let style = style.with_abbreviations(context.workspace.snapshot().abbreviations(MIN_ID_WIDTH));
+    let style = style.with_abbreviations(context.workspace.abbreviations(MIN_ID_WIDTH));
 
     match command {
         Command::New(args) => new(&mut context.workspace, args, &cli, &style),
@@ -407,7 +407,7 @@ fn run() -> Result<(), Failure> {
 /// Warnings go to stderr precisely so that `jot ls --json | jq` keeps working while a broken file
 /// is still being complained about.
 fn report_problems(workspace: &Workspace) {
-    let problems = workspace.snapshot().problems();
+    let problems = workspace.problems();
     if !problems.is_empty() {
         eprintln!("{}", output::problems(problems));
     }
@@ -451,10 +451,7 @@ fn resolve(workspace: &Workspace, prefix: &str, style: &Style) -> Result<NoteId,
 
 /// The state a note is in, for rendering.
 fn state_of(workspace: &Workspace, id: NoteId) -> State {
-    workspace
-        .snapshot()
-        .get(id)
-        .map_or(State::Active, |record| record.state)
+    workspace.state_of(id).unwrap_or(State::Active)
 }
 
 // =============================================================================================
@@ -762,7 +759,7 @@ fn purge(workspace: &mut Workspace, args: &PurgeArgs, style: &Style) -> Result<(
     let id = resolve(workspace, &args.id, style)?;
 
     if !args.yes {
-        let meta = workspace.snapshot().get(id).map(|record| &record.meta);
+        let meta = workspace.meta(id);
         let title = meta
             .and_then(|meta| meta.title.clone())
             .unwrap_or_else(|| "Untitled".into());
@@ -859,7 +856,7 @@ fn index(workspace: &mut Workspace, command: &IndexCommand, cli: &Cli) -> Result
         IndexCommand::Status => workspace.sync().map_err(anyhow::Error::from)?,
         IndexCommand::Rebuild => workspace.rebuild().map_err(anyhow::Error::from)?,
     };
-    let (active, trashed) = workspace.snapshot().counts();
+    let (active, trashed) = workspace.counts();
 
     if cli.json {
         emit(&json!({
