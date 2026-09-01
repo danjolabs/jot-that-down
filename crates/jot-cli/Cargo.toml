@@ -1,0 +1,27 @@
+[package]
+name = "jot-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "`jot` — the command-line surface over jot-core."
+
+[[bin]]
+name = "jot"
+path = "src/main.rs"
+
+[dependencies]
+jot-core = { path = "../jot-core" }
+
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }

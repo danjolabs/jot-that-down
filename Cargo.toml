@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/jot-core"]
+default-members = ["crates/jot-core", "crates/jot-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -29,5 +29,15 @@ toml = "1.1"
 uuid = { version = "1.26", features = ["serde", "v7"] }
 yaml_serde = "0.10.7"
 
+# Surface-only, added for stage 4's CLI. None of these may reach `jot-core`: `anyhow` is the
+# binaries' error type by convention (`overview.md`), and a `clap` or `serde_json` type in a core
+# signature would make the domain depend on how one surface happens to present it.
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = "4.5"
+serde_json = "1.0"
+
 # dev only
+assert_cmd = "2.0"
+predicates = "3.1"
 tempfile = "3.27"
