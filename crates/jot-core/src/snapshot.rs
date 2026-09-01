@@ -600,23 +600,11 @@ impl Snapshot {
     /// hyphenated id, so anything printed can be handed straight back to [`Snapshot::resolve`].
     #[must_use]
     pub fn abbreviations(&self, min: usize) -> BTreeMap<NoteId, String> {
-        // Ids arrive in sorted order, so the only ids that can share a long prefix with any given
-        // one are its immediate neighbours. That makes this a single linear pass rather than the
-        // quadratic all-pairs comparison.
-        let ids: Vec<String> = self.records.keys().map(ToString::to_string).collect();
-        self.records
-            .keys()
-            .enumerate()
-            .map(|(i, id)| {
-                let needed = [i.checked_sub(1), (i + 1 < ids.len()).then_some(i + 1)]
-                    .into_iter()
-                    .flatten()
-                    .map(|other| common_prefix(&ids[i], &ids[other]) + 1)
-                    .max()
-                    .unwrap_or(0);
-                let width = needed.max(min).min(ids[i].len());
-                (*id, ids[i][..width].to_owned())
-            })
+        // The rule itself lives in `shortid`, because workspace ids in the registry need exactly
+        // the same treatment and for exactly the same reason. This is the note-id view of it.
+        crate::shortid::abbreviate(self.records.keys().map(NoteId::as_uuid), min)
+            .into_iter()
+            .map(|(id, short)| (NoteId::from(id), short))
             .collect()
     }
 
@@ -642,11 +630,6 @@ impl Snapshot {
             .map(|record| record.meta.clone())
             .collect()
     }
-}
-
-/// How many leading bytes two ids share. Both are ASCII hex and hyphens, so bytes are characters.
-fn common_prefix(a: &str, b: &str) -> usize {
-    a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
 }
 
 /// The distinct link targets in a body, in first-appearance order.

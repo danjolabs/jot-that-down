@@ -10,6 +10,7 @@ pub mod link;
 pub mod note;
 pub mod query;
 pub mod registry;
+pub mod shortid;
 pub mod snapshot;
 pub mod thread;
 pub mod workspace;

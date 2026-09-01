@@ -159,6 +159,34 @@ pub fn row(row: &Row, style: &Style) -> String {
     line
 }
 
+/// One `jot ws ls` row: `<marker> <id>  <name>  <path>`.
+///
+/// Shaped like [`row`] on purpose — id first, then the human label, then the detail — because a
+/// workspace listing answers the same question a note listing does: *which one of these do I mean?*
+/// The id is what makes that answerable when two rows share a name, which happens whenever a vault
+/// is deleted and remade, since the registry keys on the id rather than the path.
+///
+/// `id_text` is precomputed by the caller: an abbreviation is only meaningful relative to the set
+/// it has to be unique within, and that set is the registry rather than any vault.
+pub fn workspace(
+    entry: &jot_core::registry::Entry,
+    id_text: &str,
+    current: bool,
+    style: &Style,
+) -> String {
+    let marker = if current { "*" } else { " " };
+    // A stale entry is a registered path that is no longer there. Said plainly, because it is
+    // usually a moved folder rather than a lost vault.
+    let stale = if entry.is_stale() { "  (missing)" } else { "" };
+    format!(
+        "{marker} {}  {}  {}{}",
+        style.paint("33", id_text),
+        style.paint("1", entry.name()),
+        entry.path().display(),
+        style.dim(stale)
+    )
+}
+
 /// A note in full: its metadata, then its body.
 pub fn show(note: &jot_core::note::Note, state: State, style: &Style) -> String {
     let meta = note.meta();

@@ -1,0 +1,18 @@
+# jot workspace manifest.
+# `id` is minted once and must never change — it is what makes this directory self-identifying.
+# `name` is display-only and safe to edit by hand.
+
+schema_version = 1
+
+[workspace]
+id = "01a05a67-ec57-7f02-b760-74c94fc3bd02"
+kind = "jot"
+name = "jot-workspace"
+
+[schema]
+frontmatter = [
+    "title",
+    "relation:root",
+    "relation:reply_to",
+    "relation:quote",
+]

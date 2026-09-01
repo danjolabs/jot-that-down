@@ -1,0 +1,4 @@
+# The SQLite index is derived from the notes and is disposable. Never commit it.
+index.db*
+# Staging area for atomic writes. Never holds anything worth keeping.
+tmp/

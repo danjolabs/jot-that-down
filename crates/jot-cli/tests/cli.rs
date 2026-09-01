@@ -50,9 +50,19 @@ impl Vault {
         String::from_utf8(output.get_output().stdout.clone()).unwrap()
     }
 
-    /// Run a command against this vault explicitly.
+    /// Run a command against this vault explicitly, with full UUIDs.
+    ///
+    /// `--long` by default so assertions can name an id without depending on how wide the
+    /// abbreviation happens to be. Use [`Vault::run_short`] to exercise the abbreviated form.
     fn run(&self, args: &[&str]) -> String {
         let mut full = vec!["--workspace", self.path().to_str().unwrap(), "--long"];
+        full.extend_from_slice(args);
+        self.jot(&full)
+    }
+
+    /// Run a command against this vault with ids abbreviated, as a person sees them.
+    fn run_short(&self, args: &[&str]) -> String {
+        let mut full = vec!["--workspace", self.path().to_str().unwrap()];
         full.extend_from_slice(args);
         self.jot(&full)
     }
@@ -114,6 +124,48 @@ fn ws_ls_marks_the_current_workspace() {
     let vault = Vault::new();
     let listing = vault.run(&["ws", "ls"]);
     assert!(listing.contains('*'), "{listing}");
+}
+
+#[test]
+fn ws_ls_leads_with_an_id_the_way_ls_does() {
+    let vault = Vault::new();
+    let listing = vault.run_short(&["ws", "ls"]);
+    let row = listing.lines().next().unwrap();
+
+    let id = vault.json(&["ws", "ls"])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let short = row_id(row);
+    assert!(id.starts_with(short), "`{short}` is not a prefix of {id}");
+    assert!(row.contains(vault.path().to_str().unwrap()), "{row}");
+    assert!(row.contains(vault.path().file_name().unwrap().to_str().unwrap()));
+}
+
+#[test]
+fn two_workspaces_with_one_name_are_told_apart_by_their_ids() {
+    // The registry keys on workspace id, so a directory deleted and remade is a second entry with
+    // the same name. Without an id in the listing the two rows are indistinguishable.
+    let vault = Vault::new();
+    let other = vault.dir.path().join("second");
+    std::fs::create_dir_all(&other).unwrap();
+    vault.run(&["ws", "new", other.to_str().unwrap()]);
+
+    let listing = vault.run_short(&["ws", "ls"]);
+    let ids: Vec<&str> = listing.lines().map(row_id).collect();
+    assert_eq!(ids.len(), 2, "{listing}");
+    assert_ne!(ids[0], ids[1], "the two rows must be distinguishable");
+}
+
+#[test]
+fn ws_ls_long_prints_full_workspace_uuids() {
+    let vault = Vault::new();
+    let listing = vault.run(&["ws", "ls"]);
+    let id = vault.json(&["ws", "ls"])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(listing.contains(&id), "{listing}");
 }
 
 // =============================================================================================
@@ -691,6 +743,13 @@ fn bare_jot_prints_help_rather_than_failing() {
         .assert()
         .success()
         .stdout(predicates::str::contains("Usage:"));
+}
+
+/// The id token of a `jot ws ls` row, skipping the `*` current-workspace marker.
+fn row_id(row: &str) -> &str {
+    row.split_whitespace()
+        .find(|token| *token != "*")
+        .expect("every row leads with an id")
 }
 
 /// How many notes are in the vault root.

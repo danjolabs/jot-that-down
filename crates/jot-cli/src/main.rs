@@ -34,8 +34,9 @@ use context::Context;
 use jot_core::note::{Note, NoteId};
 use jot_core::query::{Draft, Edit, FileSort, Resolution, SearchQuery, State, TimelineQuery};
 use jot_core::registry::Entry;
+use jot_core::shortid;
 use jot_core::workspace::{Workspace, WorkspaceKind};
-use output::{MIN_ID_WIDTH, Style};
+use output::{IdWidth, MIN_ID_WIDTH, Style};
 use serde_json::json;
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -844,20 +845,20 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
             } else if entries.is_empty() {
                 eprintln!("jot: no registered workspaces — try `jot ws new <path>`");
             } else {
+                // Workspace ids are UUIDv7 like note ids, so they carry the same timestamp prefix
+                // and need the same treatment: two workspaces created in one minute would share
+                // eight characters. The set to be unique within is the registry.
+                let short = shortid::abbreviate(entries.iter().map(|e| e.id()), MIN_ID_WIDTH);
                 for entry in entries {
-                    let marker = if registry.current() == Some(entry.id()) {
-                        "*"
-                    } else {
-                        " "
+                    let id_text = match style.width {
+                        IdWidth::Long => entry.id().to_string(),
+                        IdWidth::Abbreviated => short
+                            .get(&entry.id())
+                            .cloned()
+                            .unwrap_or_else(|| entry.id().to_string()),
                     };
-                    // A stale entry is a registered path that is no longer there. Said plainly,
-                    // because it is usually a moved folder rather than a lost vault.
-                    let stale = if entry.is_stale() { "  (missing)" } else { "" };
-                    println!(
-                        "{marker} {}  {}{stale}",
-                        entry.name(),
-                        entry.path().display()
-                    );
+                    let current = registry.current() == Some(entry.id());
+                    println!("{}", output::workspace(entry, &id_text, current, style));
                 }
             }
         }

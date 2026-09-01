@@ -22,16 +22,17 @@ would treat a change to a database schema.
 
 ## Short ids are *not* in JSON, and why
 
-`jot` prints an abbreviated id in human output. It is not a fixed eight characters, and it is not
-in the JSON.
+`jot` prints an abbreviated id in human output — for notes, and for workspaces in `jot ws ls`. It is
+not a fixed eight characters, and it is not in the JSON.
 
 Git's short ids work because a SHA is random from its first bit. **A UUIDv7's leading 48 bits are a
 millisecond timestamp**, so eight hex characters cover only the top 32 of them — one shared value
 per roughly 65 seconds. Notes captured in the same minute share their first eight characters almost
 always, which is exactly when you are most likely to be referring to one of them. `jot` therefore
-computes the shortest prefix that is unique *in this vault* (floored at 8), the way git actually
-does it. That width is a property of the vault at a moment in time, so it is a display convenience
-only. Scripts use the full id.
+computes the shortest prefix that is unique *within the set it is shown beside* — the notes in a
+vault, or the workspaces in the registry — floored at 8, the way git actually does it. That width is
+a property of the set at a moment in time, so it is a display convenience only. Scripts use the full
+id, which every document below carries.
 
 ## `notemeta`
 

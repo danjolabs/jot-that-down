@@ -59,15 +59,17 @@ and exits non-zero; it never guesses. Every command that prints an id prints the
 > ones you refer to by short id ("jot a thought, reply to it"). A surface that prints an id it
 > cannot accept back is worse than one that prints full UUIDs.
 >
-> **Implemented instead:** `Snapshot::abbreviations(min)` computes the shortest prefix that is unique
-> *in this vault*, floored at 8 — which is what git actually does, rather than what git appears to
-> do. A burst of same-millisecond captures naturally produces longer ids, which is honest: those
+> **Implemented instead:** `shortid::abbreviate` computes the shortest prefix that is unique within
+> the set an id is displayed beside, floored at 8 — which is what git actually does, rather than what
+> git appears to do. It lives in core rather than in this crate because there are two callers and
+> both are UUIDv7: note ids in a vault, and **workspace ids in the registry**, which collide the same
+> way when two workspaces are created in one minute. A burst of same-millisecond captures naturally produces longer ids, which is honest: those
 > notes really are that similar. The result is always a genuine prefix, so anything printed can be
 > handed straight back.
 >
 > Two consequences worth carrying forward:
 >
-> - **The width is a property of the vault, not of the id.** It can change when a note is written.
+> - **The width is a property of the set, not of the id.** It can change when a note is written.
 >   So it is a display convenience only and never appears in `--json`, which always carries full
 >   UUIDs. Stages 5 and 6 inherit this rule.
 > - **An id the vault does not hold cannot be abbreviated at all** — a dangling `reply_to`, a link to
@@ -77,6 +79,10 @@ and exits non-zero; it never guesses. Every command that prints an id prints the
 ### Output
 
 - **Human** by default: title or `Untitled`, relative time, short id, and the first line of the body.
+  `jot ws ls` follows the same shape — `<id>  <name>  <path>` — because a workspace listing answers
+  the same question a note listing does: *which one of these do I mean?* Found during dogfooding:
+  without an id the listing is genuinely ambiguous, since the registry keys on workspace id and a
+  vault deleted and remade therefore appears twice under one name.
 - **`--json`** on every read command, with a stable documented shape. This is what makes the tool
   compose with everything else you use, and it costs almost nothing to add now versus later.
 - Colors via a standard detection path, honoring `NO_COLOR` and non-tty output.
