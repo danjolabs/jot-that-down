@@ -16,7 +16,7 @@
 //!   <uuid>.md
 //! ```
 //!
-//! `index.db` is stage 2 and is deliberately **not** created here: the index is derived and
+//! `index.db` is stage 4 and is deliberately **not** created here: the index is derived and
 //! disposable, and an empty database file at init would be a lie about that.
 //!
 //! # Rulings this module implements
@@ -34,7 +34,7 @@
 //! * **§U7 — neither `init` nor `open` touches the registry.** There is no `use crate::registry`
 //!   in this file and there must not be one. A library call with a global filesystem side effect
 //!   outside the vault is a testing problem and a surprise; registration is an explicit
-//!   `registry::*` call that the CLI wires up in stage 4.
+//!   `registry::*` call that the CLI wires up in stage 3.
 //! * **§U2 — timestamps.** There are none in this file, and that is on purpose. The manifest
 //!   carries identity and configuration only; `last_opened` is the registry's business, precisely
 //!   because recording it here would make `open` a write.
@@ -403,7 +403,7 @@ impl std::fmt::Display for Warning {
 /// An opened workspace: a root directory, the manifest that identifies it, and an in-memory view
 /// of the notes inside it.
 ///
-/// The view is a [`Snapshot`] — a scan, standing in for stage 2's SQLite index. Every read method
+/// The view is a [`Snapshot`] — a scan, standing in for stage 4's SQLite index. Every read method
 /// answers from it and every mutation updates it, so the seam the whole project rests on is the
 /// same one it will be when a database is behind it: **surfaces call these methods and never touch
 /// the filesystem.**
@@ -652,7 +652,7 @@ impl Workspace {
 
     /// The path of the live note with this id, if the vault holds one.
     ///
-    /// A linear scan, which is what stage 1b has: the id-to-path map is stage 2's index. The scan
+    /// A linear scan, which is what stage 1b has: the id-to-path map is stage 4's index. The scan
     /// goes through [`fs::live_note_paths`] and [`fs::parse_note_filename`] so that "which files
     /// are notes" has exactly one answer in this crate.
     ///
@@ -787,7 +787,7 @@ impl Workspace {
     ///
     /// Identical to [`Workspace::sync`] **in this build**, because the snapshot has no persistent
     /// half to be wrong: every scan is a cold one. The method exists anyway, and is called by
-    /// `jot index rebuild`, because it is the operation whose meaning must not change when stage 2
+    /// `jot index rebuild`, because it is the operation whose meaning must not change when stage 4
     /// puts SQLite behind this seam — at which point `sync` becomes incremental and this one stops
     /// being its synonym. The rebuild invariant (`overview.md`) is the property that the two agree,
     /// and it is trivially true here.
@@ -799,10 +799,10 @@ impl Workspace {
     /// The in-memory view, for this module's own tests only.
     ///
     /// **Deliberately not public.** It used to be, and `jot-cli` reached through it for four
-    /// different things — which made the index's *representation* part of the API. Stage 2 puts
+    /// different things — which made the index's *representation* part of the API. Stage 4 puts
     /// SQLite here, and there is no `&Snapshot` to hand back once it does; the four methods below
     /// are what the surfaces actually needed, and each of them is answerable by a query. See
-    /// `docs/plans/stage2.md`, "the swap is invisible".
+    /// `docs/plans/stage4.md`, "the swap is invisible".
     #[cfg(test)]
     fn snapshot(&self) -> &Snapshot {
         &self.snapshot
@@ -925,7 +925,7 @@ impl Workspace {
     ///
     /// Always `load(path)` → mutate → write. Never `NoteMeta` → write: a record from a query
     /// carries no unknown frontmatter keys, so writing one back would delete every key jot does not
-    /// interpret — the "expensive failure" stage 2's risk table exists to prevent. Reloading the
+    /// interpret — the "expensive failure" stage 4's risk table exists to prevent. Reloading the
     /// file also means an edit picks up whatever an external editor changed in the meantime,
     /// rather than clobbering it wholesale.
     ///
@@ -1053,7 +1053,7 @@ impl Workspace {
 
     /// The rename shared by [`Workspace::trash`] and [`Workspace::restore`].
     ///
-    /// Filesystem first, then the snapshot — the order `stage3.md` requires, so that an
+    /// Filesystem first, then the snapshot — the order `stage2.md` requires, so that an
     /// interruption leaves the index stale rather than the vault wrong. Stale is repaired by the
     /// next [`Workspace::sync`]; wrong is not repairable at all.
     fn relocate(&mut self, id: NoteId, from: &Path, to: &Path, state: State) -> Result<()> {
@@ -1424,7 +1424,7 @@ mod tests {
         );
         assert!(root.join(".jot/.trash").is_dir());
         assert!(root.join(".jot/tmp").is_dir());
-        assert!(!root.join(".jot/index.db").exists(), "index.db is stage 2");
+        assert!(!root.join(".jot/index.db").exists(), "index.db is stage 4");
     }
 
     /// `atomic_write` stages inside `.jot/tmp/`; if a staged file were ever left behind, the very
@@ -2553,7 +2553,7 @@ frontmatter = [
     /// Stage 1b acceptance, in the form stage 1b can state it: a read pass over a clean vault
     /// writes nothing.
     ///
-    /// The criterion as written names `sync()` and `rebuild()`, which are stage 2's. What is
+    /// The criterion as written names `sync()` and `rebuild()`, which are stage 4's. What is
     /// testable now is the property they will inherit — enumerating and parsing every note in the
     /// corpus leaves every byte, and the whole directory tree, exactly as it was.
     #[test]
@@ -2624,7 +2624,7 @@ frontmatter = [
     }
 }
 
-/// Stage 3's note lifecycle: `create`, `edit`, `trash`, `restore`, `purge`, and the reads that
+/// Stage 2's note lifecycle: `create`, `edit`, `trash`, `restore`, `purge`, and the reads that
 /// have to keep agreeing with them.
 #[cfg(test)]
 mod lifecycle_tests {
@@ -3276,7 +3276,7 @@ mod lifecycle_tests {
         //
         // Ambiguity is handled correctly: it lists candidates and never guesses. But a surface
         // that prints `short()` and then accepts it back will hand people an id that does not
-        // resolve, which is a stage 4 problem and is written up in `docs/plans/stage4.md`.
+        // resolve, which is a stage 3 problem and is written up in `docs/plans/stage3.md`.
         let (_tmp, mut ws) = workspace();
         let first = ws.create(Draft::new("one")).unwrap();
         let second = ws.create(Draft::new("two")).unwrap();

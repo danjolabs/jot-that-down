@@ -2,7 +2,7 @@
 //!
 //! # Why this is its own module
 //!
-//! `stage4.md` names it: **a note captured into the wrong vault is quietly lost.** It is the worst
+//! `stage3.md` names it: **a note captured into the wrong vault is quietly lost.** It is the worst
 //! bug this surface can have, because nothing reports it — the command succeeds, prints an id, and
 //! the note is somewhere you will not look. Every other CLI failure is loud.
 //!
@@ -69,7 +69,7 @@ pub struct Context {
 impl Context {
     /// Open the workspace this invocation should act on.
     ///
-    /// The order is fixed and is the one `stage4.md` specifies:
+    /// The order is fixed and is the one `stage3.md` specifies:
     ///
     /// 1. `--workspace <path>`
     /// 2. `JOT_WORKSPACE`

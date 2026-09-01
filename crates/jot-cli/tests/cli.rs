@@ -547,7 +547,7 @@ fn show_prints_the_body_and_raw_prints_the_file() {
 
 #[test]
 fn thread_renders_the_worked_example_from_the_plan() {
-    // `A→B`, `B→C`, `C→D`, `C→E`, `A→F` — the shape `stage3.md` draws.
+    // `A→B`, `B→C`, `C→D`, `C→E`, `A→F` — the shape `stage2.md` draws.
     let vault = Vault::new();
     let a = vault.new_note(&["-t", "A", "-m", "a"]);
     let b = vault.new_note(&["--reply", &a, "-t", "B", "-m", "b"]);

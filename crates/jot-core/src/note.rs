@@ -97,7 +97,7 @@ impl NoteId {
 
     /// The 8-character prefix of the hyphenated form, for git-style short ids in surfaces.
     ///
-    /// Not unique by construction; stage 3's `resolve` is what turns a prefix back into an id.
+    /// Not unique by construction; stage 2's `resolve` is what turns a prefix back into an id.
     pub fn short(&self) -> String {
         let mut buf = Uuid::encode_buffer();
         self.0.hyphenated().encode_lower(&mut buf)[..8].to_string()

@@ -7,7 +7,7 @@
 //!
 //! # The two forms
 //!
-//! Using `docs/plans/stage3.md`'s worked example — edges `A→B`, `B→C`, `C→E`, `C→D`, `A→F`:
+//! Using `docs/plans/stage2.md`'s worked example — edges `A→B`, `B→C`, `C→E`, `C→D`, `A→F`:
 //!
 //! ```text
 //!   B - C - E          paths     (A,B,C,D), (A,B,C,E), (A,F)
@@ -57,7 +57,7 @@ impl Thread {
         self.ancestors.first().unwrap_or(&self.tree.note)
     }
 
-    /// The single line from the thread root down to the focus — stage 4's `--path`.
+    /// The single line from the thread root down to the focus — stage 3's `--path`.
     ///
     /// Ancestors are linear, so this needs no search: it is the ancestor chain with the focus
     /// appended.
@@ -93,7 +93,7 @@ impl TreeNode {
     /// Assemble the subtree rooted at `focus` from an adjacency map of parent id → replies.
     ///
     /// `children_of` is built once from a flat set of notes — one `SELECT … WHERE root_id = ?` in
-    /// stage 2's terms, one filter over the vault snapshot in stage 3's — so assembling a whole
+    /// stage 4's terms, one filter over the vault snapshot in stage 2's — so assembling a whole
     /// thread costs one pass over its notes, not one lookup per node.
     ///
     /// A node reached twice is not descended into a second time, which is what makes a hand-written
@@ -300,7 +300,7 @@ mod tests {
         TreeNode::assemble(meta(root, None), &children_of)
     }
 
-    /// The worked example from `stage3.md`: `A→B`, `B→C`, `C→E`, `C→D`, `A→F`.
+    /// The worked example from `stage2.md`: `A→B`, `B→C`, `C→E`, `C→D`, `A→F`.
     fn worked_example() -> TreeNode {
         tree(
             'a',
@@ -431,7 +431,7 @@ mod tests {
 
     // ------------------------------------------------------------------------ the invariants
     //
-    // `stage3.md` lists these as properties to generate trees against. They are asserted here
+    // `stage2.md` lists these as properties to generate trees against. They are asserted here
     // over a fixed corpus of shapes; `assert_invariants` is the body a generator would call.
 
     fn shapes() -> Vec<TreeNode> {

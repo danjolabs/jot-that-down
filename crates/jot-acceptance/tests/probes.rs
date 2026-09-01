@@ -992,7 +992,7 @@ fn probe_registry_default_path_is_workspaces_toml_under_the_apps_own_config_dir(
 #[test]
 fn probe_init_and_open_do_not_touch_the_registry() {
     // dispatch.md U7: neither `init` nor `open` records anything — registration is an explicit
-    // `registry::*` call the CLI wires in stage 4. A library call with a global filesystem side
+    // `registry::*` call the CLI wires in stage 3. A library call with a global filesystem side
     // effect outside the vault is a testing problem and a surprise.
     //
     // The injected path alone proves nothing here: `init` never knew about it. The load-bearing

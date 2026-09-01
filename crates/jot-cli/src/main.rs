@@ -481,7 +481,7 @@ fn new(workspace: &mut Workspace, args: &NewArgs, cli: &Cli, style: &Style) -> R
         draft = draft.slugged();
     }
 
-    // The three input paths, in the priority order stage 4 fixes: an explicit `-m`, then a pipe,
+    // The three input paths, in the priority order stage 3 fixes: an explicit `-m`, then a pipe,
     // then the editor. Each exists because it removes friction from a different context.
     draft.body = match &args.message {
         Some(message) => message.clone(),

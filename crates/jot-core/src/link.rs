@@ -1,6 +1,6 @@
 //! `[[uuid]]` link extraction from a note body.
 //!
-//! Stage 3's links, and the second use of the markdown parser stage 1b took on. The rule is the
+//! Stage 2's links, and the second use of the markdown parser stage 1b took on. The rule is the
 //! same one the frontmatter splitter follows: **parse to an AST, read byte offsets, never call the
 //! renderer.** Nothing here reconstructs markdown; the body is only ever sliced.
 //!

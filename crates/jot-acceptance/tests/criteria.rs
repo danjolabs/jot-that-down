@@ -13,10 +13,10 @@
 //! ## Two criteria this stage cannot close
 //!
 //! - **"`sync()` and `rebuild()` over a clean vault write nothing."** Neither function exists;
-//!   stage 1b's own "Not in this stage" section puts SQLite in stage 2. What is testable now is
+//!   stage 1b's own "Not in this stage" section puts SQLite in stage 4. What is testable now is
 //!   the property they will inherit — a read pass over the corpus changes no byte — and that is
 //!   what [`a_read_pass_over_a_clean_vault_writes_nothing`] asserts. The criterion as written
-//!   moves to stage 2's suite.
+//!   moves to stage 4's suite.
 //! - **"A workspace whose `schema.frontmatter` omits a relation key is rejected at `open`."**
 //!   Marked *contingent* in the stage doc. Ratified 2026-08-31 the other way: a thin schema
 //!   **warns and opens**. [`a_thin_schema_warns_and_opens_rather_than_being_rejected`] encodes the

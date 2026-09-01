@@ -6,7 +6,7 @@
 //!
 //! # Why these are not the index's rows
 //!
-//! Stage 2's risk table has the rule this module is shaped by: **a write is never built from a
+//! Stage 4's risk table has the rule this module is shaped by: **a write is never built from a
 //! query result.** A [`NoteMeta`] reconstructed field-by-field carries no unknown frontmatter keys,
 //! so writing one back destroys every key the file had that jot does not interpret. Nothing here
 //! is therefore writable — [`Draft`] and [`Edit`] describe a *change*, and applying one always goes
@@ -59,7 +59,7 @@ impl std::fmt::Display for State {
 /// What a reference to a note resolves to — `reply_to`, `quote`, or a `[[uuid]]` link target.
 ///
 /// Computed, never stored. **Three states and no fourth**: a surface that needs a fourth case has
-/// had a rule leak out of core, which is the tell `stage3.md` names explicitly. In particular there
+/// had a rule leak out of core, which is the tell `stage2.md` names explicitly. In particular there
 /// is no "broken" or "error" case — a reference to a note that does not exist is
 /// [`Ref::Deleted`], a designed state rather than corruption, and the id is what the UI shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,7 +337,7 @@ pub enum FileSort {
 /// One row of a timeline or listing.
 ///
 /// Carries the counts and the resolved parent that a list view needs, because computing them per
-/// row is the N+1 that `stage3.md` names as this stage's performance trap. They are filled during
+/// row is the N+1 that `stage2.md` names as this stage's performance trap. They are filled during
 /// the same pass that selects the rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {

@@ -603,7 +603,7 @@ fn probe_b_every_filename_creation_can_produce_is_one_enumeration_accepts() {
 /// Two files in one vault whose *filenames* carry the same UUID — one bare, one slugged. Under
 /// stage 1b the filename is the identity, so these are two files claiming to be one note.
 ///
-/// Nothing in stage 1b detects it; pinning that here so stage 2's scanner inherits the problem
+/// Nothing in stage 1b detects it; pinning that here so stage 4's scanner inherits the problem
 /// rather than discovering it. `note_path` returning the first match is a documented consequence
 /// of the linear scan, not a decision.
 #[test]
@@ -826,7 +826,7 @@ fn probe_b_every_fixture_recovers_a_creation_time_from_its_filename() {
 ///
 /// The corpus also turns out to contain **two** pairs of colliding 8-character prefixes
 /// (`01a03d51` and `01a03d52`), which is a happy accident worth naming rather than removing: it
-/// means stage 3's `resolve` cannot be written as "prefix match returns the first hit" and pass its
+/// means stage 2's `resolve` cannot be written as "prefix match returns the first hit" and pass its
 /// own tests. `short()` is documented as "not unique by construction"; this pins that the corpus
 /// actually exercises it.
 #[test]
@@ -850,7 +850,7 @@ fn probe_b_short_is_a_real_prefix_and_the_corpus_contains_a_collision() {
     assert!(
         unique.len() < shorts.len(),
         "the shared corpus no longer contains an 8-character prefix collision, so nothing in it \
-         exercises the ambiguity `NoteId::short()` documents and stage 3's `resolve` must handle. \
+         exercises the ambiguity `NoteId::short()` documents and stage 2's `resolve` must handle. \
          Add a colliding fixture back rather than deleting this test: {shorts:?}"
     );
 }
@@ -1194,7 +1194,7 @@ fn probe_b_enumeration_skips_dotfiles_the_jot_directory_and_subdirectories() {
 ///
 /// `probe_enumeration_lists_live_notes_and_skips_the_jot_directory` sorts both sides before
 /// comparing, so it asserts set equality and is blind to order. `fs.rs` documents stable ordering
-/// as the property that lets stage 2's rebuild walk the vault identically twice, so it needs an
+/// as the property that lets stage 4's rebuild walk the vault identically twice, so it needs an
 /// assertion of its own.
 #[test]
 fn probe_b_enumeration_is_sorted_and_therefore_deterministic() {
@@ -1298,7 +1298,7 @@ fn probe_b_open_reports_the_kind_the_manifest_records() {
 /// field on the entry, so a constant id collapses every vault a user owns into a single
 /// registration — silently, and destructively on the first `upsert`.
 ///
-/// **Amended post stage 4** (see `runs/post-stage4/log.md`): a workspace id is now **v4**, where a
+/// **Amended post stage 3** (see `runs/post-stage3/log.md`): a workspace id is now **v4**, where a
 /// note id remains v7. Two assertions changed with it, and the mutation this probe exists to kill
 /// is untouched by either.
 ///

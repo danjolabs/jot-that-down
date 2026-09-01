@@ -212,7 +212,7 @@ impl Entry {
         self.name = name.into();
     }
 
-    /// Stamps `last_opened`, as `Workspace::open` would on a successful open (stage 4 wires the
+    /// Stamps `last_opened`, as `Workspace::open` would on a successful open (stage 3 wires the
     /// call; this module only provides the mutation).
     pub fn touch(&mut self, when: DateTime<Utc>) {
         self.last_opened = when;
@@ -789,7 +789,7 @@ mod tests {
 
     /// `save -> load -> save` must be a fixed point: re-saving a registry that was just loaded
     /// produces byte-identical output to the first save. This is what makes the registry safe to
-    /// round-trip through repeatedly (every `Workspace::open`, in stage 4) without it drifting.
+    /// round-trip through repeatedly (every `Workspace::open`, in stage 3) without it drifting.
     #[test]
     fn save_load_save_is_a_fixed_point() {
         let dir = tempfile::tempdir().unwrap();

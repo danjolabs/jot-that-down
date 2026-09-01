@@ -1,8 +1,8 @@
-//! The vault, read into memory: everything stage 2's SQLite index will answer, answered by a scan.
+//! The vault, read into memory: everything stage 4's SQLite index will answer, answered by a scan.
 //!
 //! # Why this exists
 //!
-//! Stage 2 builds a SQLite index. Stages 3 and 4 were planned on top of it, but nothing either
+//! Stage 4 builds a SQLite index. Stages 2 and 3 were planned on top of it, but nothing either
 //! stage actually needs is *only* obtainable from a database — threads, reference resolution,
 //! backlinks, and prefix resolution are all functions of the set of notes in the vault. The index
 //! is a **speed** layer, and at personal scale a scan is fast enough to build the domain against
@@ -10,10 +10,10 @@
 //!
 //! So this module is the index's stand-in, and it is deliberately shaped like the thing it stands
 //! in for. Every query [`Workspace`](crate::workspace::Workspace) exposes is implemented here over
-//! a `BTreeMap` the way it will be implemented over a table, which is what makes stage 2 a
+//! a `BTreeMap` the way it will be implemented over a table, which is what makes stage 4 a
 //! substitution rather than a rewrite:
 //!
-//! | Stage 2 | Here |
+//! | Stage 4 | Here |
 //! | --- | --- |
 //! | `SELECT … WHERE id = ?` | [`Snapshot::get`] |
 //! | `SELECT … WHERE root_id = ?` | [`Snapshot::thread`] |
@@ -27,7 +27,7 @@
 //!   `rebuild()` disagree. Repair of missing schema fields happens on
 //!   [`Workspace::open_note`](crate::workspace::Workspace::open_note), which is one file and one
 //!   user action.
-//! * **Nothing here is a write source.** A [`Record`] is a query result, and stage 2's risk table
+//! * **Nothing here is a write source.** A [`Record`] is a query result, and stage 4's risk table
 //!   forbids building a write from one: a `NoteMeta` carries no unknown frontmatter keys, so
 //!   writing one back would destroy every key jot does not interpret. Records are used to find a
 //!   *path*; the write path then re-reads that file. See [`Record::path`].
@@ -68,7 +68,7 @@ pub struct Record {
     pub edited_at: Option<DateTime<Utc>>,
     /// Distinct `[[uuid]]` targets in the body, in first-appearance order.
     ///
-    /// Deduplicated because this is the edge set, and stage 2's `links` table is keyed
+    /// Deduplicated because this is the edge set, and stage 4's `links` table is keyed
     /// `(src_id, dst_id)`. The individual occurrences, with their offsets, come from
     /// [`link::extract`] on demand — a body is not stored here.
     pub links: Vec<NoteId>,
@@ -166,7 +166,7 @@ impl Snapshot {
     /// Read the whole vault: the root for active notes, `.jot/.trash/` for trashed ones.
     ///
     /// Reads every file in full, because link extraction needs the body. Bodies are **not** kept —
-    /// only the edge set — which is the same bargain stage 2 strikes with its `links` table.
+    /// only the edge set — which is the same bargain stage 4 strikes with its `links` table.
     ///
     /// # Errors
     ///
@@ -227,7 +227,7 @@ impl Snapshot {
 
     /// Re-read one file into the snapshot after a write, replacing whatever it held for `id`.
     ///
-    /// This is the snapshot's form of stage 2's "a single index update": a mutation touches one
+    /// This is the snapshot's form of stage 4's "a single index update": a mutation touches one
     /// file and then one record, rather than paying for a whole rescan. Ordering matters and is
     /// the caller's job — filesystem first, then this — so that an interruption leaves the
     /// snapshot stale rather than the vault wrong. Stale is what the next `sync()` repairs.
@@ -360,7 +360,7 @@ impl Snapshot {
 
     /// Direct replies, keyed by parent id, over the notes this predicate admits.
     ///
-    /// Built in one pass — the batching `stage3.md` insists on. Resolving a parent per row instead
+    /// Built in one pass — the batching `stage2.md` insists on. Resolving a parent per row instead
     /// is the N+1 that makes a fifty-row timeline do fifty lookups.
     fn children_of(&self, include: impl Fn(&Record) -> bool) -> BTreeMap<NoteId, Vec<NoteMeta>> {
         let mut map: BTreeMap<NoteId, Vec<NoteMeta>> = BTreeMap::new();

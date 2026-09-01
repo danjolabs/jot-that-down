@@ -34,7 +34,7 @@
 //!
 //! # Stability
 //!
-//! This file is **frozen for the remainder of stage 1**. Stages 2 and 3 extend it; wave-3 and
+//! This file is **frozen for the remainder of stage 1**. Stages 2 and 4 extend it; wave-3 and
 //! wave-4 stage-1 tasks consume it and add no variants.
 //!
 //! Two payload conventions worth knowing before you match on anything:
@@ -486,7 +486,7 @@ mod tests {
         // Bump deliberately when the taxonomy changes. Stage 1 froze it at 32; stage 1b
         // removed five (`NoteIdMismatch`, `MissingId`, `MissingCreatedAt`, `MissingRoot`,
         // `InvalidTimestamp` — all of them about keys the format no longer carries) and
-        // added two (`UnpreservableFrontmatter`, `ReplyCycle`), reaching 29. Stage 3 added the
+        // added two (`UnpreservableFrontmatter`, `ReplyCycle`), reaching 29. Stage 2 added the
         // four note-lifecycle errors, which are the first errors in the crate about a *note*
         // rather than a file.
         assert_eq!(
