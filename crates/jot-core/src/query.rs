@@ -13,6 +13,7 @@
 //! `load(path)` → mutate → write. That is why [`Edit`] has a [`Field`] for each editable value
 //! rather than being a `NoteMeta` the caller filled in.
 
+use crate::frontmatter::Frontmatter;
 use crate::fs::FilenameSlug;
 use crate::note::{NoteId, NoteMeta};
 use chrono::{DateTime, Utc};
@@ -147,6 +148,14 @@ pub struct Draft {
     pub quote: Option<NoteId>,
     /// Whether the filename gets a slug derived from the title.
     pub slug: FilenameSlug,
+    /// Frontmatter to start from, carrying keys jot does not interpret.
+    ///
+    /// For a caller that already has a parsed block — an `$EDITOR` buffer, an importer — and would
+    /// otherwise lose every key outside the four interpreted ones. The managed fields are always
+    /// overwritten from this struct's own, so `relation:root` cannot be set this way; it is
+    /// assigned by [`Workspace::create`](crate::workspace::Workspace::create) and never taken from
+    /// input.
+    pub extra: Option<Frontmatter>,
 }
 
 impl Draft {
@@ -184,6 +193,13 @@ impl Draft {
     #[must_use]
     pub fn slugged(mut self) -> Self {
         self.slug = FilenameSlug::FromTitle;
+        self
+    }
+
+    /// Start from this frontmatter, keeping any keys jot does not interpret.
+    #[must_use]
+    pub fn extra(mut self, frontmatter: Frontmatter) -> Self {
+        self.extra = Some(frontmatter);
         self
     }
 

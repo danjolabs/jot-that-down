@@ -58,7 +58,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
-use crate::frontmatter::{Frontmatter, FrontmatterSchema};
+use crate::frontmatter::FrontmatterSchema;
 use crate::fs::{self, FilenameSlug};
 use crate::link::{self, Link};
 use crate::note::{Note, NoteId, NoteMeta};
@@ -824,7 +824,12 @@ impl Workspace {
             }
         };
 
-        let mut frontmatter = Frontmatter::new();
+        // Start from whatever the caller parsed, so a key jot does not interpret — typed into an
+        // `$EDITOR` buffer, or carried in by an importer — survives creation. The managed fields
+        // are then overwritten unconditionally: `relation:root` in particular is assigned here and
+        // is never taken from input, or the "assigned once, never recomputed" rule would be a
+        // suggestion rather than an invariant.
+        let mut frontmatter = draft.extra.clone().unwrap_or_default();
         frontmatter.title = draft.title.clone();
         frontmatter.root = Some(root);
         frontmatter.reply_to = draft.reply_to;
@@ -1238,17 +1243,27 @@ fn default_name(root: &Path) -> String {
         .unwrap_or_else(|| "jot".to_string())
 }
 
-/// `create_dir_all`, with the path named on failure.
-/// A body as it is written into a file: separated from the closing fence by a blank line, and
-/// newline-terminated.
+/// A body as it is written into a file: separated from the closing fence by exactly one blank
+/// line, and newline-terminated.
 ///
 /// Applied when a caller *supplies* a body — [`Workspace::create`], and an [`Edit`] that sets one.
 /// It is not a markdown transformation and nothing is re-rendered: an edit that leaves the body
 /// alone does not pass through here at all, which is what keeps "the write path leaves the body
-/// alone" true. Idempotent, so re-saving an unchanged body produces identical bytes and therefore
-/// no write.
+/// alone" true.
+///
+/// **Both ends are normalized, and the leading end is why.** A body supplied by `-m` has no leading
+/// newline; a body read back from an `$EDITOR` buffer always does, because it is the text that
+/// followed the closing fence. Trimming only the trailing end would therefore add a blank line
+/// every time a note went through the editor, and the note would gain another on each subsequent
+/// edit. Normalizing both ends makes this idempotent — `body_text(body_text(x)) == body_text(x)` —
+/// which is also what lets the no-op check in [`Workspace::edit`] work at all: an unchanged body
+/// re-rendered has to produce identical bytes, or every save would move mtime and `edited_at` with
+/// it.
+///
+/// Leading blank lines are not content: markdown ignores them before the first block, and the one
+/// separating line is put back unconditionally.
 fn body_text(text: &str) -> String {
-    let trimmed = text.trim_end_matches(['\n', '\r']);
+    let trimmed = text.trim_matches(['\n', '\r']);
     if trimmed.is_empty() {
         String::from("\n")
     } else {
@@ -1263,6 +1278,7 @@ fn file_name_of(path: &Path) -> PathBuf {
         .map_or_else(|| path.to_path_buf(), PathBuf::from)
 }
 
+/// `create_dir_all`, with the path named on failure.
 fn create_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(|source| Error::CreateDir {
         path: path.to_path_buf(),
@@ -2673,6 +2689,46 @@ mod lifecycle_tests {
         assert_eq!(reloaded, note);
         assert_eq!(reloaded.frontmatter.title.as_deref(), Some("A title"));
         assert!(reloaded.body.contains("body text"));
+    }
+
+    #[test]
+    fn a_supplied_body_is_separated_from_the_fence_by_exactly_one_blank_line() {
+        let (_tmp, mut ws) = workspace();
+        // Every shape a caller might hand over: no leading newline (`-m`), one (an `$EDITOR`
+        // buffer), and several (a buffer that has already been through the editor once).
+        for supplied in ["a thought", "\na thought", "\n\n\na thought\n\n"] {
+            let note = ws.create(Draft::new(supplied)).unwrap();
+            assert_eq!(note.body, "\na thought\n", "supplied: {supplied:?}");
+        }
+    }
+
+    #[test]
+    fn a_body_round_tripped_through_an_editor_does_not_gain_a_blank_line_each_time() {
+        // The compounding bug this normalization exists to prevent: an `$EDITOR` buffer's body is
+        // the text after the closing fence, so it always arrives with a leading newline. Feeding
+        // that straight back must be a fixed point.
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("a thought")).unwrap();
+        let original = note.body.clone();
+
+        let mut current = note;
+        for round in 0..3 {
+            let fed_back = current.body.clone();
+            current = ws.edit(current.id, Edit::new().body(fed_back)).unwrap();
+            assert_eq!(current.body, original, "grew on round {round}");
+        }
+    }
+
+    #[test]
+    fn re_saving_an_unchanged_body_from_an_editor_does_not_write() {
+        // Follows from the fixed point above, and is the property that keeps `edited_at` honest.
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("a thought").title("t")).unwrap();
+        let before = mtime_of(&ws, note.id);
+
+        ws.edit(note.id, Edit::new().body(note.body.clone()))
+            .unwrap();
+        assert_eq!(mtime_of(&ws, note.id), before);
     }
 
     #[test]

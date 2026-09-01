@@ -445,8 +445,22 @@ fn new(workspace: &mut Workspace, args: &NewArgs, cli: &Cli, style: &Style) -> R
                 eprintln!("jot: empty body, nothing written");
                 return Ok(());
             }
+
+            // The buffer is authoritative for everything a new note may declare. `reply_to` is
+            // included — choosing a parent is a normal thing to do while writing, and unlike an
+            // *edit* it re-parents nothing. `relation:root` is not: it is assigned by `create`.
             draft.title = edited.frontmatter.title.clone();
             draft.quote = edited.frontmatter.quote;
+            draft.reply_to = edited.frontmatter.reply_to;
+            if edited.frontmatter.root.is_some() {
+                eprintln!(
+                    "jot: warning: `relation:root` is assigned by jot when the note is created \
+                     and cannot be set by hand; the value in the buffer was ignored."
+                );
+            }
+            // Carries any key the schema declares that jot does not interpret, so a filled-in
+            // custom field survives instead of being silently dropped.
+            draft.extra = Some(edited.frontmatter.clone());
             edited.body
         }
     };

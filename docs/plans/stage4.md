@@ -133,13 +133,25 @@ the surface would be writing into the vault and core would find out afterwards. 
 write path means an edit made in Vim gets the same unknown-key preservation, no-op detection, and
 re-slugging as one made with `-t`.
 
-The editor is handed the whole note — frontmatter block and body — so a title can be typed into the
-block. What comes back is parsed with the crate's own parser, so a mangled block fails loudly and
-**the draft is kept and named** rather than discarded.
+The editor is handed the whole note as a **template**: every key the workspace schema declares is
+present, and the ones the note does not carry appear as empty placeholders (`title:`). An empty block
+tells you nothing about what a note in this vault may hold. The placeholders round-trip to nothing —
+`key:` is YAML null, null reads as absent, and an absent key is never written back — so a template
+left alone produces exactly the file it would have produced without one.
 
-The limit, which is real: `Edit` carries `title`, `body`, and `quote`, so **a change to an unknown
-frontmatter key made in the editor is not applied**. Unknown keys are preserved from the *file*, not
-from the buffer. The same is true of `relation:reply_to`, deliberately — re-parenting is not an edit.
+What comes back is parsed with the crate's own parser, so a mangled block fails loudly and **the
+draft is kept and named** rather than discarded.
+
+For `jot new` the buffer is authoritative for everything a new note may declare, `relation:reply_to`
+included: choosing a parent while writing is normal and, unlike an edit, re-parents nothing.
+`relation:root` is the exception — it is assigned by `create` and never taken from input, or
+"assigned once, never recomputed" would be a suggestion rather than an invariant. A value typed
+there is ignored, and warned about.
+
+The limit, which is real and applies to **`jot edit`**: `Edit` carries `title`, `body`, and `quote`,
+so a change to an unknown frontmatter key made in the editor is not applied — unknown keys are
+preserved from the *file*, not from the buffer. `jot new` does not have this limit: `Draft::extra`
+carries the parsed block through, so a schema-declared custom field filled in at creation survives. The same is true of `relation:reply_to`, deliberately — re-parenting is not an edit.
 Both cases are detected and warned about on stderr rather than silently dropped. Making them
 editable means either widening `Edit` to carry arbitrary keys or letting the surface write, and
 neither is worth doing before dogfooding says it matters.

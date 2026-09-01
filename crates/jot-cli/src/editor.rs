@@ -101,8 +101,15 @@ pub fn edit(seed: &str) -> Result<Edited> {
 }
 
 /// The text handed to the editor for a note with this frontmatter and body.
+///
+/// Rendered as a **template**: every key the workspace's schema declares is present, and the ones
+/// this note does not carry appear as empty placeholders. An empty block tells you nothing about
+/// what a note in this vault may hold; `title:` tells you it is yours to fill in.
+///
+/// Placeholders left alone round-trip to nothing — `title:` is YAML null, and null is read as
+/// absent — so the file written is exactly the one an untouched template would have produced.
 pub fn seed(frontmatter: &Frontmatter, body: &str, schema: &FrontmatterSchema) -> String {
-    format!("{}{}", frontmatter.render(schema), body)
+    format!("{}{}", frontmatter.render_template(schema), body)
 }
 
 /// The editor to launch: `$VISUAL`, then `$EDITOR`.
@@ -158,6 +165,50 @@ mod tests {
 
     fn schema() -> FrontmatterSchema {
         FrontmatterSchema::jot_default()
+    }
+
+    #[test]
+    fn the_seed_offers_every_schema_key_and_the_blanks_round_trip_to_nothing() {
+        let text = seed(&Frontmatter::new(), "\n", &schema());
+        for key in [
+            "title",
+            "relation:root",
+            "relation:reply_to",
+            "relation:quote",
+        ] {
+            assert!(text.contains(&format!("{key}:")), "no `{key}` in:\n{text}");
+        }
+
+        // Left untouched, the template is worth nothing: every placeholder reads back as absent.
+        let (parsed, _) =
+            Frontmatter::parse_document(Path::new("draft.md"), text.as_bytes()).unwrap();
+        assert_eq!(parsed.title, None);
+        assert_eq!(parsed.root, None);
+        assert_eq!(parsed.reply_to, None);
+        assert_eq!(parsed.quote, None);
+        assert_eq!(parsed, Frontmatter::new());
+    }
+
+    #[test]
+    fn a_filled_in_placeholder_is_read_back() {
+        let text = seed(&Frontmatter::new(), "\n", &schema())
+            .replace("title:", "title: Typed in the editor");
+        let (parsed, _) =
+            Frontmatter::parse_document(Path::new("draft.md"), text.as_bytes()).unwrap();
+        assert_eq!(parsed.title.as_deref(), Some("Typed in the editor"));
+    }
+
+    #[test]
+    fn a_key_the_note_already_carries_is_seeded_with_its_value_not_a_blank() {
+        let mut frontmatter = Frontmatter::new();
+        frontmatter.title = Some("Existing".into());
+        let text = seed(&frontmatter, "\n", &schema());
+
+        assert!(text.contains("title: Existing"), "{text}");
+        assert!(
+            !text.contains("title:\n"),
+            "no blank beside the real one:\n{text}"
+        );
     }
 
     #[test]

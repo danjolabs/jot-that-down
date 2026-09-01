@@ -429,6 +429,28 @@ impl Frontmatter {
             .unwrap_or_else(|e| panic!("frontmatter render failed: {e}"))
     }
 
+    /// Render as an **editing template**: every key the schema declares is present, and the ones
+    /// this note does not carry are written as empty placeholders.
+    ///
+    /// For handing a note to `$EDITOR`. [`Self::render`] omits an absent key entirely, which is
+    /// right for a file — a note is not obliged to carry a key just because the schema names one —
+    /// but wrong for a buffer someone is about to type into, where an empty block gives no hint
+    /// that `title` is a thing you may fill in. A declared schema is a statement about what notes
+    /// in this vault look like, so a new note's buffer should show it.
+    ///
+    /// The placeholders round-trip to nothing: `title:` is YAML null, null is read as absent, and
+    /// an absent key is never written back. So a template whose placeholders are left alone
+    /// produces exactly the file [`Self::render`] would have produced.
+    ///
+    /// Only keys the schema **declares** get placeholders. An interpreted key the schema omits is
+    /// still emitted when the note carries one (the same step 2 as [`Self::try_render`]), but is
+    /// not offered as a blank: the vault has said it does not want that key in its notes.
+    #[must_use]
+    pub fn render_template(&self, schema: &FrontmatterSchema) -> String {
+        self.try_render_with(schema, Absent::Placeholder)
+            .unwrap_or_else(|e| panic!("frontmatter render failed: {e}"))
+    }
+
     /// [`Self::render`], returning [`Error::SerializeFrontmatter`] instead of panicking.
     ///
     /// The emit order is:
@@ -449,17 +471,23 @@ impl Frontmatter {
     ///
     /// [`Error::SerializeFrontmatter`] if `yaml_serde` cannot emit `title`.
     pub fn try_render(&self, schema: &FrontmatterSchema) -> Result<String> {
+        self.try_render_with(schema, Absent::Skip)
+    }
+
+    /// The body of both render modes.
+    fn try_render_with(&self, schema: &FrontmatterSchema, absent: Absent) -> Result<String> {
         let nl = self.newline.as_str();
         let mut out = String::from("---");
         out.push_str(nl);
 
         let mut emitted: Vec<&str> = Vec::new();
         for key in schema.keys() {
-            self.emit_key(key, nl, &mut out, &mut emitted)?;
+            self.emit_key(key, nl, &mut out, &mut emitted, absent)?;
         }
         for key in INTERPRETED_KEYS {
             if !schema.contains(key) {
-                self.emit_key(key, nl, &mut out, &mut emitted)?;
+                // Never a placeholder: a schema that omits a key has said it does not want it.
+                self.emit_key(key, nl, &mut out, &mut emitted, Absent::Skip)?;
             }
         }
         for unknown in &self.unknown {
@@ -475,19 +503,33 @@ impl Frontmatter {
     }
 
     /// Emit one key if the note carries it, recording the name so no later pass repeats it.
+    ///
+    /// `absent` decides what happens when it does not: skipped, or written as an empty placeholder
+    /// for someone to fill in.
     fn emit_key<'a>(
         &'a self,
         key: &'a str,
         nl: &str,
         out: &mut String,
         emitted: &mut Vec<&'a str>,
+        absent: Absent,
     ) -> Result<()> {
         if emitted.contains(&key) {
             return Ok(());
         }
+        // A placeholder is emitted for the key *name* only, so it is the same line whatever the
+        // key's type would have been. `key:` is YAML null, which reads back as absent.
+        let blank = |out: &mut String| {
+            if absent == Absent::Placeholder {
+                out.push_str(key);
+                out.push(':');
+                out.push_str(nl);
+            }
+        };
         match key {
             TITLE => {
                 let Some(title) = &self.title else {
+                    blank(out);
                     return Ok(());
                 };
                 out.push_str(&emit_scalar_pair(TITLE, title, nl)?);
@@ -501,6 +543,7 @@ impl Frontmatter {
                 // A hyphenated lowercase UUID is a plain scalar under every YAML schema and is
                 // never ambiguous, so it is emitted bare without going through the emitter.
                 let Some(id) = value else {
+                    blank(out);
                     return Ok(());
                 };
                 out.push_str(key);
@@ -512,6 +555,7 @@ impl Frontmatter {
                 // A declared key jot does not interpret. It is emitted here, at its declared
                 // position, from the bytes it was read as.
                 let Some(unknown) = self.unknown.iter().find(|u| u.name == other) else {
+                    blank(out);
                     return Ok(());
                 };
                 out.push_str(&unknown.source);
@@ -520,6 +564,15 @@ impl Frontmatter {
         emitted.push(key);
         Ok(())
     }
+}
+
+/// What [`Frontmatter::emit_key`] does with a key the note does not carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Absent {
+    /// Omit it. What a file gets: a note is not obliged to carry a key the schema names.
+    Skip,
+    /// Write `key:` for someone to fill in. What an `$EDITOR` buffer gets.
+    Placeholder,
 }
 
 /// Emit `key: <value>` through `yaml_serde`, so escaping and scalar-style selection stay the
