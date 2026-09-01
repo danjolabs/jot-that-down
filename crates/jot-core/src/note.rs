@@ -422,8 +422,11 @@ mod tests {
         // later timestamp must win even though its tail sorts lower as raw text would suggest.
         let earlier: NoteId = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5".parse().unwrap();
         let later: NoteId = "01a03d52-6c58-75de-81f8-1b3940ecc38b".parse().unwrap();
-        assert!(earlier < later);
-        assert!(!(later < earlier));
+        // Stated as two `cmp` results rather than `a < b` plus `!(b < a)`: the point is that the
+        // ordering is antisymmetric, and clippy reads the negated form as a long way of writing
+        // `>=` — which would assert something weaker than what is meant here.
+        assert_eq!(earlier.cmp(&later), std::cmp::Ordering::Less);
+        assert_eq!(later.cmp(&earlier), std::cmp::Ordering::Greater);
         assert!(earlier.created_at() < later.created_at());
     }
 
