@@ -19,32 +19,27 @@ writes and answers "what is in this vault?".
 ```sql
 PRAGMA user_version = 1;
 
--- What the scanner has already seen. Purely an optimization; safe to truncate.
-CREATE TABLE files (
-  path         TEXT PRIMARY KEY,   -- relative to workspace root, forward slashes
-  note_id      TEXT NOT NULL,
-  size         INTEGER NOT NULL,
-  mtime_ns     INTEGER NOT NULL,
-  content_hash TEXT NOT NULL       -- blake3; guards against mtime lying
-);
-
+-- One row per note. There is no `files` table: it would be 1:1 with this one, and the join key is
+-- free because the filename *is* the identity. See "Why there is no `files` table".
 CREATE TABLE notes (
-  id          TEXT PRIMARY KEY,    -- UUIDv7
-  root_id     TEXT NOT NULL,       -- DERIVED; own id when the note is a root. See below.
-  title       TEXT,
-  state       TEXT NOT NULL CHECK (state IN ('active', 'trashed')),
-  created_at  TEXT,                -- decoded from the id's UUIDv7 timestamp; NULL if not v7
-  edited_at   TEXT,                -- filesystem mtime at scan time; exempt from the rebuild check
-  trashed_at  TEXT,                -- mtime of the file inside `.jot/.trash/`
-  fields      TEXT                 -- JSON: the declared keys that are not relations
+  id           TEXT PRIMARY KEY,     -- UUIDv7, read from the filename
+  path         TEXT NOT NULL UNIQUE, -- relative to workspace root, forward slashes
+  state        TEXT NOT NULL CHECK (state IN ('active', 'trashed')),  -- DERIVED from path
+  size         INTEGER NOT NULL,     -- change detection, fast path
+  mtime_ns     INTEGER,              -- ditto; NULL when the platform will not report one
+  content_hash TEXT NOT NULL,        -- blake3; guards against mtime lying
+  title        TEXT,                 -- PROJECTION of `raw`, because the timeline and search need it
+  created_at   TEXT,                 -- DERIVED: decoded from the id; NULL when the id is not v7
+  root_id      TEXT NOT NULL,        -- DERIVED: memoized `reply_to` walk; own id for a root
+  raw          TEXT NOT NULL         -- JSON object: the whole frontmatter, as key -> value
 );
 
 CREATE INDEX notes_root     ON notes(root_id, id);
 CREATE INDEX notes_timeline ON notes(state, id DESC);
 
--- One row per edge a file asserts. `role` is a schema-declared relation type, so adding a
--- relation is a manifest line rather than a migration — which is the whole reason the frontmatter
--- type system landed before this stage.
+-- One row per edge a file asserts. `role` is the schema-declared relation **type**, not the key it
+-- was written under, so adding a relation is a manifest line rather than a migration — which is the
+-- whole reason the frontmatter type system landed before this stage.
 CREATE TABLE relations (
   from_id TEXT NOT NULL,
   role    TEXT NOT NULL,           -- 'relation:reply_to', 'relation:quote_to', …
@@ -52,7 +47,94 @@ CREATE TABLE relations (
   PRIMARY KEY (from_id, role, to_id)
 );
 CREATE INDEX relations_to ON relations(role, to_id);
+
+-- `[[uuid]]` edges from the body. Distinct targets in first-appearance order, which is what
+-- `Record::links` already holds and what `jot links` already prints.
+CREATE TABLE links (
+  from_id  TEXT NOT NULL,
+  to_id    TEXT NOT NULL,
+  position INTEGER NOT NULL,       -- first-appearance ordinal, so the order survives a skip
+  PRIMARY KEY (from_id, to_id)
+);
+CREATE INDEX links_to ON links(to_id);
 ```
+
+### Why there is no `files` table
+
+Earlier drafts had one, holding `(path, note_id, size, mtime_ns, content_hash)`. It is **1:1 with
+`notes`** for every note that parses, and the join key costs nothing: enumeration hands you the path,
+and the filename *is* the id. Every column it held is a column here.
+
+Two things settled it beyond redundancy:
+
+- `files.mtime_ns` and `notes.edited_at` were **the same fact stored twice**, at two precisions, in
+  two tables. That is the duplication this project has removed from the file format three times
+  already; there is no reason to reintroduce it one layer down.
+- "Purely an optimization; safe to truncate" bought nothing. The whole database is disposable, so
+  there is no state in which you want to drop the change-detection cache but keep the note rows.
+
+The one thing a path-keyed table can do that this one cannot is hold a row for a file with **no id**
+— one that fails to parse. Those are deliberately not cached: an unreadable file has no row, so it
+looks new on every `sync()` and is read, failed, and reported again. That is correct by construction
+— the problem list has to be regenerated every sync anyway — and it is the one place where doing the
+cheap thing would mean reintroducing `files` under another name.
+
+### The whole frontmatter is indexed as JSON
+
+`raw` holds the note's entire frontmatter block as a JSON object, keyed by the **key as written**:
+`{"title": "A note", "summary": "one", "relation:root": "01a0…"}`. Not just declared keys, not just
+undeclared ones — all of them.
+
+This replaces the earlier `fields` column, which held "the declared keys that are not relations" and
+had no source: `Frontmatter` parses `title`, `reply_to` and `quote` and nothing else, keeping every
+other key as **preserved source text** rather than a value. Stage 4 therefore has to parse the block
+into values to fill this column, which it can do because the index is derived: a YAML→JSON
+projection may flatten an anchor or a block scalar, and that is fine here in a way it is emphatically
+not in the file.
+
+**`raw` does not change `Frontmatter`.** In memory, `unknown` keeps each key's exact source text,
+which is what makes a write splice it back byte-for-byte. The index gets a queryable projection; the
+file keeps the guarantee. Those are two different jobs and the JSON is only fit for one of them.
+
+What this buys:
+
+- **`Problem::UndeclaredKey` is rebuildable from the index alone** — the undeclared set is `raw`'s
+  keys minus the schema's, and the schema is in `workspace.toml`. No `undeclared` column is needed.
+- **A declared key becomes queryable the moment it is declared**, with no migration and no new
+  column, which was the point of the type system.
+- If one key later becomes hot, SQLite carries a generated column over `json_extract(raw, …)` and
+  indexes that — still no schema change.
+
+`title` is a deliberate exception: a **projection** of `raw`, duplicated into its own column because
+the timeline, search and sorting query it on every call. The rule is unchanged and is the reason it
+is the only one — *a column exists because the index's own queries need it, not because its type is
+special.* Note the projection is by **role**, not by key: a vault whose title key is `heading` fills
+`notes.title` from `heading`, and `raw` still records it under `heading`.
+
+### `state`, `created_at` and `root_id` are derived too
+
+Three more columns nothing on disk states directly, listed together so the pattern is visible rather
+than rediscovered per column:
+
+| Column | Derived from |
+| --- | --- |
+| `state` | Which directory `path` is in. The location *is* the state, from stage 1b. |
+| `created_at` | The id's UUIDv7 timestamp. Never parsed from a key. |
+| `root_id` | The memoized `reply_to` walk. See below. |
+
+### `mtime_ns` carries both meanings, and there is no `trashed_at`
+
+Earlier drafts had `edited_at` *and* `trashed_at`. One mtime column carries both, because `state`
+says which one it means: for an active note it is when the file was last edited; for a trashed note
+it is when it was moved. `Snapshot::trashed` already assumes exactly this — it sorts the trash by
+`edited_at` and the comment says why.
+
+A separate `trashed_at` could not survive a rebuild in any case. `rename(2)` leaves mtime alone and
+writes nothing else to disk, so nothing in the vault records when the move happened: the column would
+be **state living only in the database**, which is the one thing this stage exists to prevent. It is
+dropped, and `overview.md`'s Trash row is amended to say so.
+
+`mtime_ns` is exempt from the rebuild invariant, for the reason `overview.md` gives.
 
 ### `root_id` is a derived column, and is deliberately not a row in `relations`
 
@@ -67,25 +149,38 @@ the option that makes cycles dangerous, and doing it in Rust keeps the database 
 keeps cycle detection free — the `seen` set the walk needs anyway is the detector. A cycle is a
 `Problem::ReplyCycle` and the note roots at itself.
 
-### Where a declared field lives
+### `links` lands here; only `point_to` **as a relation** is deferred
 
-A column exists because **the index's own queries need it**, not because its type is special. If a
-new `document:*` type meant a new column, adding one would be a migration again — exactly what this
-design escapes. So: `id`, `title`, `state`, `created_at`, `edited_at` are columns because the
-timeline, search and sorting need them; `relation:*` goes to `relations`; every other **declared**
-key goes into the `fields` JSON.
+An earlier draft deferred the whole thing — "until then `links` is the snapshot's `Record::links`,
+unchanged". That holds only while every scan is cold. `jot links`, `Snapshot::backlinks` and
+`Record::links` all ship today, so the moment `sync()` skips an unchanged note it must get that
+note's links from the index or lose them. The table is required by *this* stage.
 
-Undeclared keys are not indexed at all. They are still preserved in the file — that is the
-forward-compat rule and it is untouched — which makes the "undeclared key" problem actionable:
-*this key is not declared; declare it if you want to query it.* If a JSON field later becomes hot,
-SQLite can carry a generated column over `json_extract` and index that, with no schema change.
+What is still deferred is folding body edges into `relations` as a `point_to` role. They need a
+provenance marker first: `reply_to` and `quote_to` come from declared frontmatter and the schema can
+turn them off, while a body edge is not declared, cannot be turned off, and is changed by editing
+prose. Two tables keep that difference visible, which is the same argument that keeps `root_id` out
+of `relations`.
 
-### Wiki-link edges are deferred
+### Everything a `Record` holds must be reconstructible from the index
 
-`point_to` edges from `[[uuid]]` in the body arrive with the wiki-link feature. They need a
-provenance marker when they do: `reply_to` and `quote_to` come from declared frontmatter and the
-schema can turn them off, while a body edge is not declared, cannot be turned off, and is changed
-by editing prose. Until then `links` is the snapshot's `Record::links`, unchanged.
+The rule the two findings above are instances of, stated once so the third instance is caught by
+reading rather than by a bug:
+
+> **Incremental sync means every field of `Record` must come back from the index alone.** Anything
+> the scanner computes and the index does not store is silently lost the first time a note is
+> skipped.
+
+A cold-scan implementation cannot expose this — every field is recomputed every time, so a missing
+column looks fine. It is the rebuild-invariant test that has to catch it, and only if that test
+compares whole `Record`s rather than note rows.
+
+Today `Record` is `meta { id, created_at, title, root, reply_to, quote }`, `path`, `state`,
+`edited_at`, `links`, `undeclared`. The mapping: `meta`, `path` and `state` are columns,
+`edited_at` is `mtime_ns` rendered,
+the two relations are `relations` rows, `links` is the `links` table, and `undeclared` is computed
+from `raw` against the manifest. Nothing is left over — and a future field added to `Record` without
+a column here is the bug this section exists to name in advance.
 
 ### Why there are no foreign keys
 
@@ -112,14 +207,21 @@ a migration if `WITHOUT ROWID` was chosen here for no reason.
 
 ### Scanner
 
-- [ ] `scan()` — enumerate the workspace root and `.jot/.trash/`, diff against `files`.
+- [ ] `scan()` — enumerate the workspace root and `.jot/.trash/`, diff against `notes.path`.
+      Enumeration is a directory read and happens every sync regardless; the expensive thing it
+      avoids is `read + parse`.
 - [ ] Change detection: `(size, mtime_ns)` fast path; on mismatch, hash and compare. A note whose
-      hash is unchanged is not reparsed.
-- [ ] Deletion detection: a `files` row whose path no longer exists → remove the note row. Its
+      hash is unchanged is not reparsed. `mtime_ns` may be NULL, in which case hash always.
+- [ ] Parse the frontmatter block into `raw` JSON, and project `title` out of it **by role** — the
+      key may be named anything the manifest declares.
+- [ ] Populate `relations` from the declared relation roles, and `links` from `Record::links` with
+      its first-appearance ordinal.
+- [ ] Deletion detection: a `notes` row whose path no longer exists → remove the note row. Its
       children keep their now-dangling `reply_to` row, which is exactly the "Deleted" state.
 - [ ] State from location: found in the root → `active`; found in `.jot/.trash/` → `trashed`. The
-      directory decides, and from stage 1b it is the *only* thing that decides — there is no
-      `trashed_at` key in the file to read a timestamp from. Mirror the trashed file's mtime.
+      directory decides, and from stage 1b it is the *only* thing that decides. The trashed file's
+      mtime lands in `mtime_ns` like any other — there is no separate `trashed_at`; `state` is what
+      says whether that number means "last edited" or "moved to the trash".
 - [ ] **Read the whole file, store only the metadata.** Link extraction (stage 2) needs the body, so
       the earlier "read only up to the frontmatter fence" idea does not survive contact with links.
       The user-facing decision is unchanged — bodies are never *stored* in the index — and at personal
@@ -135,7 +237,7 @@ Three things stage 1b changed under this stage's feet, none of them optional:
 - **`sync()` and `rebuild()` are strictly read-only.** A vault scan must not produce a diff. Repair
   of missing schema fields happens on `Workspace::open_note`, which is one file and one user action.
 - **`created_at` is not parsed.** It is decoded from the note id; the scanner never looks for it.
-- **`edited_at` is exempt from the rebuild invariant.** See `overview.md`. The tempting "fix" is to
+- **`mtime_ns` is exempt from the rebuild invariant.** See `overview.md`. The tempting "fix" is to
   make rebuild write mtime everywhere, which spreads the lossiness instead of containing it.
 
 ### Rebuild
@@ -145,6 +247,9 @@ Three things stage 1b changed under this stage's feet, none of them optional:
 - [ ] **The invariant, as a test**: for a fixture vault mutated through a sequence of operations,
       `sync()` and `rebuild()` produce identical logical content. Run it in CI. Every future feature
       that adds a table must extend this test or it will rot.
+- [ ] The comparison is over whole **`Record`s**, not note rows. A field the index forgets is
+      invisible if the test only checks the columns the index happens to have — see "Everything a
+      `Record` holds must be reconstructible from the index".
 
 ### Queries
 
@@ -180,6 +285,11 @@ Enough to prove the schema; the surfaces come later.
 - A note whose parent was purged appears in the timeline as a root.
 - 10k synthetic notes: cold rebuild and warm `sync()` both measured and written down here. Warm sync
   should be low tens of milliseconds; if it is not, the fast path is wrong.
+- A note that `sync()` skips still answers for its links, its backlinks, and its undeclared keys —
+  the whole of its `Record` comes back from the index.
+- A vault whose title key is declared as something other than `title` fills `notes.title`, and `raw`
+  records the key under the name the file uses.
+- An unreadable file is reported on every `sync()`, not only the first, and never acquires a row.
 
 ## Risks
 
@@ -226,7 +336,7 @@ invariant stops being trivially true and starts being the thing to test.
 
 ### What the snapshot does *not* do — this stage's actual work
 
-- **No `files` table.** There is no `(size, mtime_ns, content_hash)` fast path, so every `sync()`
+- **No change detection.** There is no `(size, mtime_ns, content_hash)` fast path, so every `sync()`
   reads and reparses every note. This is the whole performance story and the reason the stage
   exists. "Touching a file without changing its content produces zero reparses" is currently
   **false**, and is an acceptance criterion here.

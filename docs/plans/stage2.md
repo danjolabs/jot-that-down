@@ -38,7 +38,8 @@ Rules that follow from the locked decisions and must be enforced in one place:
   live and render a trashed-parent placeholder — your call, and it is also the only behavior that
   survives a rebuild without extra bookkeeping.
 - **The frontmatter column carries only what stage 1b left in the file.** `id` and `created_at`
-  are the filename's; `edited_at` and `trashed_at` are index-only. `create` mints the id, and the
+  are the filename's; `edited_at` is index-only. *(Amended: `trashed_at` went with it in
+  `stage4.md` — one `mtime_ns` per note, and `state` says what it means.)* `create` mints the id, and the
   creation-time `FilenameSlug` option decides whether the filename gets a slug from the title.
   Re-slugging on a title change is safe: the identity is the UUID and it does not move.
 - **`relation:root` does not exist.** It was assigned once at creation and never recomputed, on the

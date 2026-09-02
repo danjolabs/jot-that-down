@@ -22,9 +22,9 @@ Carried in from `docs/conversation/initial.md`; stages assume these without re-a
 | Thread storage | Adjacency: `relation:reply_to`, and nothing else. The root is **derived** — a memoized walk at scan time, never stored in a file. Moved from "`reply_to` + denormalized `relation:root`" in the [pre-stage-4 refactor](pre-stage4-refactor.md). Paths (form 1) and segments (form 2) are computed at render time, never stored. |
 | Quote | Single nullable `relation:quote_to`. Cross-tree: never affects the derived root, never joins the quoted note's thread. |
 | Frontmatter meaning | A key's **role** is declared by its `type`, not by its name. `workspace.toml` carries an ordered `[[schema.frontmatter]]` list; `manifest schema_version = 2`. A key the schema gives no role is preserved verbatim and never interpreted. |
-| Trash | Move the file into `.jot/.trash/`. Location on disk *is* the state — the frontmatter stamp is gone (stage 1b); the index's `trashed_at` is a mirrored column, derived like everything else. |
+| Trash | Move the file into `.jot/.trash/`. Location on disk *is* the state — the frontmatter stamp is gone (stage 1b). There is no `trashed_at`: the index keeps one `mtime_ns` per note, and `state` says whether it means "last edited" or "moved to the trash". Amended in [stage4.md](stage4.md), because a rename leaves mtime alone and writes nothing else, so a separate stamp would be state living only in the database. |
 | Trashing a parent | Replies stay live and render a trashed-parent placeholder. Trash is never cascading. |
-| Index scope | Title, dates, relations, links. Note bodies are not stored in the index. |
+| Index scope | Title, dates, relations, links, and the whole frontmatter block as JSON. Note bodies are not stored in the index. One table per kind of fact: `notes`, `relations`, `links` — no `files` table, because it would be 1:1 with `notes` and the filename is already the join key. |
 | Search | Title and metadata only. Full-text deferred — see `docs/sidenote.md`. |
 | Tags | Out of scope. Links in. |
 | Link scope | Resolve within one workspace only. A workspace is an independent unit. |

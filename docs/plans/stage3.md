@@ -209,7 +209,7 @@ injection.
 ## Risks
 
 - **Startup latency.** `sync()` on every invocation is the whole risk, and it is **larger than this
-  entry assumed**: with stage 4 deferred there is no `files` fast path at all, so every invocation
+  entry assumed**: with stage 4 deferred there is no change-detection fast path at all, so every invocation
   reads and reparses every note in the vault. Fine at hundreds of notes, and unmeasured above that.
   Measure at 10k during stage 4; if the fast path is not enough, add a `--no-sync` flag for hot paths
   and a background sync, but do not optimize before measuring.
