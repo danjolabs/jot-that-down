@@ -35,7 +35,7 @@ use jot_core::note::{Note, NoteId};
 use jot_core::query::{Draft, Edit, FileSort, Resolution, SearchQuery, State, TimelineQuery};
 use jot_core::registry::Entry;
 use jot_core::shortid;
-use jot_core::workspace::{Workspace, WorkspaceKind};
+use jot_core::workspace::Workspace;
 use output::{IdWidth, MIN_ID_WIDTH, Style};
 use serde_json::json;
 use std::io::{IsTerminal, Read, Write};
@@ -330,9 +330,6 @@ enum WsCommand {
     New {
         /// Where to create it.
         path: PathBuf,
-        /// `jot` for threaded UUID-named notes, `plain` for folders and free names.
-        #[arg(long, default_value = "jot")]
-        kind: String,
     },
     /// Unregister a workspace. The directory and its notes are left alone.
     #[command(visible_alias = "rm")]
@@ -492,7 +489,7 @@ fn new(workspace: &mut Workspace, args: &NewArgs, cli: &Cli, style: &Style) -> R
                 "\n",
                 &workspace.manifest().schema,
             );
-            let edited = editor::edit(&seed).map_err(Failure::runtime)?;
+            let edited = editor::edit(workspace.schema(), &seed).map_err(Failure::runtime)?;
             if edited.is_empty() {
                 // A note that was never written is the failure this app exists to prevent — but a
                 // deliberately empty buffer is how every editor-driven tool says "cancel".
@@ -502,16 +499,11 @@ fn new(workspace: &mut Workspace, args: &NewArgs, cli: &Cli, style: &Style) -> R
 
             // The buffer is authoritative for everything a new note may declare. `reply_to` is
             // included — choosing a parent is a normal thing to do while writing, and unlike an
-            // *edit* it re-parents nothing. `relation:root` is not: it is assigned by `create`.
+            // *edit* it re-parents nothing. There is no root to warn about any more: it is
+            // derived from `reply_to` and no note file carries one.
             draft.title = edited.frontmatter.title.clone();
             draft.quote = edited.frontmatter.quote;
             draft.reply_to = edited.frontmatter.reply_to;
-            if edited.frontmatter.root.is_some() {
-                eprintln!(
-                    "jot: warning: `relation:root` is assigned by jot when the note is created \
-                     and cannot be set by hand; the value in the buffer was ignored."
-                );
-            }
             // Carries any key the schema declares that jot does not interpret, so a filled-in
             // custom field survives instead of being silently dropped.
             draft.extra = Some(edited.frontmatter.clone());
@@ -674,7 +666,7 @@ fn edit(
     if change.is_empty() {
         let note = load(workspace, id)?;
         let seed = editor::seed(&note.frontmatter, &note.body, &workspace.manifest().schema);
-        let edited = editor::edit(&seed).map_err(Failure::runtime)?;
+        let edited = editor::edit(workspace.schema(), &seed).map_err(Failure::runtime)?;
         if edited.unchanged {
             eprintln!("jot: no changes");
             return Ok(());
@@ -1007,13 +999,8 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
             eprintln!("jot: pruned {} workspace(s)", stale.len());
         }
 
-        WsCommand::New { path, kind } => {
-            let kind = WorkspaceKind::parse(kind).ok_or_else(|| {
-                Failure::runtime(anyhow::anyhow!(
-                    "unknown workspace kind `{kind}` (expected `jot` or `plain`)"
-                ))
-            })?;
-            let workspace = Workspace::init(path, kind).map_err(anyhow::Error::from)?;
+        WsCommand::New { path } => {
+            let workspace = Workspace::init(path).map_err(anyhow::Error::from)?;
             register(&mut registry, &workspace)?;
             eprintln!(
                 "jot: created `{}` at {}",

@@ -24,9 +24,8 @@
 //! # The rules it inherits
 //!
 //! * **Scanning never writes.** A vault scan that produced a diff would make `sync()` and
-//!   `rebuild()` disagree. Repair of missing schema fields happens on
-//!   [`Workspace::open_note`](crate::workspace::Workspace::open_note), which is one file and one
-//!   user action.
+//!   `rebuild()` disagree. Nothing in the crate repairs a note file any more either: the last
+//!   read-path write existed to fill in a missing `relation:root`, and that key is gone.
 //! * **Nothing here is a write source.** A [`Record`] is a query result, and stage 4's risk table
 //!   forbids building a write from one: a `NoteMeta` carries no unknown frontmatter keys, so
 //!   writing one back would destroy every key jot does not interpret. Records are used to find a
@@ -36,8 +35,20 @@
 //! * **`created_at` is never parsed.** It is decoded from the id's UUIDv7 timestamp.
 //! * **Dangling is designed for.** A `reply_to` naming a note with no file is a normal state, not a
 //!   problem to report.
+//!
+//! # The derived root
+//!
+//! `relation:root` used to be a key in every note file — a denormalized cache, assigned at
+//! creation and never recomputed. It is gone, and [`NoteMeta::root`] is now computed here, by
+//! walking `reply_to` upward over records already in memory.
+//!
+//! Deliberately **not** a recursive CTE when stage 4 lands. Computing root in SQL is what makes
+//! cycles dangerous; doing it in Rust keeps the database a dumb cache and keeps cycle detection
+//! free, since the `seen` set a walk needs anyway *is* the detector. Memoized over the record map
+//! it is O(n) overall: a walk stops as soon as it reaches an ancestor whose root is known.
 
 use crate::error::Result;
+use crate::frontmatter::FrontmatterSchema;
 use crate::fs;
 use crate::link;
 use crate::note::{Note, NoteId, NoteMeta};
@@ -72,6 +83,13 @@ pub struct Record {
     /// `(src_id, dst_id)`. The individual occurrences, with their offsets, come from
     /// [`link::extract`] on demand — a body is not stored here.
     pub links: Vec<NoteId>,
+    /// Frontmatter keys this note carries that no `[[schema.frontmatter]]` entry declares, in the
+    /// order the file writes them.
+    ///
+    /// Kept per record rather than tallied as files are read, so that the vault-wide
+    /// [`Problem::UndeclaredKey`] can be rebuilt from scratch whenever the record set changes. A
+    /// key that stops being carried, or starts being declared, stops being reported.
+    pub undeclared: Vec<String>,
 }
 
 /// Something the scan found that a person may want to know about.
@@ -100,6 +118,40 @@ pub enum Problem {
         /// The file that was ignored.
         ignored: PathBuf,
     },
+    /// Walking `relation:reply_to` upward from this note came back to a note already on the walk.
+    ///
+    /// A cycle needs a hand edit, and in this project that is the premise rather than the edge
+    /// case: the files are the truth and people edit them directly. It arrives via a pasted UUID
+    /// pointing at the note itself, a hand-made two-note loop, a copied file, or a git or sync
+    /// merge.
+    ///
+    /// **A problem, not an error**: one bad file must not make the other nine hundred unreadable.
+    /// The note becomes its own root, so it appears in the timeline as a top-level note — it stays
+    /// visible, because something that needs fixing has to be findable.
+    ReplyCycle {
+        /// The file the walk started from.
+        path: PathBuf,
+        /// The note the walk came back to.
+        id: NoteId,
+    },
+    /// Notes carry a frontmatter key that no `[[schema.frontmatter]]` entry declares.
+    ///
+    /// An undeclared key is a **legitimate state**, never an error: it is preserved verbatim
+    /// through every write, which is the rule this project is built on. What it is not is
+    /// *interpreted* — core will not read a role out of it, and stage 4's index will not cache it.
+    /// Reporting it is how a person gets the chance to declare it and have it mean something.
+    ///
+    /// Aggregated per key across the vault rather than raised per file. The actionable unit is one
+    /// manifest line, not nine hundred notes, and a per-file variant would bury every other problem
+    /// under a legacy key that every note carries.
+    UndeclaredKey {
+        /// The undeclared key.
+        key: String,
+        /// One note that carries it, first in scan order — somewhere to look.
+        example: PathBuf,
+        /// How many notes carry it.
+        notes: usize,
+    },
 }
 
 impl std::fmt::Display for Problem {
@@ -113,6 +165,22 @@ impl std::fmt::Display for Problem {
                 "two files claim note `{id}`: using `{}`, ignoring `{}`",
                 kept.display(),
                 ignored.display()
+            ),
+            Problem::ReplyCycle { path, id } => write!(
+                f,
+                "`{}`: `relation:reply_to` loops back to note `{id}`; treating it as its own root",
+                path.display()
+            ),
+            Problem::UndeclaredKey {
+                key,
+                example,
+                notes,
+            } => write!(
+                f,
+                "`{key}` is carried by {notes} {} but declared by no `[[schema.frontmatter]]` \
+                 entry, so it is preserved and never interpreted — e.g. `{}`",
+                if *notes == 1 { "note" } else { "notes" },
+                example.display()
             ),
         }
     }
@@ -159,6 +227,12 @@ impl SyncReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     records: BTreeMap<NoteId, Record>,
+    /// Problems raised while reading files: unreadable notes and duplicate ids. Accumulated as
+    /// files are ingested.
+    file_problems: Vec<Problem>,
+    /// `file_problems`, plus whatever the root walk found. Rebuilt from scratch by
+    /// [`Snapshot::derive_roots`] every time the record set changes, so a cycle that gets fixed
+    /// stops being reported instead of accumulating one entry per rescan.
     problems: Vec<Problem>,
 }
 
@@ -173,7 +247,7 @@ impl Snapshot {
     /// [`Error::ReadDir`](crate::error::Error::ReadDir) if either directory cannot be listed. A
     /// *file* that cannot be read is a [`Problem`], not an error: one bad note must not take the
     /// vault down with it.
-    pub fn scan(root: &Path) -> Result<Snapshot> {
+    pub fn scan(schema: &FrontmatterSchema, root: &Path) -> Result<Snapshot> {
         let mut snapshot = Snapshot::default();
 
         // Active before trashed, and `fs`'s enumerators return sorted paths, so "first in scan
@@ -188,30 +262,40 @@ impl Snapshot {
             );
 
         for (path, state) in candidates {
-            snapshot.ingest(&path, state);
+            snapshot.ingest(schema, &path, state);
         }
+        snapshot.derive_roots();
         Ok(snapshot)
     }
 
     /// Read one file into the snapshot, turning any failure into a [`Problem`].
-    fn ingest(&mut self, path: &Path, state: State) {
+    fn ingest(&mut self, schema: &FrontmatterSchema, path: &Path, state: State) {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
             Err(source) => return self.problem_at(path, &source.to_string()),
         };
-        let note = match Note::parse_at(path, &bytes) {
+        let note = match Note::parse_at(schema, path, &bytes) {
             Ok(note) => note,
             Err(err) => return self.problem_at(path, &err.to_string()),
         };
 
         if let Some(kept) = self.records.get(&note.id) {
-            self.problems.push(Problem::DuplicateId {
+            self.file_problems.push(Problem::DuplicateId {
                 id: note.id,
                 kept: kept.path.clone(),
                 ignored: path.to_path_buf(),
             });
             return;
         }
+
+        let undeclared = note
+            .frontmatter
+            .unknown()
+            .iter()
+            .map(|key| key.name())
+            .filter(|name| !schema.contains(name))
+            .map(str::to_owned)
+            .collect();
 
         self.records.insert(
             note.id,
@@ -221,8 +305,111 @@ impl Snapshot {
                 state,
                 edited_at: mtime(path),
                 links: distinct_targets(&note.body),
+                undeclared,
             },
         );
+    }
+
+    /// Fill in every record's derived `root`, and rebuild the problem list.
+    ///
+    /// Roots first, reporting any `reply_to` cycle on the way; then the vault-wide undeclared-key
+    /// tally. Both are functions of the record set, so both are recomputed whenever it changes
+    /// rather than patched — which is what lets a fixed cycle, or a newly declared key, stop being
+    /// reported instead of accumulating one entry per rescan.
+    ///
+    /// One memoized upward walk per note. A walk stops at the first ancestor whose root is already
+    /// known, so the whole pass is O(n) however deep the threads are.
+    ///
+    /// Two chain endings are *not* problems, and both are load-bearing:
+    ///
+    /// - **No parent.** The note is its own root.
+    /// - **A parent the vault does not hold.** The walk stops there and that id *is* the root —
+    ///   dangling references are a designed state, and the last id the chain actually named is the
+    ///   best answer the files have. This is also what keeps the children of a purged note grouped
+    ///   with each other: they all carry the same missing id.
+    ///
+    /// A cycle is the third ending. The note that started the walk becomes its own root and the
+    /// cycle is reported, so it is visible in the timeline rather than silently truncated.
+    fn derive_roots(&mut self) {
+        self.problems = self.file_problems.clone();
+
+        let mut roots: BTreeMap<NoteId, NoteId> = BTreeMap::new();
+        let mut cycles: Vec<(NoteId, PathBuf)> = Vec::new();
+
+        for (&start, record) in &self.records {
+            if roots.contains_key(&start) {
+                continue;
+            }
+            // The notes walked on the way to an answer, so the answer can be memoized for all of
+            // them at once — and, since it doubles as the `seen` set, so a repeat is a cycle.
+            let mut walked: Vec<NoteId> = vec![start];
+            let mut current = record.meta.reply_to;
+
+            let root = loop {
+                let Some(id) = current else {
+                    // No parent: the last note walked is its own root.
+                    break *walked.last().expect("walked is never empty");
+                };
+                if let Some(known) = roots.get(&id) {
+                    break *known;
+                }
+                if walked.contains(&id) {
+                    cycles.push((start, record.path.clone()));
+                    // Its own root, so a note whose chain loops still appears at top level.
+                    break start;
+                }
+                let Some(parent) = self.records.get(&id) else {
+                    // A parent the vault does not hold ends the walk, and *is* the root.
+                    break id;
+                };
+                walked.push(id);
+                current = parent.meta.reply_to;
+            };
+
+            for id in walked {
+                roots.insert(id, root);
+            }
+        }
+
+        for (id, record) in &mut self.records {
+            record.meta.root = roots.get(id).copied();
+        }
+        for (id, path) in cycles {
+            self.problems.push(Problem::ReplyCycle { path, id });
+        }
+        self.report_undeclared_keys();
+    }
+
+    /// Raise one [`Problem::UndeclaredKey`] per key the vault carries and the schema does not
+    /// declare.
+    ///
+    /// Rebuilt from the records rather than tallied as files are read, so it is correct after an
+    /// incremental [`Snapshot::reindex`] or [`Snapshot::forget`] and not only after a full scan —
+    /// the same reason the cycle walk above is redone rather than patched.
+    ///
+    /// Keyed order, and the lexicographically first path as the example, so two scans of one vault
+    /// report the same thing in the same order.
+    fn report_undeclared_keys(&mut self) {
+        let mut seen: BTreeMap<&str, (&Path, usize)> = BTreeMap::new();
+        for record in self.records.values() {
+            for key in &record.undeclared {
+                let entry = seen
+                    .entry(key.as_str())
+                    .or_insert((record.path.as_path(), 0));
+                entry.0 = entry.0.min(record.path.as_path());
+                entry.1 += 1;
+            }
+        }
+
+        let raised: Vec<Problem> = seen
+            .into_iter()
+            .map(|(key, (example, notes))| Problem::UndeclaredKey {
+                key: key.to_owned(),
+                example: example.to_path_buf(),
+                notes,
+            })
+            .collect();
+        self.problems.extend(raised);
     }
 
     /// Re-read one file into the snapshot after a write, replacing whatever it held for `id`.
@@ -231,21 +418,35 @@ impl Snapshot {
     /// file and then one record, rather than paying for a whole rescan. Ordering matters and is
     /// the caller's job — filesystem first, then this — so that an interruption leaves the
     /// snapshot stale rather than the vault wrong. Stale is what the next `sync()` repairs.
-    pub(crate) fn reindex(&mut self, id: NoteId, path: &Path, state: State) {
+    pub(crate) fn reindex(
+        &mut self,
+        schema: &FrontmatterSchema,
+        id: NoteId,
+        path: &Path,
+        state: State,
+    ) {
         self.records.remove(&id);
-        self.ingest(path, state);
+        self.ingest(schema, path, state);
+        // The changed note may have gained or lost a parent, which moves the root of everything
+        // beneath it. Redoing the whole memoized pass is O(n) over records already in memory.
+        self.derive_roots();
     }
 
     /// Drop a note from the snapshot — after a purge, or after its file moved away.
     pub(crate) fn forget(&mut self, id: NoteId) {
         self.records.remove(&id);
+        // Purging the middle of a chain **splits the subtree**, and that is intended: the note
+        // that grouped them is genuinely gone, and the surviving children now root at the id their
+        // `relation:reply_to` still names, which resolves to `Ref::Deleted`.
+        self.derive_roots();
     }
 
     fn problem_at(&mut self, path: &Path, message: &str) {
-        self.problems.push(Problem::Unreadable {
+        self.file_problems.push(Problem::Unreadable {
             path: path.to_path_buf(),
             message: message.to_owned(),
         });
+        self.problems = self.file_problems.clone();
     }
 
     // ------------------------------------------------------------------------------- diffing
@@ -486,8 +687,17 @@ impl Snapshot {
         }
     }
 
-    /// Whether this note heads a thread: no parent, or a parent the vault does not hold.
+    /// Whether this note heads a thread: its derived root is itself, or its parent is a note the
+    /// vault does not hold.
+    ///
+    /// The first clause is what keeps a note in a `reply_to` cycle visible. Its parent *is* held —
+    /// itself, or another note in the loop — so the second clause alone would file it under a
+    /// thread that has no head, and it would never appear in a timeline. Something that needs
+    /// fixing has to be findable.
     fn is_root(&self, record: &Record) -> bool {
+        if record.meta.root == Some(record.meta.id) {
+            return true;
+        }
         match record.meta.reply_to {
             None => true,
             Some(parent) => !self.records.contains_key(&parent),
@@ -653,7 +863,7 @@ fn mtime(path: &Path) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::{Workspace, WorkspaceKind};
+    use crate::workspace::Workspace;
     use std::fmt::Write as _;
 
     const A: &str = "01a03d60-0000-7000-8000-00000000000a";
@@ -670,7 +880,7 @@ mod tests {
     struct Spec(&'static str, Vec<String>, String);
 
     fn note(id: &'static str) -> Spec {
-        Spec(id, vec![format!("relation:root: {id}")], String::new())
+        Spec(id, Vec::new(), String::new())
     }
 
     impl Spec {
@@ -678,19 +888,20 @@ mod tests {
             self.1.insert(0, format!("title: {title}"));
             self
         }
-        fn reply_to(mut self, parent: &str, root: &str) -> Self {
-            self.1 = vec![
-                format!("relation:root: {root}"),
-                format!("relation:reply_to: {parent}"),
-            ];
+        fn reply_to(mut self, parent: &str) -> Self {
+            self.1.push(format!("relation:reply_to: {parent}"));
             self
         }
         fn quote(mut self, quoted: &str) -> Self {
-            self.1.push(format!("relation:quote: {quoted}"));
+            self.1.push(format!("relation:quote_to: {quoted}"));
             self
         }
         fn body(mut self, body: &str) -> Self {
             self.2 = body.to_owned();
+            self
+        }
+        fn line(mut self, line: &str) -> Self {
+            self.1.push(line.to_owned());
             self
         }
         fn render(&self) -> String {
@@ -706,7 +917,7 @@ mod tests {
     /// A workspace holding `specs`, plus any spec named in `trashed` moved into `.jot/.trash/`.
     fn vault(specs: Vec<Spec>, trashed: &[&str]) -> (tempfile::TempDir, Workspace) {
         let tmp = tempfile::tempdir().unwrap();
-        let ws = Workspace::init(tmp.path(), WorkspaceKind::Jot).unwrap();
+        let ws = Workspace::init(tmp.path()).unwrap();
         for spec in &specs {
             let dir = if trashed.contains(&spec.0) {
                 ws.trash_dir()
@@ -719,17 +930,121 @@ mod tests {
     }
 
     fn scan(ws: &Workspace) -> Snapshot {
-        Snapshot::scan(ws.root()).unwrap()
+        Snapshot::scan(ws.schema(), ws.root()).unwrap()
     }
 
     /// The worked example's chain: `a → b → c`, plus `d` replying to `a`.
     fn chain() -> Vec<Spec> {
         vec![
             note(A).title("root"),
-            note(B).reply_to(A, A).title("reply"),
-            note(C).reply_to(B, A).title("deep"),
-            note(D).reply_to(A, A).title("fork"),
+            note(B).reply_to(A).title("reply"),
+            note(C).reply_to(B).title("deep"),
+            note(D).reply_to(A).title("fork"),
         ]
+    }
+
+    // --------------------------------------------------------------------- undeclared keys
+
+    /// An undeclared key is preserved and never interpreted. Reporting it is how a person learns
+    /// it could be declared and made to mean something.
+    #[test]
+    fn a_key_the_schema_does_not_declare_is_reported_once_for_the_whole_vault() {
+        let (_tmp, ws) = vault(
+            vec![
+                note(A).title("a").line("summary: one"),
+                note(B).title("b").line("summary: two"),
+                note(C).title("c"),
+            ],
+            &[],
+        );
+        let snap = scan(&ws);
+
+        let [
+            Problem::UndeclaredKey {
+                key,
+                example,
+                notes,
+            },
+        ] = snap.problems()
+        else {
+            panic!("expected one undeclared-key problem: {:?}", snap.problems());
+        };
+        assert_eq!(key, "summary");
+        assert_eq!(*notes, 2, "counted per note, not per vault-wide occurrence");
+        assert!(example.ends_with(format!("{A}.md")), "{example:?}");
+        assert!(
+            snap.problems()[0].to_string().contains("summary"),
+            "the message names the key: {}",
+            snap.problems()[0]
+        );
+    }
+
+    /// The rule the whole refactor turns on: a `relation:root` written before it is an ordinary
+    /// undeclared key. Reported, preserved, and never interpreted as a role.
+    #[test]
+    fn a_legacy_relation_root_is_reported_rather_than_read() {
+        let (_tmp, ws) = vault(
+            vec![note(A).title("a").line(&format!("relation:root: {A}"))],
+            &[],
+        );
+        let snap = scan(&ws);
+
+        assert!(
+            matches!(snap.problems(), [Problem::UndeclaredKey { key, .. }] if key == "relation:root"),
+            "{:?}",
+            snap.problems()
+        );
+        assert_eq!(
+            snap.get(nid(A)).unwrap().meta.root,
+            Some(nid(A)),
+            "the root is derived from `reply_to`, not read from the legacy key"
+        );
+    }
+
+    /// Declaring the key is what makes the report stop — that is the point of raising it.
+    #[test]
+    fn declaring_the_key_stops_the_report() {
+        use crate::frontmatter::{FieldType, FrontmatterEntry, FrontmatterSchema};
+
+        let (_tmp, ws) = vault(vec![note(A).title("a").line("summary: one")], &[]);
+        assert_eq!(scan(&ws).problems().len(), 1);
+
+        let declared = FrontmatterSchema::try_new(
+            ws.schema()
+                .entries()
+                .iter()
+                .cloned()
+                .chain([FrontmatterEntry::with_key("summary", FieldType::Text(None))]),
+        )
+        .unwrap();
+        let snap = Snapshot::scan(&declared, ws.root()).unwrap();
+        assert!(snap.problems().is_empty(), "{:?}", snap.problems());
+    }
+
+    /// The tally is a function of the record set, so an incremental update corrects it. Without
+    /// this the count would climb on every write that re-reads a file.
+    #[test]
+    fn forgetting_the_last_note_carrying_a_key_retires_its_report() {
+        let (_tmp, ws) = vault(
+            vec![
+                note(A).title("a").line("summary: one"),
+                note(B).title("b").line("summary: two"),
+            ],
+            &[],
+        );
+        let mut snap = scan(&ws);
+        assert!(matches!(
+            snap.problems(),
+            [Problem::UndeclaredKey { notes: 2, .. }]
+        ));
+
+        snap.forget(nid(B));
+        assert!(matches!(
+            snap.problems(),
+            [Problem::UndeclaredKey { notes: 1, .. }]
+        ));
+        snap.forget(nid(A));
+        assert!(snap.problems().is_empty(), "{:?}", snap.problems());
     }
 
     // ------------------------------------------------------------------------------- scanning
@@ -770,7 +1085,7 @@ mod tests {
         let snap = scan(&ws);
         let record = snap.get(nid(A)).unwrap();
         assert!(record.path.starts_with(ws.root()));
-        assert!(Note::load(&record.path).is_ok());
+        assert!(Note::load(ws.schema(), &record.path).is_ok());
     }
 
     #[test]
@@ -1327,7 +1642,7 @@ mod tests {
 
     #[test]
     fn quoted_by_is_the_inverse_of_the_quote_relation_and_is_not_a_thread_edge() {
-        let (_tmp, ws) = vault(vec![note(A), note(B).quote(A), note(C).reply_to(A, A)], &[]);
+        let (_tmp, ws) = vault(vec![note(A), note(B).quote(A), note(C).reply_to(A)], &[]);
         let snap = scan(&ws);
 
         assert_eq!(

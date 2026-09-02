@@ -171,7 +171,12 @@ pub struct NoteMeta {
     pub created_at: Option<DateTime<Utc>>,
     /// Display title. `None` means untitled.
     pub title: Option<String>,
-    /// Denormalized thread root.
+    /// The thread root — **derived, not stored.**
+    ///
+    /// No file asserts this. It is the transitive closure of `reply_to`, computed by
+    /// [`crate::snapshot::Snapshot`] at scan time and written in here afterwards, which is why
+    /// [`Note::meta`] leaves it `None`: a note's own bytes cannot answer it. A note in a
+    /// `reply_to` cycle roots at itself.
     pub root: Option<NoteId>,
     /// The note this one replies to. `None` means top-level.
     pub reply_to: Option<NoteId>,
@@ -215,7 +220,8 @@ impl Note {
             id: self.id,
             created_at: self.created_at(),
             title: self.frontmatter.title.clone(),
-            root: self.frontmatter.root,
+            // Derived, and a note alone cannot derive it. `Snapshot` fills this in.
+            root: None,
             reply_to: self.frontmatter.reply_to,
             quote: self.frontmatter.quote,
         }
@@ -229,8 +235,8 @@ impl Note {
     /// # Errors
     ///
     /// Whatever [`Frontmatter::parse_document`] raises.
-    pub fn parse(id: NoteId, bytes: &[u8]) -> Result<Note> {
-        Note::parse_with_id(id, Path::new(IN_MEMORY_PATH), bytes)
+    pub fn parse(schema: &FrontmatterSchema, id: NoteId, bytes: &[u8]) -> Result<Note> {
+        Note::parse_with_id(schema, id, Path::new(IN_MEMORY_PATH), bytes)
     }
 
     /// Parse a note from bytes read from `path`, taking the identity from `path`'s filename.
@@ -245,13 +251,18 @@ impl Note {
     /// `parse_note_filename` is the only filename parser in the crate — a file
     /// [`crate::fs::live_note_paths`] enumerates and that parser rejects must not load cleanly
     /// here, or enumeration and the scanner disagree about what a note is.
-    pub fn parse_at(path: &Path, bytes: &[u8]) -> Result<Note> {
+    pub fn parse_at(schema: &FrontmatterSchema, path: &Path, bytes: &[u8]) -> Result<Note> {
         let id = NoteId::from(crate::fs::parse_note_filename(path)?);
-        Note::parse_with_id(id, path, bytes)
+        Note::parse_with_id(schema, id, path, bytes)
     }
 
-    fn parse_with_id(id: NoteId, path: &Path, bytes: &[u8]) -> Result<Note> {
-        let (frontmatter, body) = Frontmatter::parse_document(path, bytes)?;
+    fn parse_with_id(
+        schema: &FrontmatterSchema,
+        id: NoteId,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<Note> {
+        let (frontmatter, body) = Frontmatter::parse_document(schema, path, bytes)?;
         Ok(Note {
             id,
             frontmatter,
@@ -264,12 +275,12 @@ impl Note {
     /// # Errors
     ///
     /// [`Error::Read`], plus whatever [`Note::parse_at`] raises.
-    pub fn load(path: &Path) -> Result<Note> {
+    pub fn load(schema: &FrontmatterSchema, path: &Path) -> Result<Note> {
         let bytes = std::fs::read(path).map_err(|source| Error::Read {
             path: path.to_path_buf(),
             source,
         })?;
-        Note::parse_at(path, &bytes)
+        Note::parse_at(schema, path, &bytes)
     }
 
     /// The note's bytes: the block rendered in `schema` order, then the body untouched.
@@ -524,7 +535,7 @@ Body.
         // The identity change, stated as a test: nothing in the block carries an id, so the one
         // the caller supplies is the one that comes back — even a fresh, unrelated one.
         let mine = NoteId::new();
-        let note = Note::parse(mine, MINIMAL.as_bytes()).unwrap();
+        let note = Note::parse(&schema(), mine, MINIMAL.as_bytes()).unwrap();
         assert_eq!(note.id, mine);
         assert_eq!(note.frontmatter.title.as_deref(), Some("A note"));
         assert_eq!(note.body, "\nBody.\n");
@@ -537,7 +548,7 @@ Body.
         // any other. The note's identity remains the filename's.
         let doc = format!("---\nid: {MINIMAL_ID}\ntitle: x\n---\n\nB.\n");
         let mine = NoteId::new();
-        let note = Note::parse(mine, doc.as_bytes()).unwrap();
+        let note = Note::parse(&schema(), mine, doc.as_bytes()).unwrap();
         assert_eq!(note.id, mine);
         assert_eq!(
             note.frontmatter.unknown_source("id"),
@@ -549,17 +560,19 @@ Body.
 
     #[test]
     fn parse_errors_name_something_even_without_a_path() {
-        let e = Note::parse(id(), b"no fence at all\n").unwrap_err();
+        let e = Note::parse(&schema(), id(), b"no fence at all\n").unwrap_err();
         assert_eq!(e.path().unwrap().to_str().unwrap(), IN_MEMORY_PATH);
         assert!(e.to_string().contains(IN_MEMORY_PATH), "{e}");
     }
 
     #[test]
     fn parse_then_render_is_a_fixed_point() {
-        let note = Note::parse(id(), MINIMAL.as_bytes()).unwrap();
+        let note = Note::parse(&schema(), id(), MINIMAL.as_bytes()).unwrap();
         let once = note.to_bytes(&schema());
         assert_eq!(once, MINIMAL.as_bytes());
-        let twice = Note::parse(id(), &once).unwrap().to_bytes(&schema());
+        let twice = Note::parse(&schema(), id(), &once)
+            .unwrap()
+            .to_bytes(&schema());
         assert_eq!(once, twice);
     }
 
@@ -567,7 +580,7 @@ Body.
     fn mutating_a_field_changes_the_bytes() {
         // Stage 1's F2, made unrepresentable. Under byte replay this wrote the pre-edit block;
         // with one rendering path there is no second method that could.
-        let mut note = Note::parse(id(), MINIMAL.as_bytes()).unwrap();
+        let mut note = Note::parse(&schema(), id(), MINIMAL.as_bytes()).unwrap();
         note.frontmatter.title = Some("Edited".into());
         let text = String::from_utf8(note.to_bytes(&schema())).unwrap();
         assert!(text.contains("title: Edited"), "{text}");
@@ -578,7 +591,7 @@ Body.
     fn the_write_path_leaves_the_body_alone() {
         let body = "\n* a\n+ b\n\n_em_ and __strong__\n\ntrailing spaces:  \nnext\n";
         let doc = format!("---\ntitle: x\n---{body}");
-        let mut note = Note::parse(id(), doc.as_bytes()).unwrap();
+        let mut note = Note::parse(&schema(), id(), doc.as_bytes()).unwrap();
         note.frontmatter.title = Some("y".into());
         let out = String::from_utf8(note.to_bytes(&schema())).unwrap();
         assert!(out.ends_with(body), "body was rewritten:\n{out}");
@@ -588,7 +601,7 @@ Body.
     fn an_empty_body_and_a_body_that_is_only_a_fence_line_both_round_trip() {
         for body in ["", "\n", "\n---\n", "---\n"] {
             let doc = format!("---\ntitle: x\n---\n{body}");
-            let note = Note::parse(id(), doc.as_bytes()).unwrap();
+            let note = Note::parse(&schema(), id(), doc.as_bytes()).unwrap();
             assert_eq!(note.body, body, "body mismatch for {body:?}");
             assert_eq!(note.to_bytes(&schema()), doc.as_bytes(), "for {body:?}");
         }
@@ -605,7 +618,7 @@ Body.
     #[test]
     fn a_file_ending_at_the_closing_fence_gains_a_terminator() {
         let doc = "---\ntitle: x\n---";
-        let note = Note::parse(id(), doc.as_bytes()).unwrap();
+        let note = Note::parse(&schema(), id(), doc.as_bytes()).unwrap();
         assert_eq!(note.body, "");
 
         let once = note.to_bytes(&schema());
@@ -613,7 +626,9 @@ Body.
             String::from_utf8(once.clone()).unwrap(),
             "---\ntitle: x\n---\n"
         );
-        let twice = Note::parse(id(), &once).unwrap().to_bytes(&schema());
+        let twice = Note::parse(&schema(), id(), &once)
+            .unwrap()
+            .to_bytes(&schema());
         assert_eq!(once, twice, "render is still a fixed point");
     }
 
@@ -623,14 +638,14 @@ Body.
         // a fixture. Mixing an LF-rendered known key with a CRLF unknown key's preserved bytes
         // would produce a block nobody would have written.
         let doc = "---\r\ntitle: x\r\nsummary: |\r\n  kept\r\n---\r\n\r\nBody.\r\n";
-        let note = Note::parse(id(), doc.as_bytes()).unwrap();
+        let note = Note::parse(&schema(), id(), doc.as_bytes()).unwrap();
         assert_eq!(note.frontmatter.newline(), Newline::Crlf);
         assert_eq!(note.to_bytes(&schema()), doc.as_bytes());
     }
 
     #[test]
     fn try_to_bytes_agrees_with_the_panicking_form() {
-        let note = Note::parse(id(), MINIMAL.as_bytes()).unwrap();
+        let note = Note::parse(&schema(), id(), MINIMAL.as_bytes()).unwrap();
         assert_eq!(
             note.to_bytes(&schema()),
             note.try_to_bytes(&schema()).unwrap()
@@ -639,12 +654,15 @@ Body.
 
     #[test]
     fn meta_derives_created_at_and_copies_the_relations() {
-        let note = Note::parse(id(), MINIMAL.as_bytes()).unwrap();
+        let note = Note::parse(&schema(), id(), MINIMAL.as_bytes()).unwrap();
         let meta = note.meta();
         assert_eq!(meta.id, id());
         assert_eq!(meta.created_at, id().created_at());
         assert_eq!(meta.title.as_deref(), Some("A note"));
-        assert_eq!(meta.root, Some(id()));
+        assert_eq!(
+            meta.root, None,
+            "a root is derived by the scan, not by a file"
+        );
         assert_eq!(meta.reply_to, None);
         assert_eq!(meta.quote, None);
     }
@@ -657,7 +675,7 @@ Body.
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(name);
         std::fs::write(&path, MINIMAL).unwrap();
-        let result = Note::load(&path);
+        let result = Note::load(&schema(), &path);
         (tmp, path, result)
     }
 
@@ -748,7 +766,7 @@ Body.
         let path = tmp.path().join("README.md");
         std::fs::write(&path, "no fence at all\n").unwrap();
         assert!(matches!(
-            Note::load(&path).unwrap_err(),
+            Note::load(&schema(), &path).unwrap_err(),
             Error::InvalidNoteFilename { .. }
         ));
     }
@@ -757,7 +775,7 @@ Body.
     fn load_of_a_missing_file_names_the_path() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join(format!("{MINIMAL_ID}.md"));
-        let e = Note::load(&path).unwrap_err();
+        let e = Note::load(&schema(), &path).unwrap_err();
         assert!(matches!(e, Error::Read { .. }), "{e:?}");
         assert_eq!(e.path(), Some(path.as_path()));
     }

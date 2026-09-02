@@ -59,7 +59,7 @@ impl Edited {
 /// If no editor is configured, if it cannot be launched, if it exits non-zero, or if what came back
 /// does not parse. In the parse case the draft is **kept** and its path is named: losing what
 /// someone just typed is the one failure this whole program exists to prevent.
-pub fn edit(seed: &str) -> Result<Edited> {
+pub fn edit(schema: &FrontmatterSchema, seed: &str) -> Result<Edited> {
     let editor = editor_command()?;
     let path = temp_path();
 
@@ -79,7 +79,7 @@ pub fn edit(seed: &str) -> Result<Edited> {
         .with_context(|| format!("cannot read the draft back from `{}`", path.display()))?;
     let unchanged = after == seed;
 
-    let parsed = Frontmatter::parse_document(&path, after.as_bytes());
+    let parsed = Frontmatter::parse_document(schema, &path, after.as_bytes());
     let (frontmatter, body) = match parsed {
         Ok(split) => split,
         Err(err) => {
@@ -102,14 +102,15 @@ pub fn edit(seed: &str) -> Result<Edited> {
 
 /// The text handed to the editor for a note with this frontmatter and body.
 ///
-/// Rendered as a **template**: every key the workspace's schema declares is present, and the ones
-/// this note does not carry appear as empty placeholders. An empty block tells you nothing about
-/// what a note in this vault may hold; `title:` tells you it is yours to fill in.
+/// This is the same render a file gets, deliberately. The buffer used to show a blank placeholder
+/// for *every* declared key; now `required = true` decides, so the vault says in its manifest
+/// which keys it wants staring back at you. `jot_default` marks `document:title` required, so a
+/// new vault behaves as it always did for the key anyone actually fills in.
 ///
-/// Placeholders left alone round-trip to nothing — `title:` is YAML null, and null is read as
-/// absent — so the file written is exactly the one an untouched template would have produced.
+/// A required placeholder left alone round-trips to nothing — `title:` is YAML null, and null is
+/// read as absent — so the file written is exactly the one an untouched buffer would produce.
 pub fn seed(frontmatter: &Frontmatter, body: &str, schema: &FrontmatterSchema) -> String {
-    format!("{}{}", frontmatter.render_template(schema), body)
+    format!("{}{}", frontmatter.render(schema), body)
 }
 
 /// The editor to launch: `$VISUAL`, then `$EDITOR`.
@@ -168,25 +169,44 @@ mod tests {
     }
 
     #[test]
-    fn the_seed_offers_every_schema_key_and_the_blanks_round_trip_to_nothing() {
+    fn the_seed_offers_the_required_keys_only_and_the_blanks_round_trip_to_nothing() {
         let text = seed(&Frontmatter::new(), "\n", &schema());
-        for key in [
-            "title",
-            "relation:root",
-            "relation:reply_to",
-            "relation:quote",
-        ] {
-            assert!(text.contains(&format!("{key}:")), "no `{key}` in:\n{text}");
+
+        // `jot_default` marks `document:title` required and the two relations not.
+        assert!(text.contains("title:"), "no `title` in:\n{text}");
+        for key in ["relation:reply_to", "relation:quote_to"] {
+            assert!(
+                !text.contains(&format!("{key}:")),
+                "`{key}` is not required and must not be offered as a blank:\n{text}"
+            );
         }
 
-        // Left untouched, the template is worth nothing: every placeholder reads back as absent.
+        // Left untouched, the buffer is worth nothing: the placeholder reads back as absent.
         let (parsed, _) =
-            Frontmatter::parse_document(Path::new("draft.md"), text.as_bytes()).unwrap();
+            Frontmatter::parse_document(&schema(), Path::new("draft.md"), text.as_bytes()).unwrap();
         assert_eq!(parsed.title, None);
-        assert_eq!(parsed.root, None);
         assert_eq!(parsed.reply_to, None);
         assert_eq!(parsed.quote, None);
         assert_eq!(parsed, Frontmatter::new());
+    }
+
+    /// `required` is the manifest's to set, so a vault that asks for a blank relation gets one.
+    #[test]
+    fn a_relation_the_schema_marks_required_is_offered_as_a_blank() {
+        use jot_core::frontmatter::{FieldType, FrontmatterEntry, Role};
+
+        let schema = FrontmatterSchema::try_new([
+            FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title)).required(true),
+            FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)).required(true),
+        ])
+        .unwrap();
+
+        let text = seed(&Frontmatter::new(), "\n", &schema);
+        assert!(text.contains("relation:reply_to:"), "in:\n{text}");
+
+        let (parsed, _) =
+            Frontmatter::parse_document(&schema, Path::new("draft.md"), text.as_bytes()).unwrap();
+        assert_eq!(parsed, Frontmatter::new(), "the blank reads back as absent");
     }
 
     #[test]
@@ -194,7 +214,7 @@ mod tests {
         let text = seed(&Frontmatter::new(), "\n", &schema())
             .replace("title:", "title: Typed in the editor");
         let (parsed, _) =
-            Frontmatter::parse_document(Path::new("draft.md"), text.as_bytes()).unwrap();
+            Frontmatter::parse_document(&schema(), Path::new("draft.md"), text.as_bytes()).unwrap();
         assert_eq!(parsed.title.as_deref(), Some("Typed in the editor"));
     }
 
@@ -216,14 +236,14 @@ mod tests {
         let id = NoteId::new();
         let mut frontmatter = Frontmatter::new();
         frontmatter.title = Some("A title".into());
-        frontmatter.root = Some(id);
+        frontmatter.reply_to = Some(id);
 
         let text = seed(&frontmatter, "\nthe body\n", &schema());
         let (parsed, body) =
-            Frontmatter::parse_document(Path::new("draft.md"), text.as_bytes()).unwrap();
+            Frontmatter::parse_document(&schema(), Path::new("draft.md"), text.as_bytes()).unwrap();
 
         assert_eq!(parsed.title.as_deref(), Some("A title"));
-        assert_eq!(parsed.root, Some(id));
+        assert_eq!(parsed.reply_to, Some(id));
         assert_eq!(body, "\nthe body\n");
     }
 

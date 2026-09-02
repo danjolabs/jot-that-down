@@ -14,28 +14,38 @@
 //! render(schema.frontmatter, typed fields) ++ preserved unknown keys ++ body
 //! ```
 //!
-//! Key order is **declared, not hardcoded**: it comes from `[schema] frontmatter` in
+//! Key order is **declared, not hardcoded**: it comes from `[[schema.frontmatter]]` in
 //! `workspace.toml` (see [`FrontmatterSchema`]), not from a constant in this file. Reordering a
 //! vault's frontmatter is a config edit.
 //!
+//! # Meaning is declared too
+//!
+//! So is what a key *means*. Each schema entry carries a [`FieldType`], and a [`Role`] — the title,
+//! the parent, the quote — is found by looking one up rather than by comparing against a string
+//! literal. That separation of **role from key name** is not a stylistic preference; it follows
+//! directly from the observation this project started with, that a filename, a `title:` key and an
+//! H1 heading are the same thing stored in three places. A vault may call its title key `title`,
+//! `heading`, `name` or `제목`, and core still knows which one holds the title.
+//!
 //! # What the block carries
 //!
-//! Four keys, where stage 1 had eight. `id` left because the filename carries it; `created_at`
-//! left because a UUIDv7 encodes it exactly (see [`crate::note::NoteId::created_at`]); `edited_at`
-//! left because it is index-only, populated from filesystem mtime at scan time.
+//! Three roles, where stage 1 had eight keys. `id` left because the filename carries it;
+//! `created_at` left because a UUIDv7 encodes it exactly (see [`crate::note::NoteId::created_at`]);
+//! `edited_at` left because it is index-only, populated from filesystem mtime at scan time; and
+//! `relation:root` left because a thread root is derived from `relation:reply_to` at scan time and
+//! no file should assert a value no file can be the authority for.
 //!
 //! ```markdown
 //! ---
 //! title: Jot that down
-//! relation:root: 01a03d20-a54c-7977-a1f4-1a88b38855dd
 //! relation:reply_to: 01a03d20-a54c-7977-a1f4-1a88b38855dd
-//! relation:quote: 01a03d10-3f8a-7bb1-9c22-0e1d5a6b7c88
+//! relation:quote_to: 01a03d10-3f8a-7bb1-9c22-0e1d5a6b7c88
 //! ---
 //! ```
 //!
-//! `relation:root` is one key, not a nested mapping: in YAML a colon is an indicator only when it
-//! is followed by whitespace. `relation_root_is_one_key` pins that against the pinned crate rather
-//! than trusting it.
+//! `relation:reply_to` is one key, not a nested mapping: in YAML a colon is an indicator only when
+//! it is followed by whitespace. `a_relation_key_is_one_key_and_not_a_nested_mapping` pins that
+//! against the pinned crate rather than trusting it.
 //!
 //! **The block is always present.** A file with no fence is a malformed note, not an untitled one,
 //! which is what lets [`Frontmatter::parse_document`] treat its absence as an error rather than as
@@ -86,10 +96,13 @@
 //! source line range before the interior is handed to `yaml_serde`, and block scalars, nested
 //! mappings and trailing comments fall out for free as continuation lines.
 //!
-//! **Preservation is keyed on what jot interprets, not on the schema.** A key among
-//! [`INTERPRETED_KEYS`] becomes a typed field; everything else is preserved verbatim. The schema
-//! governs order and nothing else — which is what lets a workspace whose schema omits
-//! `relation:reply_to` still be non-lossy: see [`Frontmatter::try_render`].
+//! **Preservation is keyed on the schema.** A key the schema declares with a reserved [`Role`]
+//! becomes a typed field; every other key — undeclared, declared as `text`, or declared with a type
+//! this build has never heard of — is preserved verbatim and never interpreted. Stage 1b keyed this
+//! on a hardcoded list instead, and needed a second emission pass so that a schema omitting
+//! `relation:reply_to` stayed non-lossy. With roles declared there is no such pass and no such
+//! case: a role the schema does not name is never parsed out of the file, so the key simply stays a
+//! preserved key and comes back out exactly as it went in.
 //!
 //! ## Where the slicer stops
 //!
@@ -114,34 +127,8 @@ use crate::error::{Error, Result};
 use crate::note::NoteId;
 
 // =============================================================================================
-// Keys and schema
+// The declared type system
 // =============================================================================================
-
-/// Display title. Optional: a captured thought does not have to be titled.
-pub const TITLE: &str = "title";
-
-/// Denormalized thread root. Absent means "not yet computed"; see `Workspace::open_note`.
-pub const RELATION_ROOT: &str = "relation:root";
-
-/// The note this one replies to. Absent means top-level, which is a real state — an *empty*
-/// `relation:reply_to:` is not, and is never written.
-pub const RELATION_REPLY_TO: &str = "relation:reply_to";
-
-/// A single cross-tree quote. Never changes `relation:root`.
-pub const RELATION_QUOTE: &str = "relation:quote";
-
-/// Every key this version of jot interprets, in the order the default schema declares them.
-///
-/// A key outside this list is preserved verbatim and never read — including a key that a future
-/// version will interpret, which is the whole point of the forward-compat rule.
-pub const INTERPRETED_KEYS: [&str; 4] = [TITLE, RELATION_ROOT, RELATION_REPLY_TO, RELATION_QUOTE];
-
-/// The relation keys a `jot` workspace's thread structure is stored in.
-///
-/// A schema omitting one of these is reported by [`crate::workspace::Workspace::warnings`] rather
-/// than refused: the rendering rule in [`Frontmatter::try_render`] keeps such a workspace
-/// non-lossy, so the cost of the omission is diff shape, not data.
-pub const RELATION_KEYS: [&str; 3] = [RELATION_ROOT, RELATION_REPLY_TO, RELATION_QUOTE];
 
 /// The path reported by errors raised while parsing bytes that did not come from a file.
 ///
@@ -150,65 +137,336 @@ pub const RELATION_KEYS: [&str; 3] = [RELATION_ROOT, RELATION_REPLY_TO, RELATION
 /// an empty one.
 pub const IN_MEMORY_PATH: &str = "<in-memory note>";
 
-/// The declared frontmatter key order for a workspace: `[schema] frontmatter` in `workspace.toml`.
+/// A role jot itself understands, as opposed to a shape it merely validates.
 ///
-/// Order is the whole content of this type. A key listed here that jot does not interpret is still
-/// meaningful — it fixes where that key is emitted, so a vault can pin `summary:` above the
-/// relations without jot knowing what `summary` means.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrontmatterSchema {
-    keys: Vec<String>,
+/// This is the whole point of the type system: a role is separated from the key it is stored
+/// under, so a vault may call its title key `title`, `heading`, `name` or `제목` and core still
+/// knows which key holds the title. Every question this module used to answer with a string
+/// literal is answered by a lookup on this enum instead.
+///
+/// Exactly one entry may claim each role — [`FrontmatterSchema::try_new`] refuses a manifest that
+/// claims one twice, because a silent first-wins would make "where is the title" depend on the
+/// order two lines happen to appear in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role {
+    /// The note's display title. `document:title`.
+    Title,
+    /// The note this one replies to. `relation:reply_to`.
+    ///
+    /// A real edge, and — since `relation:root` was deleted — the sole evidence of thread shape.
+    ReplyTo,
+    /// A single cross-tree quote. `relation:quote_to`. Never a thread edge.
+    QuoteTo,
 }
 
-impl FrontmatterSchema {
-    /// The schema `init` writes for a `jot` workspace: [`INTERPRETED_KEYS`], in that order.
+impl Role {
+    /// The type string this role is declared as, which is also the key it defaults to.
     #[must_use]
-    pub fn jot_default() -> Self {
-        FrontmatterSchema {
-            keys: INTERPRETED_KEYS.iter().map(|k| (*k).to_string()).collect(),
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Role::Title => "document:title",
+            Role::ReplyTo => "relation:reply_to",
+            Role::QuoteTo => "relation:quote_to",
         }
     }
 
-    /// A schema from declared keys, first occurrence winning.
+    /// Whether a value of this role is a note id rather than free text.
+    const fn is_relation(self) -> bool {
+        matches!(self, Role::ReplyTo | Role::QuoteTo)
+    }
+}
+
+/// What a declared entry's value is.
+///
+/// `text`/`multitext` rather than `string`/`array` follows Obsidian, and keeps the refinement
+/// attached to the *element*: `multitext:url` rather than the nested `array:string:url` that the
+/// other spelling forces.
+///
+/// Cardinality lives in the type name, and for relations it is **single-valued by decision, not by
+/// assumption**. `relation:reply_to` and `relation:quote_to` are one-to-many in the direction that
+/// matters — many notes may reply to or quote one note — and each is unidirectional, so the note
+/// holding the key needs exactly one value. There is no `multirelation:*` namespace and none is
+/// planned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldType {
+    /// One of the reserved roles core interprets.
+    Reserved(Role),
+    /// An opaque scalar: `text`, or `text:<refinement>` such as `text:date` or `text:url`.
     ///
-    /// Duplicates are dropped rather than rejected: a key listed twice declares one position, and
-    /// the first is the one a reader of the file would expect.
-    pub fn new<I, S>(keys: I) -> Self
+    /// The refinement is carried but not enforced. Validating it would be a step towards refusing
+    /// a file, which this module does not do.
+    Text(Option<String>),
+    /// A YAML sequence of scalars: `multitext`, or `multitext:<refinement>`.
+    Multitext(Option<String>),
+    /// A type string this build does not understand.
+    ///
+    /// **A warning, never a refusal.** A newer jot will write types an older binary has never
+    /// heard of, and the older binary must not damage the file — so an unknown type behaves
+    /// exactly like an undeclared key: its position is honoured and its bytes are preserved.
+    Unknown(String),
+}
+
+impl FieldType {
+    /// Parse a manifest `type` string. Never fails: anything unrecognised is
+    /// [`FieldType::Unknown`].
+    #[must_use]
+    pub fn parse(text: &str) -> Self {
+        match text {
+            "document:title" => FieldType::Reserved(Role::Title),
+            "relation:reply_to" => FieldType::Reserved(Role::ReplyTo),
+            "relation:quote_to" => FieldType::Reserved(Role::QuoteTo),
+            "text" => FieldType::Text(None),
+            "multitext" => FieldType::Multitext(None),
+            _ => match text.split_once(':') {
+                Some(("text", r)) if !r.is_empty() => FieldType::Text(Some(r.to_string())),
+                Some(("multitext", r)) if !r.is_empty() => {
+                    FieldType::Multitext(Some(r.to_string()))
+                }
+                _ => FieldType::Unknown(text.to_string()),
+            },
+        }
+    }
+
+    /// The type string this is written as, which is also the key an entry omitting `key` uses.
+    #[must_use]
+    pub fn as_str(&self) -> String {
+        match self {
+            FieldType::Reserved(role) => role.as_str().to_string(),
+            FieldType::Text(None) => "text".to_string(),
+            FieldType::Text(Some(r)) => format!("text:{r}"),
+            FieldType::Multitext(None) => "multitext".to_string(),
+            FieldType::Multitext(Some(r)) => format!("multitext:{r}"),
+            FieldType::Unknown(raw) => raw.clone(),
+        }
+    }
+
+    /// The role this type claims, if it claims one.
+    #[must_use]
+    pub const fn role(&self) -> Option<Role> {
+        match self {
+            FieldType::Reserved(role) => Some(*role),
+            _ => None,
+        }
+    }
+}
+
+/// One `[[schema.frontmatter]]` entry: a key, what its value is, and whether it is always written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterEntry {
+    key: String,
+    field_type: FieldType,
+    required: bool,
+}
+
+impl FrontmatterEntry {
+    /// An entry whose key is the type string verbatim.
+    ///
+    /// `type` is the identity; `key` is the frontmatter key it is stored under. Omit the key and
+    /// it *is* the type string — that is the whole rule, and there is no per-type table of
+    /// canonical default keys. It reads naturally in both directions: `document:title` is always
+    /// written with an explicit key, and `relation:reply_to` omits one precisely because the two
+    /// are the same string.
+    #[must_use]
+    pub fn new(field_type: FieldType) -> Self {
+        FrontmatterEntry {
+            key: field_type.as_str(),
+            field_type,
+            required: false,
+        }
+    }
+
+    /// An entry stored under a key of its own.
+    #[must_use]
+    pub fn with_key(key: impl Into<String>, field_type: FieldType) -> Self {
+        FrontmatterEntry {
+            key: key.into(),
+            field_type,
+            required: false,
+        }
+    }
+
+    /// Mark the key as always emitted, empty when the note has no value.
+    #[must_use]
+    pub fn required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    /// The frontmatter key this entry is stored under.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// What this entry's value is.
+    #[must_use]
+    pub fn field_type(&self) -> &FieldType {
+        &self.field_type
+    }
+
+    /// Whether the key is written even when the note carries no value for it.
+    ///
+    /// **A render rule, not a validation rule.** `required = true` means the key is always
+    /// emitted — a titleless note renders `title:` rather than omitting the line — and it never
+    /// rejects a file. Refusing to read a file a person wrote is the one thing this project does
+    /// not do.
+    #[must_use]
+    pub fn is_required(&self) -> bool {
+        self.required
+    }
+
+    /// The role this entry claims, if it claims one.
+    #[must_use]
+    pub fn role(&self) -> Option<Role> {
+        self.field_type.role()
+    }
+}
+
+/// The declared frontmatter of a workspace: `[[schema.frontmatter]]` in `workspace.toml`.
+///
+/// Two things at once, and both are load-bearing:
+///
+/// - **Order.** The declared order is the emission order, so a vault can pin `summary:` above the
+///   relations. Stage 3's `$EDITOR` template depends on it too.
+/// - **Meaning.** Each entry's [`FieldType`] says what its key *holds*, which is how core answers
+///   "where is the title" without a string literal.
+///
+/// Unlike stage 1's permitted-key list, this type is also what decides which keys are interpreted
+/// at all: a key the schema does not declare with a reserved role is preserved verbatim and never
+/// read. A workspace that declares no `relation:*` entry simply has no threads — which is exactly
+/// what the deleted `plain` workspace kind used to mean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontmatterSchema {
+    entries: Vec<FrontmatterEntry>,
+}
+
+impl FrontmatterSchema {
+    /// The schema `init` writes: a **required** title, and the two relations.
+    ///
+    /// `document:title` is `required = true` so that a new vault's `$EDITOR` buffer opens with
+    /// `title:` in it. That is the whole of what `required` is for here — it is a render rule, and
+    /// the buffer is the render it exists to shape. The relations are not required: a blank
+    /// `relation:reply_to:` in every buffer is noise, and the two commands that set one
+    /// (`--reply`, `--quote`) fill it in before the editor ever opens.
+    ///
+    /// `relation:root` is deliberately absent. It was a denormalized cache of a walk over
+    /// `relation:reply_to`, and keeping the original and the derived value side by side in the
+    /// same namespace was what let `tree(root_id)` and `thread()` disagree.
+    #[must_use]
+    pub fn jot_default() -> Self {
+        FrontmatterSchema {
+            entries: vec![
+                FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title))
+                    .required(true),
+                FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+                FrontmatterEntry::new(FieldType::Reserved(Role::QuoteTo)),
+            ],
+        }
+    }
+
+    /// A schema from declared entries, validated as configuration.
+    ///
+    /// **The manifest is strict; note files are never rejected.** Two different error policies,
+    /// and this is the strict one: `workspace.toml` is something a person wrote deliberately, so
+    /// a contradiction in it is worth reporting rather than resolving by guesswork.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the offending keys when an entry has an empty key, when two entries share
+    /// a key, or when two entries claim the same reserved role.
+    pub fn try_new<I>(entries: I) -> std::result::Result<Self, String>
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = FrontmatterEntry>,
     {
-        let mut out: Vec<String> = Vec::new();
-        for key in keys {
-            let key = key.into();
-            if !out.contains(&key) {
-                out.push(key);
+        let entries: Vec<FrontmatterEntry> = entries.into_iter().collect();
+
+        for entry in &entries {
+            if entry.key.trim().is_empty() {
+                return Err(format!(
+                    "entry of type `{}` has an empty `key`",
+                    entry.field_type.as_str()
+                ));
             }
         }
-        FrontmatterSchema { keys: out }
+        for (i, entry) in entries.iter().enumerate() {
+            if let Some(before) = entries[..i].iter().find(|e| e.key == entry.key) {
+                return Err(format!(
+                    "key `{}` is declared twice (as `{}` and as `{}`)",
+                    entry.key,
+                    before.field_type.as_str(),
+                    entry.field_type.as_str()
+                ));
+            }
+            let Some(role) = entry.role() else { continue };
+            if let Some(before) = entries[..i].iter().find(|e| e.role() == Some(role)) {
+                return Err(format!(
+                    "two entries declare `{}`: `{}` and `{}`",
+                    role.as_str(),
+                    before.key,
+                    entry.key
+                ));
+            }
+        }
+
+        Ok(FrontmatterSchema { entries })
+    }
+
+    /// The declared entries, in declared order.
+    #[must_use]
+    pub fn entries(&self) -> &[FrontmatterEntry] {
+        &self.entries
     }
 
     /// The declared keys, in declared order.
     #[must_use]
-    pub fn keys(&self) -> &[String] {
-        &self.keys
+    pub fn keys(&self) -> Vec<&str> {
+        self.entries.iter().map(FrontmatterEntry::key).collect()
     }
 
     /// Whether `key` is declared.
     #[must_use]
     pub fn contains(&self, key: &str) -> bool {
-        self.keys.iter().any(|k| k == key)
+        self.entries.iter().any(|e| e.key == key)
     }
 
-    /// The [`RELATION_KEYS`] this schema does not declare, in [`RELATION_KEYS`] order.
-    ///
-    /// Empty for a complete `jot` schema. A non-empty result is a warning at `open`, not a refusal.
+    /// The entry declared under `key`.
     #[must_use]
-    pub fn missing_relation_keys(&self) -> Vec<&'static str> {
-        RELATION_KEYS
+    pub fn entry(&self, key: &str) -> Option<&FrontmatterEntry> {
+        self.entries.iter().find(|e| e.key == key)
+    }
+
+    /// The key `role` is stored under, if this workspace declares it at all.
+    ///
+    /// `None` is a real answer, not a defect: a vault that declares no `relation:reply_to` has no
+    /// threads, and a vault that declares no `document:title` keeps its titles somewhere jot does
+    /// not read. In both cases the key in a note file is preserved verbatim as an undeclared key.
+    #[must_use]
+    pub fn key_for(&self, role: Role) -> Option<&str> {
+        self.entries
             .iter()
-            .copied()
-            .filter(|k| !self.contains(k))
+            .find(|e| e.role() == Some(role))
+            .map(FrontmatterEntry::key)
+    }
+
+    /// The role `key` carries, if the schema gives it one.
+    #[must_use]
+    pub fn role_of(&self, key: &str) -> Option<Role> {
+        self.entry(key).and_then(FrontmatterEntry::role)
+    }
+
+    /// Every declared type this build does not understand, with the key declaring it.
+    ///
+    /// Reported as a warning at `open`. The keys still round-trip untouched — an unknown type is
+    /// the forward-compat rule applied to the type system, before the type system gives anyone the
+    /// chance to break it.
+    #[must_use]
+    pub fn unknown_types(&self) -> Vec<(&str, &str)> {
+        self.entries
+            .iter()
+            .filter_map(|e| match &e.field_type {
+                FieldType::Unknown(raw) => Some((e.key.as_str(), raw.as_str())),
+                _ => None,
+            })
             .collect()
     }
 }
@@ -301,13 +559,15 @@ impl UnknownKey {
 /// means in the type system.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Frontmatter {
-    /// Display title.
+    /// Display title, from the key declared [`Role::Title`].
     pub title: Option<String>,
-    /// Denormalized thread root. A top-level note's root is its own id.
-    pub root: Option<NoteId>,
-    /// The note this one replies to. `None` means top-level.
+    /// The note this one replies to, from the key declared [`Role::ReplyTo`]. `None` means
+    /// top-level.
+    ///
+    /// Since `relation:root` was deleted this is the **sole** evidence of thread shape; a note's
+    /// root is derived from it at scan time rather than stored in the file.
     pub reply_to: Option<NoteId>,
-    /// A single cross-tree quote.
+    /// A single cross-tree quote, from the key declared [`Role::QuoteTo`].
     pub quote: Option<NoteId>,
 
     /// Unknown keys in their original relative order. Private so the ordered container is not
@@ -362,19 +622,33 @@ impl Frontmatter {
     /// [`Error::NotUtf8`], the two fence errors, [`Error::MalformedYaml`],
     /// [`Error::FrontmatterNotAMapping`], [`Error::UnpreservableFrontmatter`], and the per-field
     /// shape errors — each naming `path`.
-    pub fn parse_document(path: &Path, bytes: &[u8]) -> Result<(Frontmatter, String)> {
+    pub fn parse_document(
+        schema: &FrontmatterSchema,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(Frontmatter, String)> {
         let text = std::str::from_utf8(bytes).map_err(|_| Error::NotUtf8 {
             path: path.to_path_buf(),
         })?;
 
         let split = split_document(path, text)?;
-        let mut fm = Frontmatter::from_interior(path, split.interior)?;
+        let mut fm = Frontmatter::from_interior(schema, path, split.interior)?;
         fm.newline = split.newline;
         Ok((fm, split.body.to_string()))
     }
 
-    /// Parse the text between the fences.
-    fn from_interior(path: &Path, interior: &str) -> Result<Frontmatter> {
+    /// Parse the text between the fences, reading roles out of `schema`.
+    ///
+    /// **Preservation is keyed on the schema now, not on a constant.** A key the schema declares
+    /// with a reserved role becomes a typed field; every other key — undeclared, declared as
+    /// `text`, or declared with a type this build does not understand — is preserved verbatim and
+    /// never interpreted. That is the same forward-compat rule stage 1b wrote, with the hardcoded
+    /// key list removed from it.
+    fn from_interior(
+        schema: &FrontmatterSchema,
+        path: &Path,
+        interior: &str,
+    ) -> Result<Frontmatter> {
         let map = parse_interior_mapping(path, interior)?;
 
         // The slicer and `yaml_serde` must agree about what the top-level keys *are*. Where they
@@ -383,21 +657,25 @@ impl Frontmatter {
         let spans = top_level_key_spans(interior);
         agree_or_refuse(path, &map, &spans)?;
 
-        let title = match present(&map, TITLE) {
+        let title = match schema.key_for(Role::Title) {
             None => None,
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(other) => {
-                return Err(Error::InvalidFrontmatterField {
-                    path: path.to_path_buf(),
-                    field: TITLE,
-                    message: format!("expected a string, found {}", shape(other)),
-                });
-            }
+            Some(key) => match present(&map, key) {
+                None => None,
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(other) => {
+                    return Err(Error::InvalidFrontmatterField {
+                        path: path.to_path_buf(),
+                        field: key.to_string(),
+                        message: format!("expected a string, found {}", shape(other)),
+                    });
+                }
+            },
         };
 
+        let interpreted = |name: &str| schema.role_of(name).is_some();
         let unknown = spans
             .into_iter()
-            .filter(|(name, _)| !INTERPRETED_KEYS.contains(&name.as_str()))
+            .filter(|(name, _)| !interpreted(name))
             .map(|(name, range)| UnknownKey {
                 name,
                 source: interior[range].to_string(),
@@ -406,9 +684,8 @@ impl Frontmatter {
 
         Ok(Frontmatter {
             title,
-            root: optional_id(path, &map, RELATION_ROOT)?,
-            reply_to: optional_id(path, &map, RELATION_REPLY_TO)?,
-            quote: optional_id(path, &map, RELATION_QUOTE)?,
+            reply_to: relation(schema, path, &map, Role::ReplyTo)?,
+            quote: relation(schema, path, &map, Role::QuoteTo)?,
             unknown,
             newline: Newline::default(),
         })
@@ -429,66 +706,35 @@ impl Frontmatter {
             .unwrap_or_else(|e| panic!("frontmatter render failed: {e}"))
     }
 
-    /// Render as an **editing template**: every key the schema declares is present, and the ones
-    /// this note does not carry are written as empty placeholders.
-    ///
-    /// For handing a note to `$EDITOR`. [`Self::render`] omits an absent key entirely, which is
-    /// right for a file — a note is not obliged to carry a key just because the schema names one —
-    /// but wrong for a buffer someone is about to type into, where an empty block gives no hint
-    /// that `title` is a thing you may fill in. A declared schema is a statement about what notes
-    /// in this vault look like, so a new note's buffer should show it.
-    ///
-    /// The placeholders round-trip to nothing: `title:` is YAML null, null is read as absent, and
-    /// an absent key is never written back. So a template whose placeholders are left alone
-    /// produces exactly the file [`Self::render`] would have produced.
-    ///
-    /// Only keys the schema **declares** get placeholders. An interpreted key the schema omits is
-    /// still emitted when the note carries one (the same step 2 as [`Self::try_render`]), but is
-    /// not offered as a blank: the vault has said it does not want that key in its notes.
-    #[must_use]
-    pub fn render_template(&self, schema: &FrontmatterSchema) -> String {
-        self.try_render_with(schema, Absent::Placeholder)
-            .unwrap_or_else(|e| panic!("frontmatter render failed: {e}"))
-    }
-
     /// [`Self::render`], returning [`Error::SerializeFrontmatter`] instead of panicking.
     ///
     /// The emit order is:
     ///
-    /// 1. every key `schema` declares, in declared order — typed keys from the typed fields, any
-    ///    other declared key from its preserved source if the note carries it;
-    /// 2. every key jot *interprets* that the schema does not declare, in [`INTERPRETED_KEYS`]
-    ///    order;
-    /// 3. every remaining unknown key, in the order it was read.
+    /// 1. every key `schema` declares, in declared order — a key with a reserved role from the
+    ///    typed field it names, any other declared key from its preserved source if the note
+    ///    carries it;
+    /// 2. every remaining preserved key, in the order it was read.
     ///
-    /// Step 2 is what makes a schema missing a relation key a warning rather than a refusal: a
-    /// vault whose `[schema] frontmatter` omits `relation:reply_to` still writes the key on a note
-    /// that has a parent, so the omission costs diff shape and never thread structure. It is also
-    /// the one case where emitted order is not exactly the schema's, and it cannot arise for a
-    /// schema that declares all four interpreted keys.
+    /// There is no third pass for "keys jot interprets that the schema omits", because with roles
+    /// declared rather than hardcoded there is no such thing: a role the schema does not declare
+    /// is never parsed into a typed field in the first place, so the key stays an ordinary
+    /// preserved key and comes back out in pass 2 exactly as it went in.
+    ///
+    /// A key whose entry is [`FrontmatterEntry::is_required`] is written even when the note
+    /// carries no value — `title:` rather than no line at all. That is purely cosmetic: an empty
+    /// value parses as absent, so the file round-trips to the same [`Frontmatter`] either way.
     ///
     /// # Errors
     ///
     /// [`Error::SerializeFrontmatter`] if `yaml_serde` cannot emit `title`.
     pub fn try_render(&self, schema: &FrontmatterSchema) -> Result<String> {
-        self.try_render_with(schema, Absent::Skip)
-    }
-
-    /// The body of both render modes.
-    fn try_render_with(&self, schema: &FrontmatterSchema, absent: Absent) -> Result<String> {
         let nl = self.newline.as_str();
         let mut out = String::from("---");
         out.push_str(nl);
 
         let mut emitted: Vec<&str> = Vec::new();
-        for key in schema.keys() {
-            self.emit_key(key, nl, &mut out, &mut emitted, absent)?;
-        }
-        for key in INTERPRETED_KEYS {
-            if !schema.contains(key) {
-                // Never a placeholder: a schema that omits a key has said it does not want it.
-                self.emit_key(key, nl, &mut out, &mut emitted, Absent::Skip)?;
-            }
+        for entry in schema.entries() {
+            self.emit_entry(entry, nl, &mut out, &mut emitted, entry.is_required())?;
         }
         for unknown in &self.unknown {
             if emitted.contains(&unknown.name.as_str()) {
@@ -502,48 +748,53 @@ impl Frontmatter {
         Ok(out)
     }
 
-    /// Emit one key if the note carries it, recording the name so no later pass repeats it.
+    /// Emit one declared entry if the note carries a value for it, recording the key so no later
+    /// pass repeats it.
     ///
-    /// `absent` decides what happens when it does not: skipped, or written as an empty placeholder
-    /// for someone to fill in.
-    fn emit_key<'a>(
+    /// `blank` decides what happens when it does not: the key is skipped, or written as an empty
+    /// placeholder for someone to fill in.
+    fn emit_entry<'a>(
         &'a self,
-        key: &'a str,
+        entry: &'a FrontmatterEntry,
         nl: &str,
         out: &mut String,
         emitted: &mut Vec<&'a str>,
-        absent: Absent,
+        blank: bool,
     ) -> Result<()> {
+        let key = entry.key();
         if emitted.contains(&key) {
             return Ok(());
         }
         // A placeholder is emitted for the key *name* only, so it is the same line whatever the
         // key's type would have been. `key:` is YAML null, which reads back as absent.
-        let blank = |out: &mut String| {
-            if absent == Absent::Placeholder {
+        let placeholder = |out: &mut String| {
+            if blank {
                 out.push_str(key);
                 out.push(':');
                 out.push_str(nl);
             }
         };
-        match key {
-            TITLE => {
-                let Some(title) = &self.title else {
-                    blank(out);
+        match entry.role() {
+            Some(Role::Title) => {
+                // An empty title is filtered here and not only at parse time, so the two agree:
+                // `Some(String::new())` would otherwise emit `title: ''`, which reads back as
+                // `None` and would make render → parse → render take two steps to settle.
+                let Some(title) = self.title.as_ref().filter(|t| !t.is_empty()) else {
+                    placeholder(out);
                     return Ok(());
                 };
-                out.push_str(&emit_scalar_pair(TITLE, title, nl)?);
+                out.push_str(&emit_scalar_pair(key, title, nl)?);
             }
-            RELATION_ROOT | RELATION_REPLY_TO | RELATION_QUOTE => {
-                let value = match key {
-                    RELATION_ROOT => self.root,
-                    RELATION_REPLY_TO => self.reply_to,
-                    _ => self.quote,
+            Some(role) if role.is_relation() => {
+                let value = if role == Role::ReplyTo {
+                    self.reply_to
+                } else {
+                    self.quote
                 };
                 // A hyphenated lowercase UUID is a plain scalar under every YAML schema and is
                 // never ambiguous, so it is emitted bare without going through the emitter.
                 let Some(id) = value else {
-                    blank(out);
+                    placeholder(out);
                     return Ok(());
                 };
                 out.push_str(key);
@@ -551,11 +802,12 @@ impl Frontmatter {
                 out.push_str(&id.to_string());
                 out.push_str(nl);
             }
-            other => {
-                // A declared key jot does not interpret. It is emitted here, at its declared
-                // position, from the bytes it was read as.
-                let Some(unknown) = self.unknown.iter().find(|u| u.name == other) else {
-                    blank(out);
+            _ => {
+                // A declared key jot does not interpret — `text`, `multitext`, or a type from a
+                // future version. It is emitted here, at its declared position, from the bytes it
+                // was read as.
+                let Some(unknown) = self.unknown.iter().find(|u| u.name == key) else {
+                    placeholder(out);
                     return Ok(());
                 };
                 out.push_str(&unknown.source);
@@ -564,15 +816,6 @@ impl Frontmatter {
         emitted.push(key);
         Ok(())
     }
-}
-
-/// What [`Frontmatter::emit_key`] does with a key the note does not carry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Absent {
-    /// Omit it. What a file gets: a note is not obliged to carry a key the schema names.
-    Skip,
-    /// Write `key:` for someone to fill in. What an `$EDITOR` buffer gets.
-    Placeholder,
 }
 
 /// Emit `key: <value>` through `yaml_serde`, so escaping and scalar-style selection stay the
@@ -883,12 +1126,22 @@ fn agree_or_refuse(path: &Path, map: &Mapping, spans: &[(String, Range<usize>)])
     Ok(())
 }
 
-/// The value at `key`, or `None` if the key is absent **or** explicitly null. Treating `null` as
-/// absent is one rule applied uniformly: `title: null` means "no title", and an empty
-/// `relation:reply_to:` means top-level — which is why neither is ever written back.
+/// The value at `key`, or `None` if the key is absent **or** empty.
+///
+/// **An empty value is always parsed as absent**, and uniformly across every type. `title: null`
+/// and `title: ""` both mean "no title", and — this is the part that matters — an empty
+/// `relation:reply_to:` means top-level rather than "replies to nothing in particular".
+///
+/// That rule is what makes [`FrontmatterEntry::is_required`] safe to put on a relation. Without
+/// it, rendering a required-but-absent relation as `relation:reply_to:` would write a state stage
+/// 1b explicitly said is not one; with it, the empty line reads back as absent and the round-trip
+/// is lossless.
 fn present<'a>(map: &'a Mapping, key: &str) -> Option<&'a Value> {
     match map.get(key) {
         None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.is_empty() => None,
+        Some(Value::Sequence(items)) if items.is_empty() => None,
+        Some(Value::Mapping(m)) if m.is_empty() => None,
         Some(v) => Some(v),
     }
 }
@@ -906,20 +1159,32 @@ fn shape(value: &Value) -> &'static str {
     }
 }
 
-fn optional_id(path: &Path, map: &Mapping, field: &'static str) -> Result<Option<NoteId>> {
-    match present(map, field) {
+/// The note id held by the key `schema` declares for `role`, if the schema declares one at all.
+///
+/// A role the schema does not declare is not a defect and not an error: the workspace keeps no
+/// such relation, and whatever key a note carries for it stays an ordinary preserved key.
+fn relation(
+    schema: &FrontmatterSchema,
+    path: &Path,
+    map: &Mapping,
+    role: Role,
+) -> Result<Option<NoteId>> {
+    let Some(key) = schema.key_for(role) else {
+        return Ok(None);
+    };
+    match present(map, key) {
         None => Ok(None),
         Some(Value::String(s)) => match s.parse::<NoteId>() {
             Ok(id) => Ok(Some(id)),
             Err(_) => Err(Error::InvalidNoteIdValue {
                 path: path.to_path_buf(),
-                field,
+                field: key.to_string(),
                 value: s.clone(),
             }),
         },
         Some(other) => Err(Error::InvalidFrontmatterField {
             path: path.to_path_buf(),
-            field,
+            field: key.to_string(),
             message: format!("expected a UUID string, found {}", shape(other)),
         }),
     }
@@ -939,7 +1204,24 @@ mod tests {
     }
 
     fn parse(text: &str) -> Result<(Frontmatter, String)> {
-        Frontmatter::parse_document(&p(), text.as_bytes())
+        Frontmatter::parse_document(&jot(), &p(), text.as_bytes())
+    }
+
+    fn parse_with(schema: &FrontmatterSchema, text: &str) -> Result<(Frontmatter, String)> {
+        Frontmatter::parse_document(schema, &p(), text.as_bytes())
+    }
+
+    /// A schema built from entries, for a test that means to declare something specific.
+    fn schema(entries: Vec<FrontmatterEntry>) -> FrontmatterSchema {
+        FrontmatterSchema::try_new(entries).expect("should be a valid schema")
+    }
+
+    fn title_entry(key: &str) -> FrontmatterEntry {
+        FrontmatterEntry::with_key(key, FieldType::Reserved(Role::Title))
+    }
+
+    fn text_entry(key: &str) -> FrontmatterEntry {
+        FrontmatterEntry::with_key(key, FieldType::Text(None))
     }
 
     fn ok(text: &str) -> Frontmatter {
@@ -948,6 +1230,19 @@ mod tests {
 
     fn jot() -> FrontmatterSchema {
         FrontmatterSchema::jot_default()
+    }
+
+    /// `jot_default`'s roles and order with `required` off everywhere.
+    ///
+    /// `jot_default` marks `document:title` required so a `$EDITOR` buffer opens with `title:` in
+    /// it. Tests about what an *absent* key does need the other setting, and saying so here beats
+    /// hand-building the same three entries in each of them.
+    fn jot_optional() -> FrontmatterSchema {
+        schema(vec![
+            title_entry("title"),
+            FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+            FrontmatterEntry::new(FieldType::Reserved(Role::QuoteTo)),
+        ])
     }
 
     const MINIMAL: &str = "\
@@ -964,34 +1259,97 @@ Body.
     // =========================================================================== the schema
 
     #[test]
-    fn the_default_schema_is_the_four_interpreted_keys_in_order() {
+    fn the_default_schema_is_a_title_and_the_two_relations_in_order() {
         assert_eq!(
             jot().keys(),
-            [
-                "title",
-                "relation:root",
-                "relation:reply_to",
-                "relation:quote"
-            ]
+            ["title", "relation:reply_to", "relation:quote_to"]
         );
-        assert!(jot().missing_relation_keys().is_empty());
+        // `relation:root` is gone: a root is derived from `relation:reply_to` at scan time, so a
+        // schema entry for it would declare a key nothing writes.
+        assert!(!jot().contains("relation:root"));
     }
 
     #[test]
-    fn a_schema_keeps_declared_order_and_drops_repeats_after_the_first() {
-        let s = FrontmatterSchema::new(["b", "a", "b", "c", "a"]);
-        assert_eq!(s.keys(), ["b", "a", "c"]);
-        assert!(s.contains("a"));
-        assert!(!s.contains("z"));
+    fn a_key_defaults_to_the_type_string_verbatim() {
+        let entry = FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo));
+        assert_eq!(entry.key(), "relation:reply_to");
+        assert_eq!(FrontmatterEntry::new(FieldType::Text(None)).key(), "text");
     }
 
     #[test]
-    fn missing_relation_keys_reports_in_relation_key_order() {
-        let s = FrontmatterSchema::new(["relation:quote", "title"]);
+    fn reserved_type_strings_parse_to_roles_and_round_trip() {
+        for role in [Role::Title, Role::ReplyTo, Role::QuoteTo] {
+            let parsed = FieldType::parse(role.as_str());
+            assert_eq!(parsed.role(), Some(role), "{}", role.as_str());
+            assert_eq!(parsed.as_str(), role.as_str());
+        }
+    }
+
+    #[test]
+    fn text_and_multitext_carry_their_refinement_on_the_element() {
+        assert_eq!(FieldType::parse("text"), FieldType::Text(None));
         assert_eq!(
-            s.missing_relation_keys(),
-            ["relation:root", "relation:reply_to"]
+            FieldType::parse("text:url"),
+            FieldType::Text(Some("url".into()))
         );
+        assert_eq!(FieldType::parse("multitext"), FieldType::Multitext(None));
+        assert_eq!(
+            FieldType::parse("multitext:date"),
+            FieldType::Multitext(Some("date".into()))
+        );
+        for spelling in ["text:url", "multitext:date", "text", "multitext"] {
+            assert_eq!(FieldType::parse(spelling).as_str(), spelling);
+        }
+    }
+
+    /// The forward-compat rule, applied to the type system before the type system gives anyone the
+    /// chance to break it.
+    #[test]
+    fn an_unknown_type_is_kept_verbatim_rather_than_refused() {
+        let parsed = FieldType::parse("document:mood");
+        assert_eq!(parsed, FieldType::Unknown("document:mood".into()));
+        assert_eq!(parsed.as_str(), "document:mood");
+        assert_eq!(parsed.role(), None);
+
+        let s = schema(vec![FrontmatterEntry::new(FieldType::parse(
+            "relation:sibling_of",
+        ))]);
+        assert_eq!(
+            s.unknown_types(),
+            [("relation:sibling_of", "relation:sibling_of")]
+        );
+    }
+
+    /// The manifest is configuration, so it is validated hard. Note files never are.
+    #[test]
+    fn two_entries_claiming_one_role_is_an_error_naming_both_keys() {
+        let e = FrontmatterSchema::try_new(vec![title_entry("title"), title_entry("heading")])
+            .unwrap_err();
+        assert!(e.contains("document:title"), "{e}");
+        assert!(e.contains("title") && e.contains("heading"), "{e}");
+    }
+
+    #[test]
+    fn a_duplicated_key_and_an_empty_key_are_both_refused() {
+        let dup = FrontmatterSchema::try_new(vec![text_entry("summary"), text_entry("summary")])
+            .unwrap_err();
+        assert!(dup.contains("summary"), "{dup}");
+
+        let empty = FrontmatterSchema::try_new(vec![text_entry(" ")]).unwrap_err();
+        assert!(empty.contains("empty"), "{empty}");
+    }
+
+    #[test]
+    fn a_role_is_looked_up_by_type_not_by_key_name() {
+        let s = schema(vec![
+            title_entry("heading"),
+            FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+        ]);
+        assert_eq!(s.key_for(Role::Title), Some("heading"));
+        assert_eq!(s.role_of("heading"), Some(Role::Title));
+        // Declared or not, `title` means nothing to this vault.
+        assert_eq!(s.role_of("title"), None);
+        assert_eq!(s.key_for(Role::QuoteTo), None);
     }
 
     // ==================================================================== document splitting
@@ -1190,40 +1548,67 @@ Body.
     // ================================================================== reading known keys
 
     #[test]
-    fn the_four_interpreted_keys_are_read_into_typed_fields() {
+    fn the_three_declared_roles_are_read_into_typed_fields() {
         let fm = ok(&format!(
-            "---\ntitle: T\nrelation:root: {ROOT_ID}\nrelation:reply_to: {ROOT_ID}\n\
-             relation:quote: {ROOT_ID}\n---\n"
+            "---\ntitle: T\nrelation:reply_to: {ROOT_ID}\n\
+             relation:quote_to: {ROOT_ID}\n---\n"
         ));
         let id: NoteId = ROOT_ID.parse().unwrap();
         assert_eq!(fm.title.as_deref(), Some("T"));
-        assert_eq!(fm.root, Some(id));
         assert_eq!(fm.reply_to, Some(id));
         assert_eq!(fm.quote, Some(id));
         assert!(fm.unknown().is_empty());
+    }
+
+    /// The point of the whole type system: the role is declared, so the key may be called
+    /// anything at all and core still knows what it holds.
+    #[test]
+    fn a_title_under_any_key_name_is_still_the_title() {
+        for key in ["title", "heading", "name", "제목"] {
+            let s = schema(vec![title_entry(key)]);
+            let (fm, _) = parse_with(&s, &format!("---\n{key}: T\n---\n")).unwrap();
+            assert_eq!(fm.title.as_deref(), Some("T"), "for key `{key}`");
+            assert_eq!(fm.render(&s), format!("---\n{key}: T\n---\n"));
+        }
+    }
+
+    /// A key the schema gives no role to is preserved verbatim, even when it is a name some
+    /// *other* vault interprets. Preservation is keyed on the schema now, not on a constant.
+    #[test]
+    fn a_role_the_schema_omits_leaves_its_key_preserved_rather_than_interpreted() {
+        let s = schema(vec![title_entry("title")]);
+        let doc = format!("---\ntitle: T\nrelation:reply_to: {ROOT_ID}\n---\n");
+        let (fm, _) = parse_with(&s, &doc).unwrap();
+        assert_eq!(fm.reply_to, None, "an undeclared role is never parsed");
+        assert_eq!(
+            fm.unknown_source("relation:reply_to"),
+            Some(format!("relation:reply_to: {ROOT_ID}\n").as_str())
+        );
+        assert_eq!(fm.render(&s), doc, "and it round-trips untouched");
     }
 
     /// A colon is a YAML indicator only when followed by whitespace, so `relation:root` is one
     /// key and not a nested mapping. `stage1b.md` records this as verified against the pinned
     /// crate; this is the verification.
     #[test]
-    fn relation_root_is_one_key_and_not_a_nested_mapping() {
-        let value: Value = yaml_serde::from_str(&format!("relation:root: {ROOT_ID}\n")).unwrap();
+    fn a_relation_key_is_one_key_and_not_a_nested_mapping() {
+        let value: Value =
+            yaml_serde::from_str(&format!("relation:reply_to: {ROOT_ID}\n")).unwrap();
         let Value::Mapping(map) = &value else {
             panic!("expected a mapping, got {value:?}")
         };
         assert_eq!(map.len(), 1);
         assert_eq!(
             map.keys().next(),
-            Some(&Value::String("relation:root".into())),
+            Some(&Value::String("relation:reply_to".into())),
             "the colon inside the key was treated as an indicator"
         );
 
         // And the slicer agrees with the YAML parser about it, which is what
         // `agree_or_refuse` requires.
-        let spans = top_level_key_spans(&format!("relation:root: {ROOT_ID}\n"));
+        let spans = top_level_key_spans(&format!("relation:reply_to: {ROOT_ID}\n"));
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].0, "relation:root");
+        assert_eq!(spans[0].0, "relation:reply_to");
     }
 
     #[test]
@@ -1238,18 +1623,39 @@ Body.
     /// written back as an empty key.
     #[test]
     fn an_explicit_null_is_an_absent_value_and_is_never_written_back() {
-        let fm = ok("---\ntitle: null\nrelation:reply_to:\nrelation:root: ~\n---\n");
+        let fm = ok("---\ntitle: null\nrelation:reply_to:\nrelation:quote_to: ~\n---\n");
         assert_eq!(fm.title, None);
         assert_eq!(fm.reply_to, None);
-        assert_eq!(fm.root, None);
-        assert_eq!(fm.render(&jot()), "---\n---\n");
+        assert_eq!(fm.quote, None);
+        assert_eq!(fm.render(&jot_optional()), "---\n---\n");
+    }
+
+    /// An **empty** value parses as absent too, and uniformly across every type. This is what
+    /// makes `required` safe on a relation: the placeholder it writes reads back as nothing.
+    #[test]
+    fn an_empty_value_parses_as_absent_for_every_type() {
+        let s = schema(vec![
+            title_entry("title"),
+            FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+            FrontmatterEntry::new(FieldType::Reserved(Role::QuoteTo)),
+        ]);
+        // Three spellings of empty: a bare key, an empty string, and an empty sequence.
+        let (fm, _) = parse_with(
+            &s,
+            "---\ntitle: \"\"\nrelation:reply_to:\nrelation:quote_to: []\n---\n",
+        )
+        .unwrap();
+        assert_eq!(fm.title, None);
+        assert_eq!(fm.reply_to, None);
+        assert_eq!(fm.quote, None);
+        assert_eq!(fm.render(&s), "---\n---\n");
     }
 
     #[test]
     fn a_known_key_of_the_wrong_shape_is_an_error_not_a_coercion() {
         let e = parse("---\ntitle:\n  - a\n  - b\n---\n").unwrap_err();
         assert!(
-            matches!(e, Error::InvalidFrontmatterField { field: "title", .. }),
+            matches!(&e, Error::InvalidFrontmatterField { field, .. } if field == "title"),
             "{e:?}"
         );
         assert!(e.to_string().contains("sequence"), "{e}");
@@ -1257,10 +1663,10 @@ Body.
 
     #[test]
     fn a_relation_that_is_not_a_uuid_names_the_key_and_the_value() {
-        let e = parse("---\nrelation:root: not-a-uuid\n---\n").unwrap_err();
+        let e = parse("---\nrelation:reply_to: not-a-uuid\n---\n").unwrap_err();
         match &e {
             Error::InvalidNoteIdValue { field, value, .. } => {
-                assert_eq!(*field, "relation:root");
+                assert_eq!(field, "relation:reply_to");
                 assert_eq!(value, "not-a-uuid");
             }
             other => panic!("{other:?}"),
@@ -1300,7 +1706,7 @@ Body.
             "---\nsummary: |\n  one\n    indented\n\n  after a blank\nrelation:root: \
                      01a03d21-7c11-7a02-b3de-9f0e21c4a771\n---\n",
         );
-        assert_eq!(unknown_names(&fm), ["summary"]);
+        assert_eq!(unknown_names(&fm), ["summary", "relation:root"]);
         assert_eq!(
             fm.unknown_source("summary").unwrap(),
             "summary: |\n  one\n    indented\n\n  after a blank\n"
@@ -1379,7 +1785,7 @@ Body.
         let doc = "---\nsummary: &a\n  reused: true\ncopy: *a\n---\n\nB.\n";
         let (fm, body) = parse(doc).unwrap();
         assert_eq!(unknown_names(&fm), ["summary", "copy"]);
-        assert_eq!(format!("{}{}", fm.render(&jot()), body), doc);
+        assert_eq!(format!("{}{}", fm.render(&jot_optional()), body), doc);
     }
 
     // ========================================================================= the write path
@@ -1387,30 +1793,29 @@ Body.
     #[test]
     fn emitted_key_order_is_the_schema_order() {
         let fm = ok(&format!(
-            "---\nrelation:quote: {ROOT_ID}\nrelation:root: {ROOT_ID}\ntitle: T\n\
+            "---\nrelation:quote_to: {ROOT_ID}\ntitle: T\n\
              relation:reply_to: {ROOT_ID}\n---\n"
         ));
         assert_eq!(
             fm.render(&jot()),
             format!(
-                "---\ntitle: T\nrelation:root: {ROOT_ID}\nrelation:reply_to: {ROOT_ID}\n\
-                 relation:quote: {ROOT_ID}\n---\n"
+                "---\ntitle: T\nrelation:reply_to: {ROOT_ID}\n\
+                 relation:quote_to: {ROOT_ID}\n---\n"
             )
         );
 
         // And the order is declared, not hardcoded: a different schema emits a different file
         // from the same typed state.
-        let reversed = FrontmatterSchema::new([
-            "relation:quote",
-            "relation:reply_to",
-            "relation:root",
-            "title",
+        let reversed = schema(vec![
+            FrontmatterEntry::new(FieldType::Reserved(Role::QuoteTo)),
+            FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+            title_entry("title"),
         ]);
         assert_eq!(
             fm.render(&reversed),
             format!(
-                "---\nrelation:quote: {ROOT_ID}\nrelation:reply_to: {ROOT_ID}\n\
-                 relation:root: {ROOT_ID}\ntitle: T\n---\n"
+                "---\nrelation:quote_to: {ROOT_ID}\nrelation:reply_to: {ROOT_ID}\n\
+                 title: T\n---\n"
             )
         );
     }
@@ -1418,65 +1823,87 @@ Body.
     #[test]
     fn unknown_keys_are_appended_after_the_schema_keys_in_their_original_order() {
         let fm = ok(&format!(
-            "---\nz_last: 1\ntitle: T\na_first: 2\nrelation:root: {ROOT_ID}\n---\n"
+            "---\nz_last: 1\ntitle: T\na_first: 2\nrelation:reply_to: {ROOT_ID}\n---\n"
         ));
         assert_eq!(
             fm.render(&jot()),
-            format!("---\ntitle: T\nrelation:root: {ROOT_ID}\nz_last: 1\na_first: 2\n---\n"),
+            format!("---\ntitle: T\nrelation:reply_to: {ROOT_ID}\nz_last: 1\na_first: 2\n---\n"),
             "unknown keys keep the order they were read in, not an alphabetical one"
         );
     }
 
     #[test]
     fn a_schema_key_jot_does_not_interpret_is_emitted_at_its_declared_position() {
-        let fm = ok(&format!(
-            "---\ntitle: T\nsummary: S\nrelation:root: {ROOT_ID}\n---\n"
-        ));
-        let schema = FrontmatterSchema::new(["summary", "title", "relation:root"]);
+        let s = schema(vec![
+            text_entry("summary"),
+            title_entry("title"),
+            FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+        ]);
+        let (fm, _) = parse_with(
+            &s,
+            &format!("---\ntitle: T\nsummary: S\nrelation:reply_to: {ROOT_ID}\n---\n"),
+        )
+        .unwrap();
         assert_eq!(
-            fm.render(&schema),
-            format!("---\nsummary: S\ntitle: T\nrelation:root: {ROOT_ID}\n---\n")
+            fm.render(&s),
+            format!("---\nsummary: S\ntitle: T\nrelation:reply_to: {ROOT_ID}\n---\n")
         );
     }
 
-    /// The rule that makes "warn, do not refuse" safe for a schema missing a relation key.
-    ///
-    /// An interpreted key the schema omits is still written when the note has it, so the omission
-    /// costs diff shape and never thread structure. This is also the one case where emitted order
-    /// is not exactly the schema's, and it cannot arise for a schema declaring all four keys.
+    /// A `relation:root` written before this change is an ordinary undeclared key: preserved,
+    /// reported, ignored. The forward-compat rule *is* the migration.
     #[test]
-    fn an_interpreted_key_the_schema_omits_is_still_written() {
-        let fm = ok(&format!(
-            "---\ntitle: T\nrelation:root: {ROOT_ID}\nrelation:reply_to: {ROOT_ID}\n---\n"
-        ));
-        let thin = FrontmatterSchema::new(["title", "relation:root"]);
-        assert_eq!(
-            fm.render(&thin),
-            format!("---\ntitle: T\nrelation:root: {ROOT_ID}\nrelation:reply_to: {ROOT_ID}\n---\n"),
-            "an omitted relation key must not be dropped from a note that has one"
+    fn a_legacy_relation_root_round_trips_untouched() {
+        let doc = format!(
+            "---\ntitle: T\nrelation:reply_to: {ROOT_ID}\nrelation:root: {ROOT_ID}\n---\n\nB.\n"
         );
-        // Losing it would be silent data loss, so state the negative too.
-        assert!(fm.render(&thin).contains("relation:reply_to"));
+        let (fm, body) = parse(&doc).unwrap();
+        assert_eq!(unknown_names(&fm), ["relation:root"]);
+        assert_eq!(format!("{}{}", fm.render(&jot()), body), doc);
     }
 
     #[test]
     fn an_empty_schema_still_writes_everything_the_note_carries() {
-        let fm = ok(&format!(
-            "---\ntitle: T\nrelation:root: {ROOT_ID}\nsummary: S\n---\n"
-        ));
-        assert_eq!(
-            fm.render(&FrontmatterSchema::new(Vec::<String>::new())),
-            format!("---\ntitle: T\nrelation:root: {ROOT_ID}\nsummary: S\n---\n")
-        );
+        let empty = FrontmatterSchema::try_new(Vec::new()).unwrap();
+        let doc = format!("---\ntitle: T\nrelation:reply_to: {ROOT_ID}\nsummary: S\n---\n");
+        // With nothing declared, every key is an undeclared key — and undeclared keys are the
+        // thing this project preserves most carefully.
+        let (fm, _) = parse_with(&empty, &doc).unwrap();
+        assert_eq!(fm.render(&empty), doc);
     }
 
     #[test]
     fn an_absent_key_is_omitted_entirely_rather_than_written_empty() {
-        let fm = ok(&format!("---\nrelation:root: {ROOT_ID}\n---\n"));
-        let out = fm.render(&jot());
-        assert_eq!(out, format!("---\nrelation:root: {ROOT_ID}\n---\n"));
+        let fm = ok(&format!("---\nrelation:reply_to: {ROOT_ID}\n---\n"));
+        let out = fm.render(&jot_optional());
+        assert_eq!(out, format!("---\nrelation:reply_to: {ROOT_ID}\n---\n"));
         assert!(!out.contains("title"), "{out}");
-        assert!(!out.contains("reply_to"), "{out}");
+        assert!(!out.contains("quote_to"), "{out}");
+    }
+
+    /// `required` is a **render** rule. It never rejects a file, and — because an empty value
+    /// parses as absent — it does not change what the file means either.
+    #[test]
+    fn required_writes_the_key_empty_and_re_rendering_is_idempotent() {
+        let s = schema(vec![
+            title_entry("title").required(true),
+            FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)).required(true),
+            text_entry("summary"),
+        ]);
+        let (fm, _) = parse_with(&s, "---\n---\n").unwrap();
+
+        let once = fm.render(&s);
+        assert_eq!(
+            once, "---\ntitle:\nrelation:reply_to:\n---\n",
+            "required keys are written empty; `summary` is not required and stays away"
+        );
+
+        // Reading it back gives nothing, and re-rendering is byte-identical — the property
+        // `edit`'s no-op check depends on.
+        let (back, _) = parse_with(&s, &once).unwrap();
+        assert_eq!(back.title, None);
+        assert_eq!(back.reply_to, None);
+        assert_eq!(back.render(&s), once);
     }
 
     #[test]
@@ -1491,12 +1918,11 @@ Body.
             "한국어 제목",
             "a \" quote and a ' quote",
             "trailing space ",
-            "",
         ] {
             let mut fm = Frontmatter::new();
             fm.title = Some(title.to_string());
             let rendered = fm.render(&jot());
-            let back = Frontmatter::parse_document(&p(), rendered.as_bytes())
+            let back = Frontmatter::parse_document(&jot(), &p(), rendered.as_bytes())
                 .unwrap_or_else(|e| panic!("{title:?} did not re-parse: {e}\n{rendered}"))
                 .0;
             assert_eq!(back.title.as_deref(), Some(title), "{rendered}");
@@ -1509,7 +1935,7 @@ Body.
         fm.title = Some("one\ntwo".to_string());
         let rendered = fm.render(&jot());
         assert_eq!(
-            Frontmatter::parse_document(&p(), rendered.as_bytes())
+            Frontmatter::parse_document(&jot(), &p(), rendered.as_bytes())
                 .unwrap()
                 .0,
             fm,
@@ -1567,7 +1993,7 @@ Body.
         for doc in sources {
             let (fm, _) = parse(doc).unwrap();
             let once = fm.render(&jot());
-            let (again, _) = Frontmatter::parse_document(&p(), once.as_bytes())
+            let (again, _) = Frontmatter::parse_document(&jot(), &p(), once.as_bytes())
                 .unwrap_or_else(|e| panic!("{doc:?} rendered to something unparseable: {e}"));
             assert_eq!(again.render(&jot()), once, "not a fixed point for {doc:?}");
             assert_eq!(again, fm, "the typed state drifted for {doc:?}");
@@ -1621,9 +2047,10 @@ Body.
                 "{name}: the three slices do not reconstitute the file"
             );
 
-            let (fm, body) = Frontmatter::parse_document(&path, &bytes).unwrap();
+            let (fm, body) = Frontmatter::parse_document(&jot(), &path, &bytes).unwrap();
             let once = format!("{}{}", fm.render(&jot()), body);
-            let (again, body2) = Frontmatter::parse_document(&path, once.as_bytes()).unwrap();
+            let (again, body2) =
+                Frontmatter::parse_document(&jot(), &path, once.as_bytes()).unwrap();
             assert_eq!(
                 format!("{}{}", again.render(&jot()), body2),
                 once,

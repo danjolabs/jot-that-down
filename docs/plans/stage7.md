@@ -1,131 +1,112 @@
-# Stage 7 — Frontmatter schema and `plain` workspaces
+# Stage 7 — What is left of the frontmatter schema
 
-**Goal.** A workspace declares the frontmatter its notes carry, with types and defaults; and the
-second workspace type — an ordinary markdown directory — becomes real.
+**Status.** Mostly subsumed. This stage had two headline features and both are settled: user-declared
+typed frontmatter **landed early**, in `docs/plans/pre-stage4-refactor.md`, and `plain` workspaces are
+**deleted**. What remains is the tail of the type system — enums, defaults — plus rename detection,
+which never belonged to either feature and is the only genuinely hard thing here.
 
-**Why last.** Both features are generalizations, and a generalization written before you have used the
-specific thing is a guess. By now you have months of real notes and a clear sense of which fields you
-actually keep typing by hand. Stage 1's rule that unknown keys survive every write is what makes this
-stage possible without a migration.
+**Why it moved.** The argument for putting the schema last was that a generalization written before
+you have used the specific thing is a guess. That held right up until the schema stopped being a
+generalization and became the answer to a stage-4 question: what may the index cache, and what does a
+key *mean*? Landing it after SQLite would have meant doing the same work again through a database
+migration, and re-deriving the index invariant against a schema that was still moving.
 
-## Frontmatter schema
+**Why `plain` is gone.** Not a cut for scope: it became *incoherent*. `WorkspaceKind` governed two
+things, filename policy and whether threads existed, and once relations are schema-declared the second
+is answered by the schema. A workspace declaring no `relation:*` entry **is** what `plain` meant. What
+was left was a filename policy wearing the name of a workspace type. The scope check this document
+used to end on — "is a `plain` workspace something you will use, or is it symmetry for its own sake?"
+— was answered by the type system rather than by a judgment call.
 
-Your idea from `docs/conversation/initial.md`: every file in a workspace carries a known frontmatter shape,
-with defaults and type checking.
+## What landed already
 
-### Declaration
+From the pre-stage-4 refactor, and no longer this stage's work:
 
-In `workspace.toml`, so it travels with the vault:
+- `[[schema.frontmatter]]` in `workspace.toml`: an ordered array of tables, each with a `key`, a
+  `type`, and an optional `required`.
+- `document:title`, `relation:reply_to`, `relation:quote_to` as reserved roles; `text`,
+  `text:<refinement>`, `multitext`, `multitext:<refinement>` for everything else.
+- `key` defaults to the type string verbatim. Roles are looked up by type, so a title key may be
+  called `heading` or `제목` and core still knows.
+- Unknown types are preserved and warned about, never refused — the forward-compat rule applied to
+  the type system before the type system could break it.
+- The manifest is strict (a duplicate role is a parse error); note files are never rejected.
+- `required` is a **render** rule: the key is always emitted, empty when the note has no value. It
+  never rejects a file, and an empty value parses as absent, so it changes nothing but the diff.
+
+## What is left
+
+### Enums and permitted values
 
 ```toml
-[frontmatter.status]
-type     = "enum"
-values   = ["seed", "growing", "done"]
-default  = "seed"
-required = false
-
-[frontmatter.source]
-type     = "string"
-required = false
-
-[frontmatter.pinned]
-type     = "bool"
-default  = false
+[[schema.frontmatter]]
+key    = "status"
+type   = "enum"
+values = ["seed", "growing", "done"]
 ```
 
-Types: `string`, `int`, `float`, `bool`, `date`, `datetime`, `enum`, and `list<T>`. That covers what a
-note actually carries; resist anything more expressive — this is a note format, not a data modeling
-language.
+The one type the refactor did not settle, because it is the one that needs a second field. It also
+needs the rule the others get for free: **validation is advisory, never destructive.** A note whose
+`status` is not in `values` is still a note — it loads, it renders, and the violation is a `Problem`
+on the scan report. Refusing to open a note because a field is the wrong type would make the schema
+more important than the writing, which is backwards.
 
-### Rules
+### Per-key defaults
 
-- **Built-in fields are reserved.** After stage 1b there are four: `title`, `relation:root`,
-  `relation:reply_to`, `relation:quote` — `jot_core::frontmatter::INTERPRETED_KEYS`. They cannot be
-  redeclared with a different meaning or overridden. They *are* already declared in
-  `[schema] frontmatter`, which is what fixes their emitted order, and a schema may name them in
-  any order or omit one (a `jot` workspace warns, and the write path still emits an omitted
-  relation a note carries).
-- **Defaults apply at creation only.** Applying them retroactively would rewrite every file in the
-  vault on a config change — a change to the schema must never touch existing notes.
-- **Validation is advisory, never destructive.** A note that violates the schema is still a note: it
-  loads, it renders, and the violation is surfaced as a problem in `SyncReport` and shown in the UI.
-  Refusing to open a note because a field is the wrong type would make the schema more important than
-  the writing, which is backwards.
-- **Removing a field from the schema leaves the data.** The values stay in the files as unknown keys,
-  exactly as stage 1 guaranteed.
+```toml
+[[schema.frontmatter]]
+key     = "status"
+type    = "enum"
+values  = ["seed", "growing", "done"]
+default = "seed"
+```
 
-### Where it shows up
+**Defaults apply at creation only.** Applying them retroactively would rewrite every file in the vault
+on a config change, and a change to the schema must never touch existing notes. Note that this is a
+different thing from `required`, which already exists: `required` writes an *empty* key, a default
+writes a *value*.
 
-- `jot new` prefills declared defaults into the template.
-- The desktop composer renders a declared field as a small typed control beneath the collapsed title.
-- `jot ls --field status=seed` and the same filter in search — this is the payoff, and the reason to
-  index declared fields.
-- Index: a `note_fields(note_id, key, value)` table, populated by the scanner. Simple, sparse, and it
-  keeps the `notes` schema stable.
+### Field filters, and the boundary to watch
+
+`jot ls --field status=seed`, and the same filter in search. This is the payoff, and the reason stage
+4 indexes declared fields into the `fields` JSON column at all.
 
 **Watch the boundary.** A schema with an `enum` and a filter is one honest step away from tags, and
 tags are out of scope by decision. The difference worth holding: a declared field describes a note's
 *state*, which changes; a tag asserts a note's *category*, which is the filing decision this app
 exists to avoid. If the fields start looking like folders, delete them.
 
-## `plain` workspaces
+### Rename detection
 
-An ordinary markdown directory — arbitrary filenames, real folders, no threads.
+The one item here that was never about the schema, and the only genuinely hard one. It arrived in this
+document attached to `plain` workspaces, where path identity made it mandatory. With `plain` gone it is
+no longer mandatory — a `jot` note's identity is its filename UUID and survives any rename — so it
+demotes to a nicety: noticing that `<uuid>.md` became `<uuid>_a_slug.md` and reporting a move rather
+than a delete plus a create. Stage 4's content hash is what makes it detectable.
 
-| | `jot` | `plain` |
-| --- | --- | --- |
-| Filenames | UUIDv7 (+ optional slug) | arbitrary, user-chosen |
-| Layout | flat | nested folders |
-| Threads / quotes | yes | no |
-| Links | yes | yes |
-| Views | timeline, files+reader, search, trash | files+reader, search, trash |
-
-### What changes in core
-
-- **Identity without a UUID filename.** A `plain` note is identified by its path. Give it a stable id
-  in frontmatter on first index — writing to a file the user did not just edit is intrusive, so make
-  it opt-in per workspace and fall back to path-as-identity when declined.
-- **Recursive scanning**, honoring `.gitignore`-style excludes.
-- **Renames and moves** become real events; a path-identified note that moves must not look like a
-  delete plus a create. Content hash from stage 4 is what makes this detectable.
-- **Links become `[[filename]]`**, not `[[uuid]]` — resolution by path or basename, still strictly
-  within one workspace.
-- Threads, quotes, and the timeline are absent, not empty. The rail shows three destinations, and the
-  files+reader view built type-agnostic in stage 5 does the work.
-
-### Scope check
-
-The honest question to ask before building this: is a `plain` workspace something you will use, or is
-it symmetry for its own sake? Obsidian already handles that directory well. If the answer is "I want
-one app open instead of two", build it. If it is "it seems incomplete without it", skip it — every
-line here is a line not spent on the capture loop that is the actual point.
+If it is not worth the cost, it is now safe to drop entirely. That was not true while `plain` existed.
 
 ## Work
 
-- [ ] Schema declaration parsing and validation in `workspace.toml`, with reserved-field enforcement.
-- [ ] `note_fields` table, populated by the scanner; migration from stage 4's schema.
-- [ ] Defaults applied at creation; violations reported through `SyncReport` and rendered as advisory.
+- [ ] `enum` type with `values`, and advisory validation reported through `SyncReport`.
+- [ ] Per-key `default`, applied at creation only.
 - [ ] Field filters in `jot ls`, `jot search`, and both UIs.
 - [ ] Typed field controls in the desktop composer.
-- [ ] `plain` workspace kind: recursive scan, path identity, rename detection, filename links.
-- [ ] Views degrade correctly by workspace kind — no empty timeline in a `plain` workspace.
+- [ ] Rename detection over stage 4's content hash — **optional**; decide by whether re-slugging
+      actually shows up as churn in a real vault.
 
 ## Acceptance
 
-- Declaring a field with a default puts it in the next new note and leaves every existing note byte-identical.
-- A note violating the schema still opens, and the violation appears in `jot index status`.
-- Removing a field from the schema leaves its values in the files, still round-tripping.
-- A `plain` workspace indexes a nested directory, and moving a file inside it is a move, not a
-  delete-plus-create.
-- Switching between a `jot` and a `plain` workspace changes the available destinations with no dead views.
+- Declaring a field with a default puts it in the next new note and leaves every existing note
+  byte-identical.
+- A note violating an `enum` still opens, and the violation appears in `jot index status`.
+- Removing a field from the schema leaves its values in the files, still round-tripping — the
+  forward-compat rule, which is the same rule that made `relation:root`'s deletion a no-op.
 
 ## Risks
 
 - **Schema becomes a filing system.** Named above; the mitigation is the state-versus-category test,
   applied honestly.
-- **Two workspace types double the test matrix.** Every core operation now has two behaviors. Make the
-  kind an explicit parameter in the fixture harness so both run everywhere, rather than testing `jot`
-  and hoping `plain` follows.
-- **Path identity is genuinely harder than UUID identity.** Renames, case-insensitive filesystems on
-  Windows, and duplicate basenames are all real. This is most of the cost of the `plain` type — weigh
-  it against the scope check above before starting.
+- **This stage may be empty.** That is a real outcome and an acceptable one. If a year of use never
+  wants an enum, the remaining items are a list of things not to build, and the stage closes as
+  subsumed rather than as done.

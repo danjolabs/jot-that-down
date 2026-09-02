@@ -5,6 +5,13 @@
 > this document and why, the per-criterion verdict, and an eleven-mutation spot-check. Two sections
 > below carry inline corrections marked **Corrected at implementation**; the Open questions section
 > records what was settled.
+>
+> **Superseded in part by [pre-stage4-refactor.md](pre-stage4-refactor.md).** The schema this stage
+> declared was a permitted-key list; it is now an ordered list of *typed* entries, and a key's role
+> comes from its declared `type` rather than from a constant in `frontmatter.rs`. `relation:root` is
+> deleted, `relation:quote` is renamed `relation:quote_to`, and `open_note`'s repair write — this
+> stage's one read path that wrote — is gone with it. The manifest example and the repair table
+> below are read as history.
 
 **Goal.** The note format stops carrying what the index can hold, and `workspace.toml` declares what
 frontmatter looks like. One write path, ordered by the schema.
@@ -230,7 +237,7 @@ The three cases are not equivalent:
 | Deleted externally | Repair |
 | --- | --- |
 | `title` | Absent means untitled. Optional; no repair value to invent. |
-| `relation:root` | **Recompute.** Walk `reply_to` upward; a note with no `reply_to` is its own root. |
+| `relation:root` | **Recompute.** Walk `reply_to` upward; a note with no `reply_to` is its own root. **Superseded:** the key is deleted and the root is derived at scan time — see [pre-stage4-refactor.md](pre-stage4-refactor.md). `open_note` no longer writes at all. |
 | `relation:reply_to` | **Unrecoverable.** The note becomes top-level. Accepted per the rule above; the index conforms. |
 
 Do not write an empty `relation:reply_to:`. Absent means top-level, which is a real state; empty
@@ -250,7 +257,8 @@ instead of containing it.
 - `render → parse → render` is a fixed point.
 - A note carrying `summary:` (not in the schema) survives an edit to its title with `summary`'s bytes
   unchanged, including when its value is a block scalar or a nested mapping.
-- A note whose `relation:root` was deleted externally has it recomputed on open; one whose
+- *(Superseded — the key is gone; the successor criterion is that the root is derived at scan time
+  and opening a note writes nothing.)* A note whose `relation:root` was deleted externally has it recomputed on open; one whose
   `relation:reply_to` was deleted becomes top-level and is not written back as empty.
 - `sync()` and `rebuild()` over a clean vault write nothing — `git status` stays empty.
   *(**Deferred to stage 4** — neither function exists yet, by this stage's own "Not in this stage".

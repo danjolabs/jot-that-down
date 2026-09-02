@@ -48,7 +48,7 @@ Its most valuable output is negative: which tasks *cannot* run in parallel, and 
 name: implementer
 description: Implement one task inside a declared file ownership set. Writes unit tests. Never touches acceptance tests.
 model: opus
-tools: Read, Grep, Glob, Edit, Write, Bash
+tools: Read, Grep, Glob, Edit, Write, Bash, LSP
 ---
 ```
 
@@ -59,6 +59,10 @@ summary and the tests it added.
 Hard constraints in its prompt: may not edit outside its ownership set; may not edit
 `crates/jot-acceptance/`; may not add a dependency without owning `Cargo.toml` this wave.
 
+`LSP` is there for the same reason the ownership set is: a rename whose references were found by
+grep is a rename that missed one. `AGENTS.md` carries the caveat — rust-analyzer's diagnostics go
+stale mid-refactor, so the mechanical gate below is what decides, never the language server.
+
 ### `verifier` — opus, always
 
 ```yaml
@@ -66,7 +70,7 @@ Hard constraints in its prompt: may not edit outside its ownership set; may not 
 name: verifier
 description: Turn a stage's acceptance criteria into executable tests, then try to falsify the implementation.
 model: opus
-tools: Read, Grep, Glob, Edit, Write, Bash
+tools: Read, Grep, Glob, Edit, Write, Bash, LSP
 ---
 ```
 

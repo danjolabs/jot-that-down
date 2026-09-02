@@ -542,7 +542,9 @@ fn show_prints_the_body_and_raw_prints_the_file() {
 
     let raw = vault.run(&["show", &id, "--raw"]);
     assert!(raw.starts_with("---\n"), "{raw}");
-    assert!(raw.contains("relation:root:"), "{raw}");
+    assert!(raw.contains("title: A title"), "{raw}");
+    // No note file carries a root any more: it is derived from `relation:reply_to` at scan time.
+    assert!(!raw.contains("relation:root"), "{raw}");
 }
 
 #[test]
@@ -765,7 +767,7 @@ fn purge_requires_confirmation_and_declining_keeps_the_note() {
 }
 
 #[test]
-fn purge_with_yes_removes_the_file_and_leaves_the_children_grouped() {
+fn purge_with_yes_removes_the_file_and_leaves_the_children_live_but_ungrouped() {
     let vault = Vault::new();
     let root = vault.new_note(&["-m", "root"]);
     let mid = vault.new_note(&["--reply", &root, "-m", "mid"]);
@@ -781,8 +783,12 @@ fn purge_with_yes_removes_the_file_and_leaves_the_children_grouped() {
         .iter()
         .find(|r| r["id"] == leaf.as_str())
         .unwrap();
+    // The evidence that a chain was broken is the dangling parent, which lives in the file.
     assert_eq!(leaf_row["parent"]["state"], "deleted");
-    assert_eq!(leaf_row["root"], root.as_str(), "still grouped");
+    // The root is derived, so purging the middle splits the subtree: the walk now stops at the id
+    // the surviving file still names. Grouping across *two* purges is what is genuinely lost.
+    assert_eq!(leaf_row["root"], mid.as_str());
+    assert_ne!(leaf_row["root"], root.as_str());
 }
 
 #[test]
