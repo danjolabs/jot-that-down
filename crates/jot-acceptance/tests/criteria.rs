@@ -57,7 +57,7 @@ fn copy_tree(src: &Path, dst: &Path) {
 /// A vault holding exactly `notes`, each `(filename, contents)`.
 fn vault_of(tmp: &Path, notes: &[(String, String)]) -> Workspace {
     let root = tmp.join("v");
-    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    let ws = Workspace::init(&root).unwrap();
     for (name, text) in notes {
         std::fs::write(root.join(name), text).unwrap();
     }
@@ -658,7 +658,7 @@ fn workspace_init_on_an_empty_directory_produces_the_exact_tree() {
     let root = tmp.path().join("Thoughts");
     std::fs::create_dir(&root).unwrap();
 
-    Workspace::init(&root, WorkspaceKind::Jot).expect("init must succeed");
+    Workspace::init(&root).expect("init must succeed");
 
     assert_eq!(
         relative_tree(&root),
@@ -691,7 +691,7 @@ fn workspace_init_on_an_empty_directory_produces_the_exact_tree() {
 fn overwriting_an_existing_note_file_succeeds() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("v");
-    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    let ws = Workspace::init(&root).unwrap();
 
     let target = root.join(format!("{A}.md"));
     jot_fs::atomic_write(&target, &ws.tmp_dir(), b"first\n").unwrap();
@@ -714,7 +714,7 @@ fn overwriting_an_existing_note_file_succeeds() {
 fn an_interrupted_write_leaves_the_original_intact() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("v");
-    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    let ws = Workspace::init(&root).unwrap();
 
     let target = root.join(format!("{A}.md"));
     let original = format!("---\ntitle: original\nrelation:root: {A}\n---\n\nBody.\n");
@@ -744,7 +744,7 @@ fn discover_finds_the_workspace_from_three_directories_deep() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
-    Workspace::init(&root, WorkspaceKind::Jot).expect("init must succeed");
+    Workspace::init(&root).expect("init must succeed");
 
     let deep = root.join("one").join("two").join("three");
     std::fs::create_dir_all(&deep).unwrap();

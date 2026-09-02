@@ -151,16 +151,16 @@ pub enum Error {
     #[error("`{path}`: frontmatter key `{field}` has the wrong type: {message}")]
     InvalidFrontmatterField {
         path: PathBuf,
-        field: &'static str,
+        field: String,
         message: String,
     },
 
-    /// A relation key (`relation:root`, `relation:reply_to`, `relation:quote`) holds something
+    /// A key the schema declares as a `relation:*` role holds something
     /// that is not a UUID.
     #[error("`{path}`: frontmatter key `{field}` is not a UUID: `{value}`")]
     InvalidNoteIdValue {
         path: PathBuf,
-        field: &'static str,
+        field: String,
         value: String,
     },
 
@@ -231,10 +231,6 @@ pub enum Error {
         supported: u32,
     },
 
-    /// `[workspace] kind` is neither `jot` nor `plain`.
-    #[error("`{path}`: unknown workspace kind `{value}` (expected `jot` or `plain`)")]
-    InvalidWorkspaceKind { path: PathBuf, value: String },
-
     /// `[workspace] id` is not a UUID.
     #[error("`{path}`: workspace id `{value}` is not a UUID")]
     InvalidWorkspaceId { path: PathBuf, value: String },
@@ -293,7 +289,6 @@ impl Error {
             | Error::ManifestParse { path, .. }
             | Error::ManifestSerialize { path, .. }
             | Error::UnsupportedSchemaVersion { path, .. }
-            | Error::InvalidWorkspaceKind { path, .. }
             | Error::InvalidWorkspaceId { path, .. }
             | Error::RegistryUnreadable { path, .. }
             | Error::RegistryCorrupt { path, .. }
@@ -393,12 +388,12 @@ mod tests {
             },
             Error::InvalidFrontmatterField {
                 path: "notes/m.md".into(),
-                field: "title",
+                field: "title".into(),
                 message: "expected a string, found a sequence".into(),
             },
             Error::InvalidNoteIdValue {
                 path: "notes/n.md".into(),
-                field: "relation:reply_to",
+                field: "relation:reply_to".into(),
                 value: "not-a-uuid".into(),
             },
             Error::ReplyCycle {
@@ -434,10 +429,6 @@ mod tests {
                 path: "notes/.jot/workspace.toml".into(),
                 found: 7,
                 supported: 1,
-            },
-            Error::InvalidWorkspaceKind {
-                path: "notes/.jot/workspace.toml".into(),
-                value: "banana".into(),
             },
             Error::InvalidWorkspaceId {
                 path: "notes/.jot/workspace.toml".into(),
@@ -488,11 +479,12 @@ mod tests {
         // `InvalidTimestamp` — all of them about keys the format no longer carries) and
         // added two (`UnpreservableFrontmatter`, `ReplyCycle`), reaching 29. Stage 2 added the
         // four note-lifecycle errors, which are the first errors in the crate about a *note*
-        // rather than a file.
+        // rather than a file. The pre-stage-4 refactor removed `InvalidWorkspaceKind` along with
+        // the `kind` field itself.
         assert_eq!(
             samples.len(),
-            33,
-            "the stage-3 error taxonomy has 33 variants"
+            32,
+            "the pre-stage-4 error taxonomy has 32 variants"
         );
     }
 

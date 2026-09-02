@@ -59,7 +59,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
-use crate::frontmatter::FrontmatterSchema;
+use crate::frontmatter::{FieldType, FrontmatterEntry, FrontmatterSchema, Role};
 use crate::fs::{self, FilenameSlug};
 use crate::link::{self, Link};
 use crate::note::{Note, NoteId, NoteMeta};
@@ -70,7 +70,7 @@ use crate::snapshot::{Problem, Snapshot, SyncReport};
 use crate::thread::Thread;
 
 /// The manifest schema version this build writes, and the highest it will open.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The directory that makes a directory a workspace.
 const JOT_DIR: &str = ".jot";
@@ -106,57 +106,13 @@ const MANIFEST_HEADER: &str = "\
 ";
 
 // =============================================================================================
-// Kinds and knobs
-// =============================================================================================
-
-/// Which flavour of workspace this is.
-///
-/// `jot` is the flat, UUID-named, threaded vault this project is about. `plain` is a folder of
-/// freely-named markdown with no threads; it is declared here so a `plain` manifest round-trips
-/// from stage 1 onward, and gets its behavior in stage 7.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WorkspaceKind {
-    /// Flat, UUID-named notes with threads. The default and the one stages 1–6 implement.
-    Jot,
-    /// Folders and free filenames, no threads. Stage 7.
-    Plain,
-}
-
-impl WorkspaceKind {
-    /// The manifest spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            WorkspaceKind::Jot => "jot",
-            WorkspaceKind::Plain => "plain",
-        }
-    }
-
-    /// Parses a manifest spelling. `None` for anything else — callers turn that into an
-    /// [`Error::InvalidWorkspaceKind`] naming the path they read it from.
-    #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "jot" => Some(WorkspaceKind::Jot),
-            "plain" => Some(WorkspaceKind::Plain),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for WorkspaceKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-// =============================================================================================
 // The manifest
 // =============================================================================================
 
 /// The contents of `.jot/workspace.toml`, flattened.
 ///
-/// The TOML file nests `id`/`kind`/`name` under `[workspace]` and `filename` under `[notes]`; in
+/// The TOML file nests `id`/`name` under `[workspace]` and declares each frontmatter entry as its
+/// own `[[schema.frontmatter]]` table; in
 /// memory that nesting buys nothing, so the on-disk shape lives in the private `file` types below
 /// and this is what callers see.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,12 +139,10 @@ pub struct Manifest {
     /// Reading is unaffected either way — `open` parses any UUID version — so vaults created
     /// before this are correct and stay correct.
     pub id: Uuid,
-    /// `jot` or `plain`.
-    pub kind: WorkspaceKind,
     /// Display only. Defaults to the target directory's basename at `init` (§U3) and is expected
     /// to be edited by hand.
     pub name: String,
-    /// The declared frontmatter keys, in the order notes are written in.
+    /// The declared frontmatter entries, in the order notes are written in.
     ///
     /// Absent from the file means [`FrontmatterSchema::jot_default`] — which is what lets a
     /// stage-1 manifest, written before `[schema]` existed, open without a migration.
@@ -204,11 +158,26 @@ impl Manifest {
             schema_version: self.schema_version,
             workspace: file::Workspace {
                 id: self.id.to_string(),
-                kind: self.kind.as_str(),
                 name: &self.name,
             },
             schema: file::Schema {
-                frontmatter: self.schema.keys(),
+                frontmatter: self
+                    .schema
+                    .entries()
+                    .iter()
+                    .map(|entry| {
+                        let declared = entry.field_type().as_str();
+                        file::Entry {
+                            // `key` defaults to the type string verbatim, so an entry that takes
+                            // the default writes no `key` at all. That is what keeps a manifest
+                            // reading as `type = "relation:reply_to"` on one line rather than as
+                            // the same string twice.
+                            key: (entry.key() != declared).then(|| entry.key().to_string()),
+                            field_type: declared,
+                            required: entry.is_required().then_some(true),
+                        }
+                    })
+                    .collect(),
             },
         };
         let body = toml::to_string_pretty(&file).map_err(|source| Error::ManifestSerialize {
@@ -226,6 +195,18 @@ impl Manifest {
     /// `default_name` is the basename of the directory the manifest was found in, used when the
     /// manifest omits `name`. `name` is display-only; refusing to open a vault over a missing
     /// display string would be absurd.
+    ///
+    /// # v1 manifests are promoted, not refused
+    ///
+    /// v1 declared `[schema] frontmatter` as an array of plain strings, which said what keys a
+    /// note may carry and nothing about what any of them meant. Each such string becomes an entry
+    /// here — the four names v1 interpreted map to their roles, everything else becomes `text` —
+    /// and the manifest is rewritten as v2 the next time anything writes it.
+    ///
+    /// The **manifest is strict**: a v2 manifest that contradicts itself, by claiming a reserved
+    /// role twice, is an [`Error::ManifestParse`] rather than a silent first-wins. Note *files*
+    /// are never rejected; the two policies are stated together so the type system's strictness
+    /// cannot leak into user data.
     fn from_toml(text: &str, path: &Path, default_name: &str) -> Result<Self> {
         let parse_err = |message: String| Error::ManifestParse {
             path: path.to_path_buf(),
@@ -260,24 +241,31 @@ impl Manifest {
             path: path.to_path_buf(),
             value: raw.workspace.id.clone(),
         })?;
-        let kind = WorkspaceKind::parse(&raw.workspace.kind).ok_or_else(|| {
-            Error::InvalidWorkspaceKind {
-                path: path.to_path_buf(),
-                value: raw.workspace.kind.clone(),
-            }
-        })?;
-        let schema = match raw.schema.frontmatter {
+
+        let entries = match raw.schema.frontmatter {
             // A manifest with no `[schema]` predates the key, so it gets the default rather than
             // an empty schema — an empty one would render notes with no keys at all.
+            None => None,
+            Some(file::Declared::V1(keys)) => Some(promote_v1(&keys)),
+            Some(file::Declared::V2(entries)) => Some(
+                entries
+                    .into_iter()
+                    .map(|e| {
+                        let field_type = FieldType::parse(&e.field_type);
+                        let entry = match e.key {
+                            Some(key) => FrontmatterEntry::with_key(key, field_type),
+                            None => FrontmatterEntry::new(field_type),
+                        };
+                        entry.required(e.required.unwrap_or(false))
+                    })
+                    .collect(),
+            ),
+        };
+
+        let schema = match entries {
             None => FrontmatterSchema::jot_default(),
-            Some(keys) => {
-                if let Some(bad) = keys.iter().find(|k| k.trim().is_empty()) {
-                    return Err(parse_err(format!(
-                        "`[schema] frontmatter` contains an empty key (`{bad}`)"
-                    )));
-                }
-                FrontmatterSchema::new(keys)
-            }
+            Some(entries) => FrontmatterSchema::try_new(entries)
+                .map_err(|message| parse_err(format!("`[[schema.frontmatter]]`: {message}")))?,
         };
 
         Ok(Manifest {
@@ -285,7 +273,6 @@ impl Manifest {
                 .try_into()
                 .expect("checked to be within 1..=SCHEMA_VERSION above"),
             id,
-            kind,
             name: raw
                 .workspace
                 .name
@@ -293,6 +280,31 @@ impl Manifest {
             schema,
         })
     }
+}
+
+/// A v1 `[schema] frontmatter` string list, read as typed entries.
+///
+/// The four names v1 interpreted map to their roles; every other string becomes `text`, which is
+/// the honest reading — v1 said nothing about what those keys held.
+///
+/// `relation:root` is **dropped**. It was a denormalized cache of a walk that is now done at scan
+/// time, so a schema entry for it would declare a key nothing writes. In note files it is not
+/// migrated either: it simply becomes an undeclared key, preserved and ignored, which is the one
+/// place the forward-compat rule visibly pays for itself.
+fn promote_v1(keys: &[String]) -> Vec<FrontmatterEntry> {
+    keys.iter()
+        .filter(|key| key.as_str() != "relation:root")
+        .map(|key| match key.as_str() {
+            "title" => FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title)),
+            "relation:reply_to" => FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+            // v1 spelled it `relation:quote`; v2 renames it for symmetry with `relation:reply_to`.
+            // The *key* is kept as it was, so notes written under v1 still round-trip.
+            "relation:quote" => {
+                FrontmatterEntry::with_key("relation:quote", FieldType::Reserved(Role::QuoteTo))
+            }
+            other => FrontmatterEntry::with_key(other, FieldType::Text(None)),
+        })
+        .collect()
 }
 
 /// The on-disk shape of `workspace.toml`, kept private so the nesting never leaks into the API.
@@ -307,19 +319,34 @@ mod file {
     pub(super) struct Manifest<'a> {
         pub schema_version: u32,
         pub workspace: Workspace<'a>,
-        pub schema: Schema<'a>,
+        pub schema: Schema,
     }
 
     #[derive(serde::Serialize)]
     pub(super) struct Workspace<'a> {
         pub id: String,
-        pub kind: &'a str,
         pub name: &'a str,
     }
 
     #[derive(serde::Serialize)]
-    pub(super) struct Schema<'a> {
-        pub frontmatter: &'a [String],
+    pub(super) struct Schema {
+        pub frontmatter: Vec<Entry>,
+    }
+
+    /// One `[[schema.frontmatter]]` table.
+    ///
+    /// `key` and `required` are skipped when they are at their defaults, so the common entry is
+    /// one line. An array of tables rather than an array of strings because order is load-bearing
+    /// — it fixes emission order, and stage 3's `$EDITOR` template depends on it — and because
+    /// each entry needs room to grow per-key fields.
+    #[derive(serde::Serialize)]
+    pub(super) struct Entry {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub key: Option<String>,
+        #[serde(rename = "type")]
+        pub field_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub required: Option<bool>,
     }
 
     /// Read just far enough to learn the schema version, and nothing else. Everything is optional
@@ -340,13 +367,35 @@ mod file {
     #[derive(serde::Deserialize)]
     pub(super) struct WorkspaceIn {
         pub id: String,
-        pub kind: String,
         pub name: Option<String>,
     }
 
     #[derive(Default, serde::Deserialize)]
     pub(super) struct SchemaIn {
-        pub frontmatter: Option<Vec<String>>,
+        pub frontmatter: Option<Declared>,
+    }
+
+    /// Both spellings of `schema.frontmatter`, told apart by shape rather than by the declared
+    /// version.
+    ///
+    /// Reading the shape is what lets a v1 manifest open: TOML cannot hold both an array of
+    /// strings and an array of tables under one key, so the two are unambiguous, and a file whose
+    /// `schema_version` disagrees with its own contents still opens as whatever it actually is.
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    pub(super) enum Declared {
+        /// v1: `frontmatter = ["title", "relation:reply_to", …]`.
+        V1(Vec<String>),
+        /// v2: a `[[schema.frontmatter]]` per entry.
+        V2(Vec<EntryIn>),
+    }
+
+    #[derive(serde::Deserialize)]
+    pub(super) struct EntryIn {
+        pub key: Option<String>,
+        #[serde(rename = "type")]
+        pub field_type: String,
+        pub required: Option<bool>,
     }
 }
 
@@ -368,29 +417,38 @@ mod file {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Warning {
-    /// A `jot` workspace declares a frontmatter schema that omits one or more relation keys, so
-    /// notes written from it will not carry the omitted keys in a declared position.
-    SchemaMissingRelationKeys {
+    /// A `[[schema.frontmatter]]` entry declares a `type` this build does not understand.
+    ///
+    /// The key still round-trips untouched: an unknown type behaves exactly like an undeclared
+    /// key, which is the forward-compat rule applied to the type system *before* the type system
+    /// gives anyone the chance to break it. A newer jot will write types an older binary has never
+    /// heard of, and the older binary must not damage the file.
+    UnknownFrontmatterTypes {
         /// The manifest the schema was read from.
         path: PathBuf,
-        /// The omitted keys, in [`crate::frontmatter::RELATION_KEYS`] order.
-        missing: Vec<&'static str>,
+        /// `(key, declared type)` for each entry this build cannot interpret, in declared order.
+        entries: Vec<(String, String)>,
     },
 }
 
 impl std::fmt::Display for Warning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Warning::SchemaMissingRelationKeys { path, missing } => write!(
+            Warning::UnknownFrontmatterTypes { path, entries } => write!(
                 f,
-                "`{}`: `[schema] frontmatter` omits {} — notes will still carry {} when set, but                  not in a declared position",
+                "`{}`: unknown frontmatter {} {} — {} preserved and never interpreted",
                 path.display(),
-                missing
+                if entries.len() == 1 { "type" } else { "types" },
+                entries
                     .iter()
-                    .map(|k| format!("`{k}`"))
+                    .map(|(key, ty)| format!("`{ty}` on `{key}`"))
                     .collect::<Vec<_>>()
                     .join(", "),
-                if missing.len() == 1 { "it" } else { "them" },
+                if entries.len() == 1 {
+                    "that key is"
+                } else {
+                    "those keys are"
+                },
             ),
         }
     }
@@ -436,7 +494,7 @@ impl Workspace {
     /// If a step after directory creation fails, the `.jot/` this call created is removed again on
     /// a best-effort basis, so a transient failure does not leave behind a half-workspace that
     /// [`Error::WorkspaceExists`] would then refuse to re-`init` forever.
-    pub fn init(path: &Path, kind: WorkspaceKind) -> Result<Self> {
+    pub fn init(path: &Path) -> Result<Self> {
         let root = absolutize(path);
         let jot = jot_dir(&root);
 
@@ -451,7 +509,6 @@ impl Workspace {
             schema_version: SCHEMA_VERSION,
             // v4, deliberately, where a note id is v7 — see `Manifest::id`.
             id: Uuid::new_v4(),
-            kind,
             name: default_name(&root),
             schema: FrontmatterSchema::jot_default(),
         };
@@ -496,7 +553,7 @@ impl Workspace {
     ///   [`Error::NotUtf8`] if it is not text.
     /// - [`Error::UnsupportedSchemaVersion`] if the manifest was written by a newer version.
     /// - [`Error::ManifestParse`], [`Error::InvalidWorkspaceId`] or
-    ///   [`Error::InvalidWorkspaceKind`] for a manifest this build cannot make sense of.
+    ///   for a manifest this build cannot make sense of.
     pub fn open(path: &Path) -> Result<Self> {
         let root = absolutize(path);
         if !jot_dir(&root).is_dir() {
@@ -567,12 +624,6 @@ impl Workspace {
         self.manifest.id
     }
 
-    /// `jot` or `plain`.
-    #[must_use]
-    pub fn kind(&self) -> WorkspaceKind {
-        self.manifest.kind
-    }
-
     /// The display name. Not an identifier — two workspaces may share one.
     #[must_use]
     pub fn name(&self) -> &str {
@@ -620,16 +671,17 @@ impl Workspace {
     /// Build a workspace and collect whatever its manifest is worth warning about.
     fn assembled(root: PathBuf, manifest: Manifest) -> Self {
         let mut warnings = Vec::new();
-        // Relation keys are a `jot` concept. A `plain` workspace has no threads, so a schema
-        // without them is not an omission (stage 7).
-        if manifest.kind == WorkspaceKind::Jot {
-            let missing = manifest.schema.missing_relation_keys();
-            if !missing.is_empty() {
-                warnings.push(Warning::SchemaMissingRelationKeys {
-                    path: manifest_path_of(&root),
-                    missing,
-                });
-            }
+        let unknown: Vec<(String, String)> = manifest
+            .schema
+            .unknown_types()
+            .into_iter()
+            .map(|(key, ty)| (key.to_string(), ty.to_string()))
+            .collect();
+        if !unknown.is_empty() {
+            warnings.push(Warning::UnknownFrontmatterTypes {
+                path: manifest_path_of(&root),
+                entries: unknown,
+            });
         }
         Workspace {
             root,
@@ -669,96 +721,32 @@ impl Workspace {
         Ok(None)
     }
 
-    /// Open one note, repairing what the schema says it should carry and the file does not.
+    /// Open one note.
     ///
-    /// **This is the only read path that writes**, and the asymmetry is deliberate: `sync()` and
-    /// `rebuild()` scan the whole vault and must never produce a diff, so a vault scan cannot be
-    /// where repair happens. Opening a single note is a user action on one file, and rewriting
-    /// that file complete and in schema order is what "the file wins, the index conforms" looks
-    /// like when the file is the thing that is behind.
+    /// **A pure read.** It was not always: until `relation:root` was deleted this method repaired
+    /// a missing root by walking the reply chain and writing the file back, and it was the only
+    /// read path in the crate that wrote. There is nothing left to repair — a root is derived at
+    /// scan time and never stored — so stage 4's "`sync()` never writes a note file" stops being a
+    /// rule to enforce and becomes a property of the design.
     ///
-    /// What gets repaired, and what does not (`stage1b.md`, "Missing schema fields"):
-    ///
-    /// | Deleted externally | Repair |
-    /// | --- | --- |
-    /// | `title` | Absent means untitled. Optional; no repair value to invent. |
-    /// | `relation:root` | **Recomputed** by walking `relation:reply_to` upward. |
-    /// | `relation:reply_to` | **Unrecoverable.** The note has no parent. Never written back empty. |
-    ///
-    /// A note whose `relation:reply_to` was deleted but whose `relation:root` survived keeps that
-    /// root. The file wins, and the file still says what the root is; inventing a different one
-    /// from the absence of a sibling key would be the index correcting the file, which is the one
-    /// thing the source-of-truth decision forbids.
-    ///
-    /// The rewrite is skipped when the rendered bytes already equal the file's, so opening a note
-    /// twice writes once, and opening a clean vault's notes writes nothing.
+    /// `title` and `relation:reply_to` were never repairable anyway: an absent title means
+    /// untitled, and an absent parent means the note has none. Inventing either would be the index
+    /// correcting the file, which is the one thing the source-of-truth decision forbids.
     ///
     /// # Errors
     ///
-    /// Whatever [`Note::load`] raises, [`Error::ReplyCycle`] if the reply chain loops, and
-    /// [`Error::Write`] or [`Error::Rename`] if the repaired file cannot be written.
+    /// [`Error::ReadDir`] if the vault root cannot be listed, [`Error::Read`] if the file cannot
+    /// be read, plus whatever [`Note::parse_at`] raises.
     pub fn open_note(&self, id: NoteId) -> Result<Option<OpenedNote>> {
         let Some(path) = self.note_path(id)? else {
             return Ok(None);
         };
-        let before = std::fs::read(&path).map_err(|source| Error::Read {
+        let bytes = std::fs::read(&path).map_err(|source| Error::Read {
             path: path.clone(),
             source,
         })?;
-        let mut note = Note::parse_at(&path, &before)?;
-
-        if note.frontmatter.root.is_none() {
-            note.frontmatter.root = Some(self.recompute_root(&path, &note)?);
-        }
-
-        let after = note.try_to_bytes(&self.manifest.schema)?;
-        let repaired = after != before;
-        if repaired {
-            fs::atomic_write(&path, &self.tmp_dir(), &after)?;
-        }
-        Ok(Some(OpenedNote {
-            note,
-            path,
-            repaired,
-        }))
-    }
-
-    /// The thread root of `note`, found by walking `relation:reply_to` upward.
-    ///
-    /// A note with no `relation:reply_to` is its own root. A chain that runs into a note the vault
-    /// does not hold stops there and returns that id: dangling references are a designed state, and
-    /// the last id the chain actually named is the best answer the file system has.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::ReplyCycle`] naming the note the walk came back to, plus whatever loading an
-    /// ancestor raises.
-    fn recompute_root(&self, path: &Path, note: &Note) -> Result<NoteId> {
-        let mut seen = vec![note.id];
-        let mut current = note.frontmatter.reply_to;
-
-        while let Some(id) = current {
-            if seen.contains(&id) {
-                return Err(Error::ReplyCycle {
-                    path: path.to_path_buf(),
-                    id: id.as_uuid(),
-                });
-            }
-            seen.push(id);
-
-            // A parent the vault does not hold ends the walk, and *is* the root: the chain named
-            // it, so it is a real ancestor whose file is simply not here.
-            let Some(parent_path) = self.note_path(id)? else {
-                return Ok(id);
-            };
-            let parent = Note::load(&parent_path)?;
-            match parent.frontmatter.reply_to {
-                None => return Ok(id),
-                Some(next) => current = Some(next),
-            }
-        }
-        // No `relation:reply_to` at all: the note is its own root.
-        Ok(note.id)
+        let note = Note::parse_at(&self.manifest.schema, &path, &bytes)?;
+        Ok(Some(OpenedNote { note, path }))
     }
 
     // =========================================================================================
@@ -777,7 +765,7 @@ impl Workspace {
     /// *note* is a [`Problem`] on the report, not an error: one bad file must not make the vault
     /// unusable.
     pub fn sync(&mut self) -> Result<SyncReport> {
-        let fresh = Snapshot::scan(&self.root)?;
+        let fresh = Snapshot::scan(&self.manifest.schema, &self.root)?;
         let report = fresh.diff(&self.snapshot);
         self.snapshot = fresh;
         Ok(report)
@@ -863,11 +851,12 @@ impl Workspace {
     /// makes the id's embedded timestamp the note's real creation time — the only place
     /// `created_at` is ever recorded.
     ///
-    /// # `relation:root`, assigned once
+    /// # The thread root is not written
     ///
-    /// A top-level note's root is its own id. A reply copies its parent's root, or falls back to
-    /// the parent's id if the parent's own root is missing. It is **never recomputed afterwards**,
-    /// which is what keeps a subtree grouped when a note in the middle of it is purged.
+    /// A note's root is **derived** — the transitive closure of `relation:reply_to`, computed by
+    /// the scan. Nothing is stored here for it, which is why creating a reply no longer has to
+    /// find and copy its parent's root, and why a hand-edited parent missing its own root can no
+    /// longer leave `create` with nothing to copy.
     ///
     /// # What is refused
     ///
@@ -885,24 +874,19 @@ impl Workspace {
     /// cannot be written.
     pub fn create(&mut self, draft: Draft) -> Result<Note> {
         let id = NoteId::new();
-        let root = match draft.reply_to {
-            None => id,
-            Some(parent) => {
-                let record = self.snapshot.get(parent).ok_or(Error::ReplyTargetMissing {
-                    id: parent.as_uuid(),
-                })?;
-                record.meta.root.unwrap_or(parent)
-            }
-        };
+        if let Some(parent) = draft.reply_to
+            && self.snapshot.get(parent).is_none()
+        {
+            return Err(Error::ReplyTargetMissing {
+                id: parent.as_uuid(),
+            });
+        }
 
         // Start from whatever the caller parsed, so a key jot does not interpret — typed into an
-        // `$EDITOR` buffer, or carried in by an importer — survives creation. The managed fields
-        // are then overwritten unconditionally: `relation:root` in particular is assigned here and
-        // is never taken from input, or the "assigned once, never recomputed" rule would be a
-        // suggestion rather than an invariant.
+        // `$EDITOR` buffer, or carried in by an importer — survives creation. The fields the
+        // schema gives a role to are then overwritten unconditionally from the draft.
         let mut frontmatter = draft.extra.clone().unwrap_or_default();
         frontmatter.title = draft.title.clone();
-        frontmatter.root = Some(root);
         frontmatter.reply_to = draft.reply_to;
         frontmatter.quote = draft.quote;
 
@@ -915,7 +899,8 @@ impl Workspace {
 
         let bytes = note.try_to_bytes(&self.manifest.schema)?;
         fs::atomic_write(&path, &self.tmp_dir(), &bytes)?;
-        self.snapshot.reindex(id, &path, State::Active);
+        self.snapshot
+            .reindex(&self.manifest.schema, id, &path, State::Active);
         Ok(note)
     }
 
@@ -957,7 +942,7 @@ impl Workspace {
             path: path.clone(),
             source,
         })?;
-        let mut note = Note::parse_at(&path, &before)?;
+        let mut note = Note::parse_at(&self.manifest.schema, &path, &before)?;
 
         edit.title.clone().apply(&mut note.frontmatter.title);
         edit.quote.clone().apply(&mut note.frontmatter.quote);
@@ -982,7 +967,8 @@ impl Workspace {
                 source,
             })?;
         }
-        self.snapshot.reindex(id, &target, state);
+        self.snapshot
+            .reindex(&self.manifest.schema, id, &target, state);
         Ok(note)
     }
 
@@ -1065,7 +1051,7 @@ impl Workspace {
             to: to.to_path_buf(),
             source,
         })?;
-        self.snapshot.reindex(id, to, state);
+        self.snapshot.reindex(&self.manifest.schema, id, to, state);
         Ok(())
     }
 
@@ -1110,7 +1096,7 @@ impl Workspace {
     pub fn get(&self, id: NoteId) -> Result<Option<Note>> {
         match self.snapshot.get(id) {
             None => Ok(None),
-            Some(record) => Note::load(&record.path).map(Some),
+            Some(record) => Note::load(&self.manifest.schema, &record.path).map(Some),
         }
     }
 
@@ -1197,11 +1183,8 @@ impl Workspace {
 pub struct OpenedNote {
     /// The note as it now stands on disk.
     pub note: Note,
-    /// The file it was read from and, if `repaired`, written back to.
+    /// The file it was read from.
     pub path: PathBuf,
-    /// Whether the file's bytes were rewritten — because a schema field was repaired, or because
-    /// the file's key order was not the schema's.
-    pub repaired: bool,
 }
 
 // =============================================================================================
@@ -1388,6 +1371,12 @@ mod tests {
         out
     }
 
+    /// Hand-write a manifest into `root`, creating `.jot/` on the way.
+    fn write_manifest(root: &Path, text: &str) {
+        std::fs::create_dir_all(root.join(".jot")).unwrap();
+        std::fs::write(root.join(".jot/workspace.toml"), text).unwrap();
+    }
+
     fn dir(parent: &Path, name: &str) -> PathBuf {
         let path = parent.join(name);
         std::fs::create_dir_all(&path).expect("create_dir_all");
@@ -1410,7 +1399,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "Thoughts");
 
-        Workspace::init(&root, WorkspaceKind::Jot).expect("init");
+        Workspace::init(&root).expect("init");
 
         assert_eq!(
             tree(&root),
@@ -1433,7 +1422,7 @@ mod tests {
     fn init_leaves_the_staging_directory_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "v");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
 
         assert_eq!(
             std::fs::read_dir(root.join(".jot/tmp")).unwrap().count(),
@@ -1446,39 +1435,39 @@ mod tests {
     fn init_writes_a_manifest_that_matches_the_documented_shape() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "Thoughts");
-        let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        let ws = Workspace::init(&root).unwrap();
 
         let text = std::fs::read_to_string(root.join(".jot/workspace.toml")).unwrap();
         let value: toml::Value = toml::from_str(&text).expect("manifest is valid TOML");
 
-        assert_eq!(value["schema_version"].as_integer(), Some(1));
+        assert_eq!(value["schema_version"].as_integer(), Some(2));
         assert_eq!(
             value["workspace"]["id"].as_str(),
             Some(ws.id().to_string().as_str())
         );
-        assert_eq!(value["workspace"]["kind"].as_str(), Some("jot"));
         assert_eq!(value["workspace"]["name"].as_str(), Some("Thoughts"));
+        // An array of tables, each with a `type`; `key` appears only where it differs from the
+        // type string.
+        let entries = value["schema"]["frontmatter"].as_array().unwrap();
         assert_eq!(
-            value["schema"]["frontmatter"]
-                .as_array()
-                .unwrap()
+            entries
                 .iter()
-                .map(|v| v.as_str().unwrap())
+                .map(|e| e["type"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            [
-                "title",
-                "relation:root",
-                "relation:reply_to",
-                "relation:quote"
-            ]
+            ["document:title", "relation:reply_to", "relation:quote_to"]
+        );
+        assert_eq!(entries[0]["key"].as_str(), Some("title"));
+        assert!(
+            entries[1].get("key").is_none(),
+            "a default key is not written"
         );
     }
 
     #[test]
     fn init_mints_a_uuid_v4_workspace_id() {
         let tmp = tempfile::tempdir().unwrap();
-        let a = Workspace::init(&dir(tmp.path(), "a"), WorkspaceKind::Jot).unwrap();
-        let b = Workspace::init(&dir(tmp.path(), "b"), WorkspaceKind::Jot).unwrap();
+        let a = Workspace::init(&dir(tmp.path(), "a")).unwrap();
+        let b = Workspace::init(&dir(tmp.path(), "b")).unwrap();
 
         // v4 rather than a note's v7: nothing decodes a workspace's creation time or sorts on it,
         // and a random-from-bit-one id is what keeps `jot ws ls`'s short ids short. See
@@ -1496,7 +1485,7 @@ mod tests {
     fn init_writes_a_gitignore_covering_the_index_and_the_staging_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "v");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
 
         let text = std::fs::read_to_string(root.join(".jot/.gitignore")).unwrap();
         let lines: Vec<&str> = text.lines().map(str::trim).collect();
@@ -1514,10 +1503,10 @@ mod tests {
     fn init_on_an_existing_workspace_errors_and_changes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "v");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
 
         let before = std::fs::read(root.join(".jot/workspace.toml")).unwrap();
-        let err = Workspace::init(&root, WorkspaceKind::Jot).unwrap_err();
+        let err = Workspace::init(&root).unwrap_err();
 
         assert!(
             matches!(err, Error::WorkspaceExists { .. }),
@@ -1540,7 +1529,7 @@ mod tests {
         let root = dir(tmp.path(), "v");
         std::fs::create_dir(root.join(".jot")).unwrap();
 
-        let err = Workspace::init(&root, WorkspaceKind::Jot).unwrap_err();
+        let err = Workspace::init(&root).unwrap_err();
         assert!(matches!(err, Error::WorkspaceExists { .. }), "{err:?}");
     }
 
@@ -1549,7 +1538,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("not").join("yet").join("there");
 
-        let ws = Workspace::init(&root, WorkspaceKind::Jot).expect("init creates the target");
+        let ws = Workspace::init(&root).expect("init creates the target");
         assert!(root.join(".jot/workspace.toml").is_file());
         assert_eq!(ws.name(), "there");
     }
@@ -1564,7 +1553,7 @@ mod tests {
         let bytes = b"---\nid: 01a03d4c-c708-7cbf-83c0-883cedb7f1d5\n---\n\nkeep me\n";
         std::fs::write(&note, bytes).unwrap();
 
-        Workspace::init(&root, WorkspaceKind::Jot).expect("adoption is a valid init");
+        Workspace::init(&root).expect("adoption is a valid init");
 
         assert_eq!(std::fs::read(&note).unwrap(), bytes);
         assert_eq!(
@@ -1574,14 +1563,24 @@ mod tests {
         );
     }
 
+    /// `[workspace] kind` is gone, and a manifest still carrying it opens anyway: `serde` ignores
+    /// unknown fields, which is the same forward-compat courtesy the note format extends.
+    ///
+    /// The distinction it drew moved into the schema. A workspace declaring no `relation:*` entry
+    /// **is** what `plain` meant.
     #[test]
-    fn init_records_the_kind_it_was_given() {
+    fn a_manifest_still_carrying_kind_opens_and_the_key_is_ignored() {
         let tmp = tempfile::tempdir().unwrap();
-        for (name, kind) in [("j", WorkspaceKind::Jot), ("p", WorkspaceKind::Plain)] {
-            let root = dir(tmp.path(), name);
-            Workspace::init(&root, kind).unwrap();
-            assert_eq!(Workspace::open(&root).unwrap().kind(), kind);
-        }
+        let root = dir(tmp.path(), "v");
+        std::fs::create_dir(root.join(".jot")).unwrap();
+        std::fs::write(
+            root.join(".jot/workspace.toml"),
+            "schema_version = 2\n\n[workspace]\n\
+             id = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\nkind = \"plain\"\nname = \"v\"\n",
+        )
+        .unwrap();
+        let ws = Workspace::open(&root).unwrap();
+        assert_eq!(ws.name(), "v");
     }
 
     /// `.jot` as a *file* is not `.jot/` as a directory, so `WorkspaceExists` would be the wrong
@@ -1593,7 +1592,7 @@ mod tests {
         let root = dir(tmp.path(), "v");
         std::fs::write(root.join(".jot"), b"not a directory").unwrap();
 
-        let err = Workspace::init(&root, WorkspaceKind::Jot).unwrap_err();
+        let err = Workspace::init(&root).unwrap_err();
         assert!(matches!(err, Error::CreateDir { .. }), "{err:?}");
         assert_eq!(
             std::fs::read(root.join(".jot")).unwrap(),
@@ -1605,7 +1604,7 @@ mod tests {
     fn init_returns_a_workspace_whose_accessors_point_into_the_tree_it_made() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "v");
-        let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        let ws = Workspace::init(&root).unwrap();
 
         assert!(same_dir(ws.root(), &root));
         assert_eq!(ws.jot_dir(), ws.root().join(".jot"));
@@ -1627,7 +1626,7 @@ mod tests {
         let relative = root.join("nested").join("..").join("nested");
         std::fs::create_dir_all(root.join("nested")).unwrap();
 
-        let ws = Workspace::init(&relative, WorkspaceKind::Jot).unwrap();
+        let ws = Workspace::init(&relative).unwrap();
         assert!(ws.root().is_absolute(), "{}", ws.root().display());
     }
 
@@ -1637,7 +1636,7 @@ mod tests {
     fn open_round_trips_what_init_wrote_without_rewriting_it() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "Thoughts");
-        let written = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        let written = Workspace::init(&root).unwrap();
 
         let before = std::fs::read(root.join(".jot/workspace.toml")).unwrap();
         let opened = Workspace::open(&root).expect("open must accept what init wrote");
@@ -1676,12 +1675,12 @@ mod tests {
     fn open_refuses_a_schema_version_from_the_future() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "v");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
 
         let manifest = root.join(".jot/workspace.toml");
         let bumped = std::fs::read_to_string(&manifest)
             .unwrap()
-            .replace("schema_version = 1", "schema_version = 9999");
+            .replace("schema_version = 2", "schema_version = 9999");
         std::fs::write(&manifest, bumped).unwrap();
 
         let err = Workspace::open(&root).unwrap_err();
@@ -1762,25 +1761,14 @@ mod tests {
     }
 
     #[test]
-    fn open_rejects_an_unknown_kind_and_a_non_uuid_id() {
+    fn open_rejects_a_non_uuid_id() {
         let tmp = tempfile::tempdir().unwrap();
-
-        let bad_kind = dir(tmp.path(), "k");
-        std::fs::create_dir(bad_kind.join(".jot")).unwrap();
-        std::fs::write(
-            bad_kind.join(".jot/workspace.toml"),
-            "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\nkind = \"banana\"\n",
-        )
-        .unwrap();
-        let err = Workspace::open(&bad_kind).unwrap_err();
-        assert!(matches!(err, Error::InvalidWorkspaceKind { .. }), "{err:?}");
-        assert!(err.to_string().contains("banana"), "{err}");
 
         let bad_id = dir(tmp.path(), "i");
         std::fs::create_dir(bad_id.join(".jot")).unwrap();
         std::fs::write(
             bad_id.join(".jot/workspace.toml"),
-            "schema_version = 1\n\n[workspace]\nid = \"nope\"\nkind = \"jot\"\n",
+            "schema_version = 2\n\n[workspace]\nid = \"nope\"\n",
         )
         .unwrap();
         let err = Workspace::open(&bad_id).unwrap_err();
@@ -1818,7 +1806,7 @@ mod tests {
         // displayed. Reading must not care which version it is.
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "vault");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
 
         let path = root.join(".jot").join("workspace.toml");
         let v7 = Uuid::now_v7();
@@ -1852,82 +1840,134 @@ mod tests {
         assert!(ws.warnings().is_empty());
     }
 
-    /// The declared order is the whole content of the schema, so it must survive a
-    /// round-trip through the file rather than being sorted or de-duplicated into
-    /// something tidier.
+    /// The declared order is the whole content of the schema, so it must survive a round-trip
+    /// through the file rather than being sorted into something tidier.
     #[test]
-    fn a_declared_schema_keeps_its_order_and_its_unknown_keys() {
+    fn a_declared_schema_keeps_its_order_and_its_types() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "v");
-        std::fs::create_dir(root.join(".jot")).unwrap();
-        std::fs::write(
-            root.join(".jot/workspace.toml"),
-            "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
-             kind = \"jot\"\nname = \"V\"\n\n[schema]\nfrontmatter = [ \"relation:root\", \"summary\", \
-             \"title\", \"relation:reply_to\", \"relation:quote\", \"relation:root\" ]\n",
-        )
-        .unwrap();
+        write_manifest(
+            &root,
+            "schema_version = 2\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+             name = \"V\"\n\n\
+             [[schema.frontmatter]]\nkey = \"summary\"\ntype = \"text\"\nrequired = true\n\n\
+             [[schema.frontmatter]]\nkey = \"heading\"\ntype = \"document:title\"\n\n\
+             [[schema.frontmatter]]\ntype = \"relation:reply_to\"\n\n\
+             [[schema.frontmatter]]\nkey = \"tags\"\ntype = \"multitext\"\n",
+        );
 
         let ws = Workspace::open(&root).unwrap();
         assert_eq!(
             ws.schema().keys(),
-            [
-                "relation:root",
-                "summary",
-                "title",
-                "relation:reply_to",
-                "relation:quote"
-            ],
-            "declared order, first occurrence of a duplicate winning"
+            ["summary", "heading", "relation:reply_to", "tags"],
+            "declared order is kept verbatim"
+        );
+        // The role is the type's, not the key's — that is the whole point of the change.
+        assert_eq!(ws.schema().key_for(Role::Title), Some("heading"));
+        assert!(ws.schema().entry("summary").unwrap().is_required());
+        assert_eq!(
+            ws.schema().entry("tags").unwrap().field_type(),
+            &FieldType::Multitext(None)
         );
         assert!(ws.warnings().is_empty());
     }
 
-    /// The ratified answer to `stage1b.md`'s open question: a `jot` schema missing a
-    /// relation key **warns and opens**, and does not refuse.
-    ///
-    /// It is safe to open because `Frontmatter::try_render` writes an interpreted key the
-    /// schema omits anyway, so the omission costs diff shape and never thread structure.
+    /// A v1 manifest opens, is promoted, and rewrites as v2 with the same emission order.
     #[test]
-    fn a_jot_schema_missing_relation_keys_warns_and_still_opens() {
+    fn a_v1_manifest_is_promoted_to_typed_entries() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "v");
-        std::fs::create_dir(root.join(".jot")).unwrap();
-        std::fs::write(
-            root.join(".jot/workspace.toml"),
+        write_manifest(
+            &root,
             "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
-             kind = \"jot\"\nname = \"V\"\n\n[schema]\nfrontmatter = [ \"title\", \"relation:root\" ]\n",
-        )
-        .unwrap();
+             kind = \"jot\"\nname = \"V\"\n\n[schema]\n\
+             frontmatter = [ \"title\", \"relation:root\", \"relation:reply_to\", \
+             \"relation:quote\", \"summary\" ]\n",
+        );
 
-        let ws = Workspace::open(&root).expect("a thin schema is a warning, not a refusal");
-        match ws.warnings() {
-            [Warning::SchemaMissingRelationKeys { path, missing }] => {
-                assert_eq!(missing, &["relation:reply_to", "relation:quote"]);
-                assert_eq!(path, &ws.manifest_path());
-            }
-            other => panic!("expected one schema warning, got {other:?}"),
-        }
-        let shown = ws.warnings()[0].to_string();
-        assert!(shown.contains("relation:reply_to"), "{shown}");
-        assert!(shown.contains("relation:quote"), "{shown}");
+        let ws = Workspace::open(&root).unwrap();
+        assert_eq!(ws.manifest().schema_version, 1, "the file still says 1");
+        assert_eq!(
+            ws.schema().keys(),
+            ["title", "relation:reply_to", "relation:quote", "summary"],
+            "`relation:root` is dropped; everything else keeps its declared position"
+        );
+        assert_eq!(ws.schema().key_for(Role::Title), Some("title"));
+        assert_eq!(
+            ws.schema().key_for(Role::ReplyTo),
+            Some("relation:reply_to")
+        );
+        // v1 spelled it `relation:quote`. The *key* is kept so existing notes round-trip; only the
+        // type is renamed.
+        assert_eq!(ws.schema().key_for(Role::QuoteTo), Some("relation:quote"));
+        // v1 said nothing about what `summary` held, so `text` is the honest reading.
+        assert_eq!(
+            ws.schema().entry("summary").unwrap().field_type(),
+            &FieldType::Text(None)
+        );
+
+        // And it rewrites as v2, with the promoted schema unchanged.
+        let rewritten = Manifest {
+            schema_version: SCHEMA_VERSION,
+            ..ws.manifest().clone()
+        };
+        let text = rewritten.to_toml(&ws.manifest_path()).unwrap();
+        let reread = Manifest::from_toml(&text, &ws.manifest_path(), "ignored").unwrap();
+        assert_eq!(reread.schema_version, 2);
+        assert_eq!(reread.schema, *ws.schema());
     }
 
-    /// A `plain` workspace has no threads, so a schema without relation keys is not an
-    /// omission there and must not be reported as one (stage 7).
+    /// The manifest is configuration, so it is validated hard — unlike a note file, which is user
+    /// data and is never rejected.
     #[test]
-    fn a_plain_workspace_is_not_warned_about_missing_relations() {
+    fn two_entries_claiming_one_role_is_a_manifest_error_naming_both_keys() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "v");
-        std::fs::create_dir(root.join(".jot")).unwrap();
-        std::fs::write(
-            root.join(".jot/workspace.toml"),
-            "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
-             kind = \"plain\"\nname = \"V\"\n\n[schema]\nfrontmatter = [ \"title\" ]\n",
-        )
-        .unwrap();
+        write_manifest(
+            &root,
+            "schema_version = 2\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+             name = \"V\"\n\n\
+             [[schema.frontmatter]]\nkey = \"title\"\ntype = \"document:title\"\n\n\
+             [[schema.frontmatter]]\nkey = \"heading\"\ntype = \"document:title\"\n",
+        );
 
-        assert!(Workspace::open(&root).unwrap().warnings().is_empty());
+        let err = Workspace::open(&root).unwrap_err();
+        assert!(matches!(err, Error::ManifestParse { .. }), "{err:?}");
+        let shown = err.to_string();
+        assert!(shown.contains("document:title"), "{shown}");
+        assert!(
+            shown.contains("title") && shown.contains("heading"),
+            "{shown}"
+        );
+    }
+
+    /// An unknown `type` warns, and every key under it survives untouched. This is the
+    /// forward-compat rule applied to the type system.
+    #[test]
+    fn an_unknown_type_warns_rather_than_refusing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dir(tmp.path(), "v");
+        write_manifest(
+            &root,
+            "schema_version = 2\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+             name = \"V\"\n\n\
+             [[schema.frontmatter]]\nkey = \"title\"\ntype = \"document:title\"\n\n\
+             [[schema.frontmatter]]\nkey = \"mood\"\ntype = \"document:mood\"\n",
+        );
+
+        let ws = Workspace::open(&root).expect("an unknown type is a warning, not a refusal");
+        match ws.warnings() {
+            [Warning::UnknownFrontmatterTypes { path, entries }] => {
+                assert_eq!(
+                    entries,
+                    &[("mood".to_string(), "document:mood".to_string())]
+                );
+                assert_eq!(path, &ws.manifest_path());
+            }
+            other => panic!("expected one unknown-type warning, got {other:?}"),
+        }
+        let shown = ws.warnings()[0].to_string();
+        assert!(shown.contains("document:mood"), "{shown}");
     }
 
     #[test]
@@ -1944,7 +1984,7 @@ mod tests {
 
         let err = Workspace::open(&root).unwrap_err();
         assert!(matches!(err, Error::ManifestParse { .. }), "{err:?}");
-        assert!(err.to_string().contains("empty key"), "{err}");
+        assert!(err.to_string().contains("empty `key`"), "{err}");
     }
 
     /// Forward compatibility inside one schema version: a key this build has never heard of must
@@ -1953,7 +1993,7 @@ mod tests {
     fn open_ignores_manifest_keys_it_does_not_know() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "v");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
 
         let manifest = root.join(".jot/workspace.toml");
         let mut text = std::fs::read_to_string(&manifest).unwrap();
@@ -1979,7 +2019,6 @@ mod tests {
             .join("vault");
 
         let ws = Workspace::open(&vault).expect("the fixture vault must open");
-        assert_eq!(ws.kind(), WorkspaceKind::Jot);
         assert_eq!(ws.name(), "Fixture Vault");
         assert_eq!(ws.id().to_string(), "01a03d4c-3680-7c70-aade-6c016dd177d2");
     }
@@ -1990,7 +2029,7 @@ mod tests {
     fn discover_finds_the_workspace_from_three_directories_deep() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "vault");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
         let deep = dir(&root, "one/two/three");
 
         let found = Workspace::discover(&deep).expect("discover walks up");
@@ -2006,7 +2045,7 @@ mod tests {
     fn discover_considers_the_starting_directory_itself() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "vault");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
 
         assert!(same_dir(Workspace::discover(&root).unwrap().root(), &root));
     }
@@ -2018,8 +2057,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let outer = dir(tmp.path(), "outer");
         let inner = dir(&outer, "a/inner");
-        Workspace::init(&outer, WorkspaceKind::Jot).unwrap();
-        Workspace::init(&inner, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&outer).unwrap();
+        Workspace::init(&inner).unwrap();
 
         let found = Workspace::discover(&dir(&inner, "x/y/z")).unwrap();
         assert!(
@@ -2037,7 +2076,7 @@ mod tests {
     fn discover_from_inside_the_jot_directory_lands_on_the_vault_root() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "vault");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
 
         for start in [root.join(".jot"), root.join(".jot").join("tmp")] {
             let found = Workspace::discover(&start).unwrap();
@@ -2064,7 +2103,7 @@ mod tests {
     fn discover_does_not_fall_through_a_broken_nearest_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         let outer = dir(tmp.path(), "outer");
-        Workspace::init(&outer, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&outer).unwrap();
         let inner = dir(&outer, "inner");
         std::fs::create_dir(inner.join(".jot")).unwrap();
 
@@ -2095,7 +2134,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let work = dir(tmp.path(), "work");
         dir(tmp.path(), "personal");
-        Workspace::init(&work, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&work).unwrap();
 
         let sibling = work.join("..").join("personal");
         match Workspace::discover(&sibling) {
@@ -2114,7 +2153,7 @@ mod tests {
     fn discover_still_finds_the_vault_through_a_dot_and_a_parent_dir_that_cancel_out() {
         let tmp = tempfile::tempdir().unwrap();
         let root = dir(tmp.path(), "vault");
-        Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        Workspace::init(&root).unwrap();
         let sub = dir(&root, "sub");
 
         for start in [
@@ -2144,7 +2183,7 @@ mod tests {
         let root = dir(tmp.path(), "vault");
 
         let weird = root.join(".").join("nowhere").join("..");
-        let ws = Workspace::init(&weird, WorkspaceKind::Jot).expect("init");
+        let ws = Workspace::init(&weird).expect("init");
         assert_eq!(ws.root(), root.as_path());
         assert!(root.join(".jot").is_dir(), "and it initialized the vault");
         assert_eq!(Workspace::open(&weird).unwrap().root(), root.as_path());
@@ -2203,16 +2242,6 @@ mod tests {
 
     // -------------------------------------------------------------------------------- pieces
 
-    #[test]
-    fn kind_round_trips_through_its_manifest_spelling() {
-        for kind in [WorkspaceKind::Jot, WorkspaceKind::Plain] {
-            assert_eq!(WorkspaceKind::parse(kind.as_str()), Some(kind));
-            assert_eq!(kind.to_string(), kind.as_str());
-        }
-        assert_eq!(WorkspaceKind::parse("Jot"), None, "the spelling is exact");
-        assert_eq!(WorkspaceKind::parse(""), None);
-    }
-
     /// The emitted manifest must parse back into the same values, or `init` and `open` disagree
     /// about the vault they are looking at.
     #[test]
@@ -2221,9 +2250,15 @@ mod tests {
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
             id: Uuid::parse_str("01a03d4c-3680-7c70-aade-6c016dd177d2").unwrap(),
-            kind: WorkspaceKind::Plain,
             name: "Name with spaces, a \" quote and 한글".to_string(),
-            schema: FrontmatterSchema::new(["title", "relation:root", "summary"]),
+            schema: FrontmatterSchema::try_new(vec![
+                FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title))
+                    .required(true),
+                FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+                FrontmatterEntry::with_key("summary", FieldType::Text(None)),
+                FrontmatterEntry::with_key("mood", FieldType::parse("document:mood")),
+            ])
+            .unwrap(),
         };
 
         let text = manifest.to_toml(path).unwrap();
@@ -2244,7 +2279,6 @@ mod tests {
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
             id: Uuid::parse_str("01a03d4c-3680-7c70-aade-6c016dd177d2").unwrap(),
-            kind: WorkspaceKind::Jot,
             name: "Thoughts".to_string(),
             schema: FrontmatterSchema::jot_default(),
         };
@@ -2258,20 +2292,21 @@ mod tests {
 # `id` is minted once and must never change — it is what makes this directory self-identifying.
 # `name` is display-only and safe to edit by hand.
 
-schema_version = 1
+schema_version = 2
 
 [workspace]
 id = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"
-kind = \"jot\"
 name = \"Thoughts\"
 
-[schema]
-frontmatter = [
-    \"title\",
-    \"relation:root\",
-    \"relation:reply_to\",
-    \"relation:quote\",
-]
+[[schema.frontmatter]]
+key = \"title\"
+type = \"document:title\"
+
+[[schema.frontmatter]]
+type = \"relation:reply_to\"
+
+[[schema.frontmatter]]
+type = \"relation:quote_to\"
 "
         );
     }
@@ -2314,10 +2349,13 @@ frontmatter = [
     /// A vault holding exactly the notes given as `(filename, contents)`.
     fn vault_of(tmp: &Path, notes: &[(&str, &str)]) -> Workspace {
         let root = dir(tmp, "v");
-        let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+        let mut ws = Workspace::init(&root).unwrap();
         for (name, text) in notes {
             std::fs::write(root.join(name), text).unwrap();
         }
+        // The files land after `init` scanned, so the snapshot has to catch up before any read
+        // that answers from it — the derived root among them.
+        ws.sync().unwrap();
         ws
     }
 
@@ -2328,6 +2366,9 @@ frontmatter = [
     const A: &str = "01a03d60-0000-7000-8000-00000000000a";
     const B: &str = "01a03d61-0000-7000-8000-00000000000b";
     const C: &str = "01a03d62-0000-7000-8000-00000000000c";
+    const D: &str = "01a03d63-0000-7000-8000-00000000000d";
+    /// A note id no file in these vaults carries.
+    const GONE: &str = "01a03dff-0000-7000-8000-00000000ffff";
 
     #[test]
     fn note_path_finds_a_note_by_id_and_reports_absence_rather_than_failing() {
@@ -2363,113 +2404,157 @@ frontmatter = [
         );
     }
 
-    /// Stage 1b acceptance: a note whose `relation:root` was deleted externally has it recomputed
-    /// on open.
+    /// `open_note` is a **pure read**. It was the crate's only read path that wrote, and the
+    /// reason it wrote — filling in a missing `relation:root` — no longer exists.
     #[test]
-    fn a_deleted_root_is_recomputed_by_walking_reply_to_upward() {
+    fn opening_a_note_never_writes_even_when_the_file_is_out_of_schema_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[(
+                &format!("{A}.md"),
+                &format!("---\nsummary: kept\nrelation:reply_to: {B}\ntitle: t\n---\n\nBody.\n"),
+            )],
+        );
+        let path = ws.root().join(format!("{A}.md"));
+        let before = std::fs::read(&path).unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let opened = ws.open_note(nid(A)).unwrap().unwrap();
+        assert_eq!(opened.note.frontmatter.title.as_deref(), Some("t"));
+        assert_eq!(opened.note.frontmatter.reply_to, Some(nid(B)));
+        assert_eq!(opened.note.body, "\nBody.\n");
+
+        assert_eq!(std::fs::read(&path).unwrap(), before, "the bytes changed");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            mtime,
+            "the file was touched"
+        );
+        assert_eq!(
+            std::fs::read_dir(ws.tmp_dir()).unwrap().count(),
+            0,
+            "a staged file was left behind"
+        );
+    }
+
+    /// A `relation:root` written before this change is an ordinary undeclared key. It is not
+    /// migrated, it is preserved — and the file round-trips byte-for-byte through an edit that
+    /// does not touch it.
+    #[test]
+    fn a_legacy_relation_root_survives_an_edit_byte_for_byte() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ws = vault_of(
+            tmp.path(),
+            &[(
+                &format!("{A}.md"),
+                &format!("---\ntitle: t\nrelation:root: {A}\n---\n\nBody.\n"),
+            )],
+        );
+        ws.edit(nid(A), Edit::new().body("Changed.\n")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ws.root().join(format!("{A}.md"))).unwrap(),
+            format!("---\ntitle: t\nrelation:root: {A}\n---\n\nChanged.\n"),
+            "the undeclared key kept its bytes and its position"
+        );
+    }
+
+    // ================================================= the derived root, and reply cycles
+
+    /// The root is derived from `relation:reply_to` alone, over records already in memory.
+    #[test]
+    fn a_root_is_derived_by_walking_reply_to_upward() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[
+                (&format!("{A}.md"), "---\ntitle: root\n---\n"),
+                (
+                    &format!("{B}.md"),
+                    &format!("---\ntitle: mid\nrelation:reply_to: {A}\n---\n"),
+                ),
+                (
+                    &format!("{C}.md"),
+                    &format!("---\ntitle: leaf\nrelation:reply_to: {B}\n---\n"),
+                ),
+            ],
+        );
+        for id in [A, B, C] {
+            assert_eq!(
+                ws.meta(nid(id)).unwrap().root,
+                Some(nid(A)),
+                "every note in the chain roots at A"
+            );
+        }
+        assert!(ws.snapshot().problems().is_empty());
+    }
+
+    /// Dangling references are a designed state: the chain named an ancestor, so that ancestor is
+    /// the root even though its file is not here. It is also what keeps the children of a purged
+    /// note grouped with each other — they carry the same missing id.
+    #[test]
+    fn a_reply_chain_that_runs_into_a_missing_note_roots_at_that_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = vault_of(
+            tmp.path(),
+            &[
+                (
+                    &format!("{C}.md"),
+                    &format!("---\nrelation:reply_to: {GONE}\n---\n"),
+                ),
+                (
+                    &format!("{D}.md"),
+                    &format!("---\nrelation:reply_to: {GONE}\n---\n"),
+                ),
+            ],
+        );
+        assert_eq!(ws.meta(nid(C)).unwrap().root, Some(nid(GONE)));
+        assert_eq!(
+            ws.meta(nid(D)).unwrap().root,
+            ws.meta(nid(C)).unwrap().root,
+            "orphaned siblings can still be grouped by the id they both name"
+        );
+    }
+
+    /// A cycle is a [`Problem`], not an [`Error`]: one bad file must not make the other nine
+    /// hundred unreadable. The note becomes its own root, so it stays visible in the timeline.
+    #[test]
+    fn a_note_that_replies_to_itself_is_reported_and_roots_at_itself() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = vault_of(
             tmp.path(),
             &[
                 (
                     &format!("{A}.md"),
-                    &format!("---\ntitle: root\nrelation:root: {A}\n---\n\nA.\n"),
+                    &format!("---\ntitle: looped\nrelation:reply_to: {A}\n---\n"),
                 ),
-                (
-                    &format!("{B}.md"),
-                    &format!(
-                        "---\ntitle: mid\nrelation:root: {A}\nrelation:reply_to: {A}\n---\n\nB.\n"
-                    ),
-                ),
-                // `relation:root` deleted by hand; `relation:reply_to` survives.
-                (
-                    &format!("{C}.md"),
-                    &format!("---\ntitle: leaf\nrelation:reply_to: {B}\n---\n\nC.\n"),
-                ),
+                (&format!("{B}.md"), "---\ntitle: fine\n---\n"),
             ],
         );
 
-        let opened = ws.open_note(nid(C)).unwrap().unwrap();
-        assert!(opened.repaired, "the file should have been rewritten");
-        assert_eq!(opened.note.frontmatter.root, Some(nid(A)));
-        assert_eq!(opened.note.frontmatter.reply_to, Some(nid(B)));
-        assert_eq!(opened.note.body, "\nC.\n", "the body must be untouched");
+        assert_eq!(ws.meta(nid(A)).unwrap().root, Some(nid(A)));
+        match ws.snapshot().problems() {
+            [Problem::ReplyCycle { id, path }] => {
+                assert_eq!(*id, nid(A));
+                assert!(path.ends_with(format!("{A}.md")));
+            }
+            other => panic!("expected one cycle problem, got {other:?}"),
+        }
 
-        // The repair is on disk, not only in memory.
-        let on_disk = std::fs::read_to_string(&opened.path).unwrap();
-        assert_eq!(
-            on_disk,
-            format!("---\ntitle: leaf\nrelation:root: {A}\nrelation:reply_to: {B}\n---\n\nC.\n")
-        );
-        // And opening it again writes nothing.
-        assert!(!ws.open_note(nid(C)).unwrap().unwrap().repaired);
-    }
-
-    /// Stage 1b acceptance: a note whose `relation:reply_to` was deleted becomes top-level and is
-    /// not written back as empty.
-    #[test]
-    fn a_deleted_reply_to_leaves_a_top_level_note_and_is_never_written_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = vault_of(
-            tmp.path(),
-            &[(&format!("{C}.md"), "---\ntitle: orphan\n---\n\nC.\n")],
-        );
-
-        let opened = ws.open_note(nid(C)).unwrap().unwrap();
-        assert_eq!(opened.note.frontmatter.reply_to, None);
-        assert_eq!(
-            opened.note.frontmatter.root,
-            Some(nid(C)),
-            "a note with no parent is its own root"
-        );
-
-        let on_disk = std::fs::read_to_string(&opened.path).unwrap();
-        assert_eq!(
-            on_disk,
-            format!("---\ntitle: orphan\nrelation:root: {C}\n---\n\nC.\n")
-        );
-        assert!(
-            !on_disk.contains("relation:reply_to"),
-            "an absent parent must not be written back as an empty key:\n{on_disk}"
-        );
-    }
-
-    /// The narrow reading of "the file wins": a surviving `relation:root` is not second-guessed
-    /// because a sibling key went missing. Restoring or recomputing a value the file still states
-    /// would be the index correcting the file.
-    #[test]
-    fn a_surviving_root_is_kept_even_when_reply_to_was_deleted() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = vault_of(
-            tmp.path(),
-            &[(
-                &format!("{C}.md"),
-                &format!("---\ntitle: t\nrelation:root: {A}\n---\n\nC.\n"),
-            )],
-        );
-        let opened = ws.open_note(nid(C)).unwrap().unwrap();
-        assert_eq!(opened.note.frontmatter.root, Some(nid(A)));
-        assert!(!opened.repaired, "nothing needed repairing");
+        // Visible, because something that needs fixing has to be findable — and the other note is
+        // unaffected.
+        let shown: Vec<_> = ws
+            .timeline(&TimelineQuery::default())
+            .items
+            .iter()
+            .map(|row| row.note.id)
+            .collect();
+        assert!(shown.contains(&nid(A)), "the looped note vanished");
+        assert!(shown.contains(&nid(B)));
     }
 
     #[test]
-    fn a_reply_chain_that_runs_into_a_missing_note_roots_at_that_note() {
-        // Dangling references are a designed state: the chain named an ancestor, so that ancestor
-        // is the root even though its file is not here.
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = vault_of(
-            tmp.path(),
-            &[(
-                &format!("{C}.md"),
-                &format!("---\nrelation:reply_to: {B}\n---\n"),
-            )],
-        );
-        let opened = ws.open_note(nid(C)).unwrap().unwrap();
-        assert_eq!(opened.note.frontmatter.root, Some(nid(B)));
-    }
-
-    #[test]
-    fn a_reply_cycle_is_reported_rather_than_walked_forever() {
+    fn a_three_note_reply_cycle_is_reported_and_does_not_hang() {
         let tmp = tempfile::tempdir().unwrap();
         let ws = vault_of(
             tmp.path(),
@@ -2480,74 +2565,24 @@ frontmatter = [
                 ),
                 (
                     &format!("{B}.md"),
+                    &format!("---\nrelation:reply_to: {C}\n---\n"),
+                ),
+                (
+                    &format!("{C}.md"),
                     &format!("---\nrelation:reply_to: {A}\n---\n"),
                 ),
             ],
         );
-        let e = ws.open_note(nid(A)).unwrap_err();
-        assert!(matches!(e, Error::ReplyCycle { .. }), "{e:?}");
-        assert!(e.to_string().contains(A), "{e}");
-    }
-
-    #[test]
-    fn a_note_that_replies_to_itself_is_a_cycle() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = vault_of(
-            tmp.path(),
-            &[(
-                &format!("{A}.md"),
-                &format!("---\nrelation:reply_to: {A}\n---\n"),
-            )],
+        assert!(
+            !ws.snapshot().problems().is_empty(),
+            "a cycle must be reported"
         );
-        assert!(matches!(
-            ws.open_note(nid(A)).unwrap_err(),
-            Error::ReplyCycle { .. }
-        ));
-    }
-
-    #[test]
-    fn opening_a_note_rewrites_it_into_schema_order() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = vault_of(
-            tmp.path(),
-            &[(
-                &format!("{A}.md"),
-                &format!("---\nsummary: kept\nrelation:root: {A}\ntitle: t\n---\n\nBody.\n"),
-            )],
-        );
-        let opened = ws.open_note(nid(A)).unwrap().unwrap();
-        assert!(opened.repaired);
-        assert_eq!(
-            std::fs::read_to_string(&opened.path).unwrap(),
-            format!("---\ntitle: t\nrelation:root: {A}\nsummary: kept\n---\n\nBody.\n")
-        );
-    }
-
-    #[test]
-    fn opening_a_note_that_is_already_complete_writes_nothing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ws = vault_of(
-            tmp.path(),
-            &[(
-                &format!("{A}.md"),
-                &format!("---\ntitle: t\nrelation:root: {A}\n---\n\nBody.\n"),
-            )],
-        );
-        let path = ws.root().join(format!("{A}.md"));
-        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
-
-        let opened = ws.open_note(nid(A)).unwrap().unwrap();
-        assert!(!opened.repaired);
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().modified().unwrap(),
-            before,
-            "a clean note must not be touched at all"
-        );
-        assert_eq!(
-            std::fs::read_dir(ws.tmp_dir()).unwrap().count(),
-            0,
-            "a staged file was left behind"
-        );
+        for id in [A, B, C] {
+            assert!(
+                ws.meta(nid(id)).unwrap().root.is_some(),
+                "every note still has an answer"
+            );
+        }
     }
 
     /// Stage 1b acceptance, in the form stage 1b can state it: a read pass over a clean vault
@@ -2565,10 +2600,10 @@ frontmatter = [
         let ws = Workspace::open(&root).unwrap();
         assert!(ws.warnings().is_empty(), "{:?}", ws.warnings());
         for path in fs::live_note_paths(&root).unwrap() {
-            Note::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            Note::load(ws.schema(), &path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         }
         for path in fs::trashed_note_paths(&root).unwrap() {
-            Note::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            Note::load(ws.schema(), &path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         }
 
         assert_eq!(
@@ -2603,24 +2638,25 @@ frontmatter = [
         }
     }
 
-    /// Opening every note in the corpus is idempotent: the first open may repair, the second must
-    /// not. A repair that is not a fixed point would rewrite the vault on every open forever.
+    /// Opening every note in the corpus writes nothing at all — the property that replaced
+    /// "the first open may repair, the second must not".
     #[test]
-    fn opening_every_fixture_note_twice_writes_at_most_once() {
+    fn opening_every_fixture_note_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let root = fixture_copy(tmp.path());
+        let before = tree_snapshot(&root);
         let ws = Workspace::open(&root).unwrap();
 
         for path in fs::live_note_paths(&root).unwrap() {
             let id = NoteId::from(fs::parse_note_filename(&path).unwrap());
             ws.open_note(id).unwrap().unwrap();
-            let second = ws.open_note(id).unwrap().unwrap();
-            assert!(
-                !second.repaired,
-                "{} is rewritten on every open",
-                path.display()
-            );
+            ws.open_note(id).unwrap().unwrap();
         }
+        assert_eq!(
+            tree_snapshot(&root),
+            before,
+            "opening a note wrote to the vault"
+        );
     }
 }
 
@@ -2633,7 +2669,7 @@ mod lifecycle_tests {
 
     fn workspace() -> (tempfile::TempDir, Workspace) {
         let tmp = tempfile::tempdir().unwrap();
-        let ws = Workspace::init(tmp.path(), WorkspaceKind::Jot).unwrap();
+        let ws = Workspace::init(tmp.path()).unwrap();
         (tmp, ws)
     }
 
@@ -2687,28 +2723,26 @@ mod lifecycle_tests {
         assert!(!text.contains("id:"), "{text}");
     }
 
+    /// Nothing about a root is written to a note file, and `create` no longer copies one from a
+    /// parent. The root is derived, and the snapshot is where it shows up.
     #[test]
-    fn a_top_level_notes_root_is_its_own_id() {
-        let (_tmp, mut ws) = workspace();
-        let note = ws.create(Draft::new("x")).unwrap();
-        assert_eq!(note.frontmatter.root, Some(note.id));
-        assert_eq!(note.frontmatter.reply_to, None);
-    }
-
-    #[test]
-    fn a_reply_copies_the_thread_root_rather_than_pointing_at_its_parent() {
+    fn create_writes_no_root_key_and_the_derived_root_is_the_threads() {
         let (_tmp, mut ws) = workspace();
         let root = ws.create(Draft::new("root")).unwrap();
         let mid = ws.create(Draft::new("mid").reply_to(root.id)).unwrap();
         let deep = ws.create(Draft::new("deep").reply_to(mid.id)).unwrap();
 
-        assert_eq!(mid.frontmatter.root, Some(root.id));
-        assert_eq!(
-            deep.frontmatter.root,
-            Some(root.id),
-            "root is the thread's, not the parent's"
-        );
+        let text = String::from_utf8(bytes_of(&ws, deep.id)).unwrap();
+        assert!(!text.contains("relation:root"), "{text}");
         assert_eq!(deep.frontmatter.reply_to, Some(mid.id));
+
+        for note in [&root, &mid, &deep] {
+            assert_eq!(
+                ws.meta(note.id).unwrap().root,
+                Some(root.id),
+                "root is the thread's, not the parent's"
+            );
+        }
     }
 
     #[test]
@@ -2731,7 +2765,7 @@ mod lifecycle_tests {
 
         let reply = ws.create(Draft::new("reply").reply_to(parent.id)).unwrap();
         assert_eq!(reply.frontmatter.reply_to, Some(parent.id));
-        assert_eq!(reply.frontmatter.root, Some(parent.id));
+        assert_eq!(ws.meta(reply.id).unwrap().root, Some(parent.id));
     }
 
     #[test]
@@ -2742,7 +2776,7 @@ mod lifecycle_tests {
 
         assert_eq!(note.frontmatter.quote, Some(dangling));
         assert_eq!(
-            note.frontmatter.root,
+            ws.meta(note.id).unwrap().root,
             Some(note.id),
             "not the quoted note's"
         );
@@ -2858,7 +2892,7 @@ mod lifecycle_tests {
         let edited = ws.edit(note.id, Edit::new().body("after")).unwrap();
         assert!(edited.body.contains("after"));
         assert_eq!(edited.frontmatter.title.as_deref(), Some("t"));
-        assert_eq!(edited.frontmatter.root, note.frontmatter.root);
+        assert_eq!(edited.frontmatter.reply_to, note.frontmatter.reply_to);
     }
 
     #[test]
@@ -2873,7 +2907,7 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn an_edit_never_touches_reply_to_or_root() {
+    fn an_edit_never_touches_reply_to() {
         // Re-parenting is not supported, and must not happen as a side effect of an edit.
         let (_tmp, mut ws) = workspace();
         let root = ws.create(Draft::new("root")).unwrap();
@@ -2881,7 +2915,7 @@ mod lifecycle_tests {
 
         let edited = ws.edit(reply.id, Edit::new().title("new")).unwrap();
         assert_eq!(edited.frontmatter.reply_to, Some(root.id));
-        assert_eq!(edited.frontmatter.root, Some(root.id));
+        assert_eq!(ws.meta(reply.id).unwrap().root, Some(root.id));
     }
 
     #[test]
@@ -3108,8 +3142,16 @@ mod lifecycle_tests {
 
     // -------------------------------------------------------------------------------- purge
 
+    /// Purging the middle of a chain **splits the subtree**, and that is the intended behaviour —
+    /// it reverses `stage2.md`'s "assigned once, never recomputed".
+    ///
+    /// The reversal is safe because `root_id` was never what provided the property it was defended
+    /// for. "There was a chain here and a post is gone" comes from the surviving child's dangling
+    /// `relation:reply_to`, which lives in the file and is untouched by this change. What is
+    /// genuinely lost is grouping across *two* purges — and at that point the chain really has
+    /// been broken twice.
     #[test]
-    fn purging_removes_one_file_and_leaves_the_children_live_and_grouped() {
+    fn purging_removes_one_file_and_leaves_the_children_live_but_no_longer_grouped() {
         let (_tmp, mut ws) = workspace();
         let root = ws.create(Draft::new("root")).unwrap();
         let mid = ws.create(Draft::new("mid").reply_to(root.id)).unwrap();
@@ -3117,13 +3159,19 @@ mod lifecycle_tests {
 
         ws.purge(mid.id).unwrap();
 
+        // Still live, and still visibly the reply to something that is gone.
         assert!(matches!(ws.reference(mid.id), Ref::Deleted(_)));
         assert!(matches!(ws.reference(leaf.id), Ref::Present(_)));
         assert_eq!(
-            ws.get(leaf.id).unwrap().unwrap().frontmatter.root,
-            Some(root.id),
-            "the subtree is still grouped under the original root"
+            ws.get(leaf.id).unwrap().unwrap().frontmatter.reply_to,
+            Some(mid.id),
+            "the evidence of the broken chain is in the file, and survives"
         );
+
+        // No longer grouped under `root`: the note that grouped them is genuinely gone, and the
+        // root walk now stops at the id the file still names.
+        assert_eq!(ws.meta(leaf.id).unwrap().root, Some(mid.id));
+        assert_eq!(ws.meta(root.id).unwrap().root, Some(root.id));
         assert_eq!(file_count(ws.root()), 2);
     }
 
@@ -3241,7 +3289,7 @@ mod lifecycle_tests {
         ws.restore(reply.id).unwrap();
 
         let in_memory = ws.snapshot().clone();
-        let on_disk = Snapshot::scan(ws.root()).unwrap();
+        let on_disk = Snapshot::scan(ws.schema(), ws.root()).unwrap();
         assert_eq!(in_memory, on_disk);
     }
 

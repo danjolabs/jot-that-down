@@ -559,7 +559,7 @@ fn probe_b_note_load_and_fs_parse_note_filename_accept_the_same_filenames() {
 fn probe_b_every_filename_creation_can_produce_is_one_enumeration_accepts() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("v");
-    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    let ws = Workspace::init(&root).unwrap();
 
     let titles = [
         None,
@@ -610,7 +610,7 @@ fn probe_b_every_filename_creation_can_produce_is_one_enumeration_accepts() {
 fn probe_b_two_files_claiming_one_identity_both_enumerate_without_complaint() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("v");
-    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    let ws = Workspace::init(&root).unwrap();
 
     let body = note_with("");
     std::fs::write(root.join(format!("{ID}.md")), &body).unwrap();
@@ -656,7 +656,7 @@ fn probe_b_self_referential_and_dangling_links_parse_without_complaint() {
     // A cycle is corruption, and is reported rather than walked forever.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("v");
-    let ws = Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    let ws = Workspace::init(&root).unwrap();
     std::fs::write(
         root.join(format!("{ID}.md")),
         format!("---\nrelation:reply_to: {ID}\n---\n"),
@@ -714,7 +714,7 @@ fn copy_tree(src: &Path, dst: &Path) {
 fn probe_b_an_empty_vault_enumerates_discovers_and_writes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("empty");
-    let ws = Workspace::init(&root, WorkspaceKind::Jot).expect("init");
+    let ws = Workspace::init(&root).expect("init");
 
     assert!(jot_fs::live_note_paths(&root).unwrap().is_empty());
     assert!(jot_fs::trashed_note_paths(&root).unwrap().is_empty());
@@ -1317,7 +1317,7 @@ fn probe_b_each_init_mints_a_distinct_workspace_id_that_survives_reopening() {
     let mut ids = Vec::new();
     for name in ["one", "two", "three"] {
         let root = tmp.path().join(name);
-        let ws = Workspace::init(&root, WorkspaceKind::Jot).expect("init");
+        let ws = Workspace::init(&root).expect("init");
         let id = ws.id().to_string();
 
         assert!(

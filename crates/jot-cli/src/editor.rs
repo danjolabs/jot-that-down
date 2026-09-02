@@ -59,7 +59,7 @@ impl Edited {
 /// If no editor is configured, if it cannot be launched, if it exits non-zero, or if what came back
 /// does not parse. In the parse case the draft is **kept** and its path is named: losing what
 /// someone just typed is the one failure this whole program exists to prevent.
-pub fn edit(seed: &str) -> Result<Edited> {
+pub fn edit(schema: &FrontmatterSchema, seed: &str) -> Result<Edited> {
     let editor = editor_command()?;
     let path = temp_path();
 
@@ -79,7 +79,7 @@ pub fn edit(seed: &str) -> Result<Edited> {
         .with_context(|| format!("cannot read the draft back from `{}`", path.display()))?;
     let unchanged = after == seed;
 
-    let parsed = Frontmatter::parse_document(&path, after.as_bytes());
+    let parsed = Frontmatter::parse_document(schema, &path, after.as_bytes());
     let (frontmatter, body) = match parsed {
         Ok(split) => split,
         Err(err) => {
@@ -170,20 +170,14 @@ mod tests {
     #[test]
     fn the_seed_offers_every_schema_key_and_the_blanks_round_trip_to_nothing() {
         let text = seed(&Frontmatter::new(), "\n", &schema());
-        for key in [
-            "title",
-            "relation:root",
-            "relation:reply_to",
-            "relation:quote",
-        ] {
+        for key in ["title", "relation:reply_to", "relation:quote_to"] {
             assert!(text.contains(&format!("{key}:")), "no `{key}` in:\n{text}");
         }
 
         // Left untouched, the template is worth nothing: every placeholder reads back as absent.
         let (parsed, _) =
-            Frontmatter::parse_document(Path::new("draft.md"), text.as_bytes()).unwrap();
+            Frontmatter::parse_document(&schema(), Path::new("draft.md"), text.as_bytes()).unwrap();
         assert_eq!(parsed.title, None);
-        assert_eq!(parsed.root, None);
         assert_eq!(parsed.reply_to, None);
         assert_eq!(parsed.quote, None);
         assert_eq!(parsed, Frontmatter::new());
@@ -194,7 +188,7 @@ mod tests {
         let text = seed(&Frontmatter::new(), "\n", &schema())
             .replace("title:", "title: Typed in the editor");
         let (parsed, _) =
-            Frontmatter::parse_document(Path::new("draft.md"), text.as_bytes()).unwrap();
+            Frontmatter::parse_document(&schema(), Path::new("draft.md"), text.as_bytes()).unwrap();
         assert_eq!(parsed.title.as_deref(), Some("Typed in the editor"));
     }
 
@@ -216,14 +210,14 @@ mod tests {
         let id = NoteId::new();
         let mut frontmatter = Frontmatter::new();
         frontmatter.title = Some("A title".into());
-        frontmatter.root = Some(id);
+        frontmatter.reply_to = Some(id);
 
         let text = seed(&frontmatter, "\nthe body\n", &schema());
         let (parsed, body) =
-            Frontmatter::parse_document(Path::new("draft.md"), text.as_bytes()).unwrap();
+            Frontmatter::parse_document(&schema(), Path::new("draft.md"), text.as_bytes()).unwrap();
 
         assert_eq!(parsed.title.as_deref(), Some("A title"));
-        assert_eq!(parsed.root, Some(id));
+        assert_eq!(parsed.reply_to, Some(id));
         assert_eq!(body, "\nthe body\n");
     }
 

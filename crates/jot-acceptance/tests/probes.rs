@@ -355,7 +355,7 @@ fn probe_enumeration_of_an_empty_vault_is_empty_not_an_error() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("empty");
     std::fs::create_dir(&root).unwrap();
-    Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    Workspace::init(&root).unwrap();
 
     assert!(
         jot_fs::live_note_paths(&root)
@@ -437,12 +437,12 @@ fn probe_init_errors_when_a_jot_directory_already_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
-    Workspace::init(&root, WorkspaceKind::Jot).expect("first init");
+    Workspace::init(&root).expect("first init");
 
     let manifest = root.join(".jot/workspace.toml");
     let before = read_bytes(&manifest);
 
-    let err = Workspace::init(&root, WorkspaceKind::Jot)
+    let err = Workspace::init(&root)
         .expect_err("a second init must be an error, never a silent overwrite (dispatch.md U3)");
     assert!(
         matches!(err, Error::WorkspaceExists { .. }),
@@ -464,7 +464,7 @@ fn probe_init_errors_when_jot_exists_even_if_its_manifest_is_unreadable() {
     std::fs::create_dir_all(root.join(".jot")).unwrap();
 
     assert!(
-        Workspace::init(&root, WorkspaceKind::Jot).is_err(),
+        Workspace::init(&root).is_err(),
         "a bare .jot/ directory with no manifest still counts as an existing workspace"
     );
 }
@@ -474,7 +474,7 @@ fn probe_init_creates_the_target_directory_when_it_does_not_exist() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("not").join("yet").join("there");
 
-    Workspace::init(&root, WorkspaceKind::Jot)
+    Workspace::init(&root)
         .expect("a target directory that does not exist is created (dispatch.md U3)");
     assert!(root.join(".jot/workspace.toml").is_file());
 }
@@ -488,7 +488,7 @@ fn probe_init_adopts_a_directory_that_already_contains_markdown_files() {
     let stray_bytes = read_bytes(&fixture_vault().join("01a03d4c-c708-7cbf-83c0-883cedb7f1d5.md"));
     std::fs::write(&stray, &stray_bytes).unwrap();
 
-    Workspace::init(&root, WorkspaceKind::Jot)
+    Workspace::init(&root)
         .expect("adopting a folder of existing markdown is a supported path (dispatch.md U3)");
 
     assert_bytes_eq(
@@ -503,7 +503,7 @@ fn probe_init_defaults_the_workspace_name_to_the_target_directory_basename() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("Field Notes");
     std::fs::create_dir(&root).unwrap();
-    Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    Workspace::init(&root).unwrap();
 
     let manifest: toml::Value =
         toml::from_str(&read_text(&root.join(".jot/workspace.toml"))).unwrap();
@@ -519,7 +519,7 @@ fn probe_open_refuses_a_schema_version_from_the_future() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
-    Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    Workspace::init(&root).unwrap();
 
     let manifest = root.join(".jot/workspace.toml");
     let bumped = read_text(&manifest).replace("schema_version = 1", "schema_version = 9999");
@@ -552,7 +552,7 @@ fn probe_open_round_trips_the_manifest_init_wrote() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
-    Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    Workspace::init(&root).unwrap();
 
     let before = read_bytes(&root.join(".jot/workspace.toml"));
     let opened = Workspace::open(&root).expect("open must accept what init wrote");
@@ -572,7 +572,7 @@ fn probe_discover_from_the_workspace_root_itself_finds_it() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
-    Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    Workspace::init(&root).unwrap();
 
     let found = Workspace::discover(&root).expect("discover must consider `from` itself");
     assert!(same_dir(found.root(), &root));
@@ -584,8 +584,8 @@ fn probe_discover_stops_at_the_nearest_workspace_not_the_outermost() {
     let outer = tmp.path().join("outer");
     let inner = outer.join("a").join("inner");
     std::fs::create_dir_all(&inner).unwrap();
-    Workspace::init(&outer, WorkspaceKind::Jot).unwrap();
-    Workspace::init(&inner, WorkspaceKind::Jot).unwrap();
+    Workspace::init(&outer).unwrap();
+    Workspace::init(&inner).unwrap();
 
     let deep = inner.join("x").join("y").join("z");
     std::fs::create_dir_all(&deep).unwrap();
@@ -605,7 +605,7 @@ fn probe_discover_below_the_jot_directory_does_not_treat_jot_as_a_workspace() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
-    Workspace::init(&root, WorkspaceKind::Jot).unwrap();
+    Workspace::init(&root).unwrap();
 
     let found =
         Workspace::discover(&root.join(".jot").join("tmp")).expect("discover from .jot/tmp");
@@ -1015,7 +1015,7 @@ fn probe_init_and_open_do_not_touch_the_registry() {
 
     let root = tmp.path().join("vault");
     std::fs::create_dir(&root).unwrap();
-    Workspace::init(&root, WorkspaceKind::Jot).expect("init");
+    Workspace::init(&root).expect("init");
     let after_init = relative_tree(&root);
 
     Workspace::open(&root).expect("open");
