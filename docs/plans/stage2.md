@@ -41,13 +41,24 @@ Rules that follow from the locked decisions and must be enforced in one place:
   are the filename's; `edited_at` and `trashed_at` are index-only. `create` mints the id, and the
   creation-time `FilenameSlug` option decides whether the filename gets a slug from the title.
   Re-slugging on a title change is safe: the identity is the UUID and it does not move.
-- **`relation:root` is assigned once, at creation**, copied from the parent (or set to the note's own id for a
-  root). It is never recomputed, so purging a middle note leaves the subtree grouped.
-- **Re-parenting is not supported.** Nothing in the design needs it, and it would be the one operation
-  requiring a subtree rewrite. If it is ever wanted, it arrives as an explicit `reparent` that
-  rewrites `root` across the subtree — not as a side effect of an edit.
-- **A quote is not a thread edge.** `quote` never touches `root_id`, and the quoted note never joins
-  the quoting note's tree.
+- **`relation:root` does not exist.** It was assigned once at creation and never recomputed, on the
+  argument that this kept a subtree grouped when a note in the middle of it was purged. The
+  pre-stage-4 refactor deleted the key: a root is **derived** from `relation:reply_to` at scan time,
+  and purging a middle note therefore *splits* the subtree.
+
+  The reversal is safe because `root_id` was never what provided the property it was defended for.
+  "There was a chain here and a post is gone" comes from the surviving child's dangling
+  `relation:reply_to`, which points at an id the vault no longer holds and resolves to
+  `Ref::Deleted`. That lives in the file and is untouched. Sibling grouping survives too — children
+  of a purged parent all carry the *same* missing id. What is genuinely lost is grouping across
+  **two** purges, and at that point the chain really has been broken twice.
+- **Re-parenting is not supported.** Nothing in the design needs it. If it is ever wanted, it
+  arrives as an explicit `reparent` that rewrites `relation:reply_to` — not as a side effect of an
+  edit. It no longer implies a subtree rewrite, since there is no stored root to rewrite; what it
+  does imply is a `reply_to` cycle interrupted halfway, which is one of the ways a cycle actually
+  arrives.
+- **A quote is not a thread edge.** `relation:quote_to` never affects the derived root, and the
+  quoted note never joins the quoting note's tree.
 - **Purge is the only irreversible operation.** It requires explicit confirmation at every surface.
 
 ### Reference resolution
@@ -157,10 +168,12 @@ call the renderer.
 
 - Create a root, three replies, and a fork; `segments()` and `paths()` match the worked example above.
 - Trash the middle note of a chain: children stay live, the parent reference reports `Trashed`.
-- Purge that note instead: children stay live, the reference reports `Deleted`, and the subtree is
-  still grouped under the original `root_id`.
+- Purge that note instead: children stay live and the reference reports `Deleted`. The subtree is
+  **no longer grouped** — each survivor now roots at the missing id its `relation:reply_to` names,
+  which is what makes the broken chain visible without a stored root.
 - Purge the root itself: the surviving children appear in the timeline as orphan roots.
-- A hand-written cycle in `reply_to` produces an error naming both notes, and no hang.
+- A hand-written cycle in `reply_to` is reported as `Problem::ReplyCycle` — not an error — the note
+  in it roots at itself and appears in the timeline, and there is no hang.
 - A body containing the same `[[uuid]]` in prose, in a fenced code block, and in inline code yields
   exactly one link — from the prose.
 - A link to a purged note still extracts, and resolves to `Deleted`; extraction never consults the

@@ -1,6 +1,9 @@
 # Pre-stage-4 refactor — typed frontmatter schema
 
-**Status.** Planned, not started. Branch `refactor-pre-stage4`, from `237d8fb`.
+**Status.** Implemented on `refactor-pre-stage4`, from `237d8fb`. The run is in
+[`runs/pre-stage4/log.md`](runs/pre-stage4/log.md): what deviated from this document and why, the
+acceptance-suite appeal and every edit made under it, and the two things this refactor found that the
+plan did not anticipate.
 
 **Goal.** A workspace declares *roles*, not key names. `workspace.toml` carries an ordered list of
 typed frontmatter entries, and `jot-core` learns what a key means from its declared type instead of
@@ -265,51 +268,51 @@ in `open_note`, and the read path silently renders a truncated tree.
 
 ### Manifest and schema types
 
-- [ ] `SCHEMA_VERSION` (`workspace.rs:73`) → `2`.
-- [ ] `file::Schema` / `file::SchemaIn` (`workspace.rs:321`, `:348`) take an array of tables.
-- [ ] Read-time promotion of v1 manifests: each string key becomes an entry, with the interpreted
+- [x] `SCHEMA_VERSION` (`workspace.rs:73`) → `2`.
+- [x] `file::Schema` / `file::SchemaIn` (`workspace.rs:321`, `:348`) take an array of tables.
+- [x] Read-time promotion of v1 manifests: each string key becomes an entry, with the interpreted
       names mapped to their roles (`title` → `document:title`, `relation:reply_to` →
       `relation:reply_to`, `relation:quote` → `relation:quote_to`, `relation:root` dropped) and every
       other key becoming `type = "text"`. A v1 manifest opens, and is rewritten as v2 on the next
       write.
-- [ ] `FrontmatterSchema` (`frontmatter.rs:159`) holds ordered typed entries, not `Vec<String>`.
+- [x] `FrontmatterSchema` (`frontmatter.rs:159`) holds ordered typed entries, not `Vec<String>`.
       Keep `keys()` and `contains()` working — a lot depends on them.
-- [ ] Reserved type parsing, with unknown types kept as an opaque preserved variant.
-- [ ] Duplicate-role rejection at manifest parse.
-- [ ] `jot_default()` (`frontmatter.rs:166`) writes the three-entry schema above.
+- [x] Reserved type parsing, with unknown types kept as an opaque preserved variant.
+- [x] Duplicate-role rejection at manifest parse.
+- [x] `jot_default()` (`frontmatter.rs:166`) writes the three-entry schema above.
 
 ### Note rendering and parsing
 
-- [ ] `required` per entry; `Absent` (`frontmatter.rs:571`) becomes per-key rather than per-render.
-- [ ] An empty scalar parses as absent, everywhere.
-- [ ] Role lookup replaces the literals: `TITLE`, `RELATION_*`, `INTERPRETED_KEYS`, `RELATION_KEYS`
+- [x] `required` per entry; `Absent` (`frontmatter.rs:571`) becomes per-key rather than per-render.
+- [x] An empty scalar parses as absent, everywhere.
+- [x] Role lookup replaces the literals: `TITLE`, `RELATION_*`, `INTERPRETED_KEYS`, `RELATION_KEYS`
       (`frontmatter.rs:121-144`) are all deleted.
-- [ ] `Problem` variant for a key the schema does not declare.
+- [x] `Problem` variant for a key the schema does not declare.
 
 ### Removals
 
-- [ ] `WorkspaceKind` and `plain` (`workspace.rs:118`); `Workspace::init` (`:439`) loses its
+- [x] `WorkspaceKind` and `plain` (`workspace.rs:118`); `Workspace::init` (`:439`) loses its
       parameter.
-- [ ] `relation:root` from the schema, from `create` (`workspace.rs:886`), and from `open_note`'s
+- [x] `relation:root` from the schema, from `create` (`workspace.rs:886`), and from `open_note`'s
       repair path (`:700`).
-- [ ] `missing_relation_keys` (`frontmatter.rs:207`) and `Warning::SchemaMissingRelationKeys`
+- [x] `missing_relation_keys` (`frontmatter.rs:207`) and `Warning::SchemaMissingRelationKeys`
       (`workspace.rs:370`).
 
 ### Root and cycles
 
-- [ ] Root computed at scan time over records, memoized, in `snapshot.rs`.
-- [ ] `Problem::ReplyCycle`; a note in a cycle roots at itself.
-- [ ] `recompute_root` (`workspace.rs:736`) either moves to the snapshot or goes away.
+- [x] Root computed at scan time over records, memoized, in `snapshot.rs`.
+- [x] `Problem::ReplyCycle`; a note in a cycle roots at itself.
+- [x] `recompute_root` (`workspace.rs:736`) either moves to the snapshot or goes away.
 
 ### Documents and tests to correct
 
-- [ ] `stage2.md:44` and `:161` — the assigned-once rule and its acceptance criterion.
-- [ ] `workspace.rs:3112` `purging_removes_one_file_and_leaves_the_children_live_and_grouped` — the
+- [x] `stage2.md:44` and `:161` — the assigned-once rule and its acceptance criterion.
+- [x] `workspace.rs:3112` `purging_removes_one_file_and_leaves_the_children_live_and_grouped` — the
       only test pinning the old behaviour. Rewrite, do not delete: the children must still be *live*,
       they simply are no longer grouped.
-- [ ] `stage4.md` — the schema section, per "Consequences" below.
-- [ ] `stage7.md` — mostly subsumed; see below.
-- [ ] `crates/jot-acceptance` — verifier-owned. `criteria.rs:463` embeds a v1 manifest verbatim, and
+- [x] `stage4.md` — the schema section, per "Consequences" below.
+- [x] `stage7.md` — mostly subsumed; see below.
+- [x] `crates/jot-acceptance` — verifier-owned. `criteria.rs:463` embeds a v1 manifest verbatim, and
       ~89 `WorkspaceKind::Jot` call sites span all three test files. **Under `orchestration.md` rule
       2 an implementer files an appeal rather than editing these.** Given the suite is blocking in
       CI, agree the appeal before starting rather than at the end.
@@ -382,3 +385,11 @@ the index's own queries need it rather than because its type is `document:*`.
 
 - `document:created_at` is provided as an example of `frontmatter.schema.type`
 - For the public release, new schema will be the default so I don't think it would matter when I reset it later, for the future proof.
+
+### As implemented
+
+1. **`document:created_at` is not reserved.** Taken as the example it was offered as, not as a type
+   to add. A vault that wants the date in the file declares `key = "created_at", type = "text:date"`
+   and owns it as ordinary data; reserving it would duplicate what the UUIDv7 already encodes and
+   create a value that can contradict the identity.
+2. **`schema_version` stays monotonic**, and is `2`. Nothing about the public release resets it.

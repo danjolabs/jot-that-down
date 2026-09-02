@@ -14,28 +14,38 @@
 //! render(schema.frontmatter, typed fields) ++ preserved unknown keys ++ body
 //! ```
 //!
-//! Key order is **declared, not hardcoded**: it comes from `[schema] frontmatter` in
+//! Key order is **declared, not hardcoded**: it comes from `[[schema.frontmatter]]` in
 //! `workspace.toml` (see [`FrontmatterSchema`]), not from a constant in this file. Reordering a
 //! vault's frontmatter is a config edit.
 //!
+//! # Meaning is declared too
+//!
+//! So is what a key *means*. Each schema entry carries a [`FieldType`], and a [`Role`] — the title,
+//! the parent, the quote — is found by looking one up rather than by comparing against a string
+//! literal. That separation of **role from key name** is not a stylistic preference; it follows
+//! directly from the observation this project started with, that a filename, a `title:` key and an
+//! H1 heading are the same thing stored in three places. A vault may call its title key `title`,
+//! `heading`, `name` or `제목`, and core still knows which one holds the title.
+//!
 //! # What the block carries
 //!
-//! Four keys, where stage 1 had eight. `id` left because the filename carries it; `created_at`
-//! left because a UUIDv7 encodes it exactly (see [`crate::note::NoteId::created_at`]); `edited_at`
-//! left because it is index-only, populated from filesystem mtime at scan time.
+//! Three roles, where stage 1 had eight keys. `id` left because the filename carries it;
+//! `created_at` left because a UUIDv7 encodes it exactly (see [`crate::note::NoteId::created_at`]);
+//! `edited_at` left because it is index-only, populated from filesystem mtime at scan time; and
+//! `relation:root` left because a thread root is derived from `relation:reply_to` at scan time and
+//! no file should assert a value no file can be the authority for.
 //!
 //! ```markdown
 //! ---
 //! title: Jot that down
-//! relation:root: 01a03d20-a54c-7977-a1f4-1a88b38855dd
 //! relation:reply_to: 01a03d20-a54c-7977-a1f4-1a88b38855dd
-//! relation:quote: 01a03d10-3f8a-7bb1-9c22-0e1d5a6b7c88
+//! relation:quote_to: 01a03d10-3f8a-7bb1-9c22-0e1d5a6b7c88
 //! ---
 //! ```
 //!
-//! `relation:root` is one key, not a nested mapping: in YAML a colon is an indicator only when it
-//! is followed by whitespace. `relation_root_is_one_key` pins that against the pinned crate rather
-//! than trusting it.
+//! `relation:reply_to` is one key, not a nested mapping: in YAML a colon is an indicator only when
+//! it is followed by whitespace. `a_relation_key_is_one_key_and_not_a_nested_mapping` pins that
+//! against the pinned crate rather than trusting it.
 //!
 //! **The block is always present.** A file with no fence is a malformed note, not an untitled one,
 //! which is what lets [`Frontmatter::parse_document`] treat its absence as an error rather than as
@@ -86,10 +96,13 @@
 //! source line range before the interior is handed to `yaml_serde`, and block scalars, nested
 //! mappings and trailing comments fall out for free as continuation lines.
 //!
-//! **Preservation is keyed on what jot interprets, not on the schema.** A key among
-//! [`INTERPRETED_KEYS`] becomes a typed field; everything else is preserved verbatim. The schema
-//! governs order and nothing else — which is what lets a workspace whose schema omits
-//! `relation:reply_to` still be non-lossy: see [`Frontmatter::try_render`].
+//! **Preservation is keyed on the schema.** A key the schema declares with a reserved [`Role`]
+//! becomes a typed field; every other key — undeclared, declared as `text`, or declared with a type
+//! this build has never heard of — is preserved verbatim and never interpreted. Stage 1b keyed this
+//! on a hardcoded list instead, and needed a second emission pass so that a schema omitting
+//! `relation:reply_to` stayed non-lossy. With roles declared there is no such pass and no such
+//! case: a role the schema does not name is never parsed out of the file, so the key simply stays a
+//! preserved key and comes back out exactly as it went in.
 //!
 //! ## Where the slicer stops
 //!

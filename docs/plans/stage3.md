@@ -26,7 +26,7 @@ jot search <query> [--since] [--until]
 jot links <id>         # backlinks and quoted-by
 jot open <id>          # hands off to the desktop app (stage 6)
 jot workspace list | use <id> | --id <id> | --name <name>
-              | add <path> | new <path> [--kind jot|plain]
+              | add <path> | new <path>
               | remove <id> | --id <id> | --name <name> | prune   # alias: ws, and ls/rm within
 jot index status | rebuild
 ```
@@ -168,10 +168,10 @@ What comes back is parsed with the crate's own parser, so a mangled block fails 
 draft is kept and named** rather than discarded.
 
 For `jot new` the buffer is authoritative for everything a new note may declare, `relation:reply_to`
-included: choosing a parent while writing is normal and, unlike an edit, re-parents nothing.
-`relation:root` is the exception — it is assigned by `create` and never taken from input, or
-"assigned once, never recomputed" would be a suggestion rather than an invariant. A value typed
-there is ignored, and warned about.
+included: choosing a parent while writing is normal and, unlike an edit, re-parents nothing. There is
+no longer an exception: `relation:root` used to be one — assigned by `create`, ignored if typed, and
+warned about — and the key was deleted in the [pre-stage-4 refactor](pre-stage4-refactor.md). A root
+is derived from `relation:reply_to`, so there is nothing for a buffer to contradict.
 
 The limit, which is real and applies to **`jot edit`**: `Edit` carries `title`, `body`, and `quote`,
 so a change to an unknown frontmatter key made in the editor is not applied — unknown keys are

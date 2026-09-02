@@ -30,32 +30,66 @@ CREATE TABLE files (
 
 CREATE TABLE notes (
   id          TEXT PRIMARY KEY,    -- UUIDv7
-  root_id     TEXT NOT NULL,       -- own id when the note is a root
-  reply_to_id TEXT,
-  quoted_id   TEXT,
+  root_id     TEXT NOT NULL,       -- DERIVED; own id when the note is a root. See below.
   title       TEXT,
   state       TEXT NOT NULL CHECK (state IN ('active', 'trashed')),
   created_at  TEXT,                -- decoded from the id's UUIDv7 timestamp; NULL if not v7
   edited_at   TEXT,                -- filesystem mtime at scan time; exempt from the rebuild check
-  trashed_at  TEXT                 -- mtime of the file inside `.jot/.trash/`
+  trashed_at  TEXT,                -- mtime of the file inside `.jot/.trash/`
+  fields      TEXT                 -- JSON: the declared keys that are not relations
 );
 
 CREATE INDEX notes_root     ON notes(root_id, id);
-CREATE INDEX notes_reply_to ON notes(reply_to_id);
-CREATE INDEX notes_quoted   ON notes(quoted_id);
 CREATE INDEX notes_timeline ON notes(state, id DESC);
 
-CREATE TABLE links (
-  src_id TEXT NOT NULL,
-  dst_id TEXT NOT NULL,
-  PRIMARY KEY (src_id, dst_id)
+-- One row per edge a file asserts. `role` is a schema-declared relation type, so adding a
+-- relation is a manifest line rather than a migration — which is the whole reason the frontmatter
+-- type system landed before this stage.
+CREATE TABLE relations (
+  from_id TEXT NOT NULL,
+  role    TEXT NOT NULL,           -- 'relation:reply_to', 'relation:quote_to', …
+  to_id   TEXT NOT NULL,
+  PRIMARY KEY (from_id, role, to_id)
 );
-CREATE INDEX links_dst ON links(dst_id);
+CREATE INDEX relations_to ON relations(role, to_id);
 ```
+
+### `root_id` is a derived column, and is deliberately not a row in `relations`
+
+The rows in `relations` are **facts a file asserts**. A root is a **transitive closure no file
+claims** — it is what the scanner computed by walking `reply_to` upward. Putting the two in one
+table in one shape would make the original and the derived indistinguishable again, which is the
+same mistake, one layer down, that dropping `relation:root` from the file format fixed.
+
+So the scanner fills `root_id` in Rust, during the pass that already holds every note in memory,
+and SQLite only reads the result. Deliberately **not** a recursive CTE: computing root in SQL is
+the option that makes cycles dangerous, and doing it in Rust keeps the database a dumb cache and
+keeps cycle detection free — the `seen` set the walk needs anyway is the detector. A cycle is a
+`Problem::ReplyCycle` and the note roots at itself.
+
+### Where a declared field lives
+
+A column exists because **the index's own queries need it**, not because its type is special. If a
+new `document:*` type meant a new column, adding one would be a migration again — exactly what this
+design escapes. So: `id`, `title`, `state`, `created_at`, `edited_at` are columns because the
+timeline, search and sorting need them; `relation:*` goes to `relations`; every other **declared**
+key goes into the `fields` JSON.
+
+Undeclared keys are not indexed at all. They are still preserved in the file — that is the
+forward-compat rule and it is untouched — which makes the "undeclared key" problem actionable:
+*this key is not declared; declare it if you want to query it.* If a JSON field later becomes hot,
+SQLite can carry a generated column over `json_extract` and index that, with no schema change.
+
+### Wiki-link edges are deferred
+
+`point_to` edges from `[[uuid]]` in the body arrive with the wiki-link feature. They need a
+provenance marker when they do: `reply_to` and `quote_to` come from declared frontmatter and the
+schema can turn them off, while a body edge is not declared, cannot be turned off, and is changed
+by editing prose. Until then `links` is the snapshot's `Record::links`, unchanged.
 
 ### Why there are no foreign keys
 
-`reply_to_id`, `quoted_id`, and `links.dst_id` all point at notes that may not exist — that is the
+`relations.to_id` and link targets all point at notes that may not exist — that is the
 "Deleted" state from `docs/conversation/initial.md`, and it must survive a full rebuild. A foreign key would
 make a legitimate state unrepresentable. Dangling is designed for; there is nothing to enforce.
 
@@ -82,7 +116,7 @@ a migration if `WITHOUT ROWID` was chosen here for no reason.
 - [ ] Change detection: `(size, mtime_ns)` fast path; on mismatch, hash and compare. A note whose
       hash is unchanged is not reparsed.
 - [ ] Deletion detection: a `files` row whose path no longer exists → remove the note row. Its
-      children keep their now-dangling `reply_to_id`, which is exactly the "Deleted" state.
+      children keep their now-dangling `reply_to` row, which is exactly the "Deleted" state.
 - [ ] State from location: found in the root → `active`; found in `.jot/.trash/` → `trashed`. The
       directory decides, and from stage 1b it is the *only* thing that decides — there is no
       `trashed_at` key in the file to read a timestamp from. Mirror the trashed file's mtime.
@@ -121,8 +155,8 @@ Enough to prove the schema; the surfaces come later.
   ```sql
   SELECT * FROM notes
    WHERE state = 'active'
-     AND (reply_to_id IS NULL
-          OR reply_to_id NOT IN (SELECT id FROM notes))   -- orphans are roots too
+     AND (id NOT IN (SELECT from_id FROM relations WHERE role = 'relation:reply_to')
+          OR root_id = id)                               -- orphans and cycles are roots too
      AND id < :cursor
    ORDER BY id DESC LIMIT :limit;
   ```
@@ -142,7 +176,7 @@ Enough to prove the schema; the surfaces come later.
 - Deleting `.jot/index.db` and reopening the workspace reproduces every query result exactly.
 - Touching a file without changing its content produces zero reparses.
 - Moving a file into `.jot/.trash/` by hand flips its state on the next `sync()`.
-- Deleting a note file by hand leaves its children queryable, with an unresolvable `reply_to_id`.
+- Deleting a note file by hand leaves its children queryable, with an unresolvable `reply_to` row.
 - A note whose parent was purged appears in the timeline as a root.
 - 10k synthetic notes: cold rebuild and warm `sync()` both measured and written down here. Warm sync
   should be low tens of milliseconds; if it is not, the fast path is wrong.

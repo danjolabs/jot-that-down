@@ -43,7 +43,7 @@ schema_version = 1
 
 [workspace]
 id   = "b4b4856a-e5db-4f9b-bd87-658b0be50741"   # UUIDv4, minted at init, immutable
-kind = "jot"                                     # "jot" | "plain"
+kind = "jot"                                     # deleted in the pre-stage-4 refactor
 name = "Thoughts"                                # display only
 
 [notes]

@@ -19,8 +19,9 @@ Carried in from `docs/conversation/initial.md`; stages assume these without re-a
 | --- | --- |
 | Source of truth | Markdown files. SQLite is derived and disposable. |
 | Identity | UUIDv7, in the filename only. Moved from "filename **and** frontmatter" during stage 1b — see [stage1b.md](stage1b.md). |
-| Thread storage | Adjacency: `relation:reply_to` + denormalized `relation:root`. Paths (form 1) and segments (form 2) are computed at render time, never stored. |
-| Quote | Single nullable `relation:quote`. Cross-tree: never changes the root, never joins the quoted note's thread. |
+| Thread storage | Adjacency: `relation:reply_to`, and nothing else. The root is **derived** — a memoized walk at scan time, never stored in a file. Moved from "`reply_to` + denormalized `relation:root`" in the [pre-stage-4 refactor](pre-stage4-refactor.md). Paths (form 1) and segments (form 2) are computed at render time, never stored. |
+| Quote | Single nullable `relation:quote_to`. Cross-tree: never affects the derived root, never joins the quoted note's thread. |
+| Frontmatter meaning | A key's **role** is declared by its `type`, not by its name. `workspace.toml` carries an ordered `[[schema.frontmatter]]` list; `manifest schema_version = 2`. A key the schema gives no role is preserved verbatim and never interpreted. |
 | Trash | Move the file into `.jot/.trash/`. Location on disk *is* the state — the frontmatter stamp is gone (stage 1b); the index's `trashed_at` is a mirrored column, derived like everything else. |
 | Trashing a parent | Replies stay live and render a trashed-parent placeholder. Trash is never cascading. |
 | Index scope | Title, dates, relations, links. Note bodies are not stored in the index. |
@@ -28,7 +29,7 @@ Carried in from `docs/conversation/initial.md`; stages assume these without re-a
 | Tags | Out of scope. Links in. |
 | Link scope | Resolve within one workspace only. A workspace is an independent unit. |
 | Workspace | Self-identifying directory; `.jot/` holds config, trash, and the DB. |
-| Workspace types | `jot` (flat, UUID names, threads) and `plain` (folders, free names, no threads). |
+| Workspace types | One. `workspace.kind` and the `plain` type are deleted: a workspace declaring no `relation:*` entry **is** what `plain` meant, so the distinction lives in the schema. Filenames are always UUID-named. |
 | Stack | Rust core; `clap` CLI, `ratatui` TUI, Tauri v2 desktop. |
 | Build order | CLI → TUI → desktop. |
 
@@ -83,7 +84,7 @@ original sketch; each is marked and explained.
 ```rust
 impl Workspace {
     // lifecycle of the workspace itself
-    fn init(path: &Path, kind: WorkspaceKind) -> Result<Self>;
+    fn init(path: &Path) -> Result<Self>;        // moved: `kind` is gone with `plain`
     fn open(path: &Path) -> Result<Self>;
     fn discover(from: &Path) -> Result<Self>;   // walk up looking for .jot/
     fn sync(&mut self) -> Result<SyncReport>;   // incremental; cheap, run before reads
@@ -135,7 +136,7 @@ Three deliberate departures from the sketch:
 | 4 | [Index and rebuild](stage4.md) | SQLite schema, scanner, deterministic rebuild | the refactor |
 | 5 | [TUI](stage5.md) | Timeline, thread, file+reader, search, trash | 4 |
 | 6 | [Desktop](stage6.md) | Tauri app, capture overlay, `jot://` deep links | 5 |
-| 7 | [Schema and plain workspaces](stage7.md) | User-declared *extra* fields with types and defaults, `plain` workspace type, rename detection | 6 |
+| 7 | [What is left of the schema](stage7.md) | Mostly subsumed by the refactor. Enums, per-key defaults, optional rename detection | 6 |
 
 [`orchestration.md`](orchestration.md) covers how these stages get executed and verified — the agent
 roles, the model routing, the three gates, and the criteria no orchestrator can close.
@@ -228,5 +229,7 @@ they were correctness costs the deferral would have been a mistake.
   a slug derived from its title. Because identity is the filename's UUID and the reader ignores
   everything after it, re-slugging on a title change does not move the note.
 - **Desktop frontend framework** (React / Svelte / Solid) — not needed until stage 6.
-- **`plain` workspace depth** — is it a real editor, or just a reader plus external `$EDITOR`
-  handoff? Stage 7 assumes the latter until told otherwise.
+- ~~**`plain` workspace depth.**~~ **Settled by deletion** in the [pre-stage-4
+  refactor](pre-stage4-refactor.md). There is no `plain` type: once relations are schema-declared,
+  "a workspace with no threads" is a schema that declares none, and what was left of the field was a
+  filename policy wearing the name of a workspace type.
