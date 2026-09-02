@@ -20,6 +20,10 @@ jot-core = { path = "../jot-core", optional = true }
 [features]
 default = []
 stage1b = ["dep:jot-core"]
+# Stage 4's suite. Same pattern and the same reason: the red suite lives entirely behind the
+# feature, so `cargo clippy --workspace --all-targets` with default features stays clean while
+# stage 4 is being built.
+stage4 = ["dep:jot-core"]
 
 # Assertion tools only — no type from them ever crosses into a `jot-core` signature. They still go
 # through the workspace aliases: pinning `toml` directly here resolved a second `toml` major into
