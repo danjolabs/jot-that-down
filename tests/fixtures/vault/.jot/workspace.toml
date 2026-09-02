@@ -1,9 +1,15 @@
-schema_version = 1
+schema_version = 2
 
 [workspace]
 id   = "01a03d4c-3680-7c70-aade-6c016dd177d2"
-kind = "jot"
 name = "Fixture Vault"
 
-[schema]
-frontmatter = [ "title", "relation:root", "relation:reply_to", "relation:quote" ]
+[[schema.frontmatter]]
+key  = "title"
+type = "document:title"
+
+[[schema.frontmatter]]
+type = "relation:reply_to"
+
+[[schema.frontmatter]]
+type = "relation:quote_to"

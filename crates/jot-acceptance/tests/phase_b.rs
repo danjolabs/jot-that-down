@@ -19,11 +19,12 @@
 
 use jot_acceptance::*;
 use jot_core::error::Error;
-use jot_core::frontmatter::{Frontmatter, FrontmatterSchema, Newline};
+use jot_core::frontmatter::{Frontmatter, FrontmatterSchema, Newline, Role};
 use jot_core::fs as jot_fs;
 use jot_core::note::{Note, NoteId};
 use jot_core::registry::Registry;
-use jot_core::workspace::{Workspace, WorkspaceKind};
+use jot_core::snapshot::Problem;
+use jot_core::workspace::Workspace;
 use std::path::Path;
 
 const ID: &str = "01a03d21-7c11-7a02-b3de-9f0e21c4a771";
@@ -38,6 +39,8 @@ fn schema() -> FrontmatterSchema {
 
 /// A minimal note with `extra` spliced into its block.
 fn note_with(extra: &str) -> String {
+    // A legacy `relation:root` is deliberately kept: it is undeclared now, so every probe that
+    // uses this shape also checks that a preserved key survives whatever it does to the note.
     format!("---\ntitle: A note\nrelation:root: {ID}\n{extra}---\n\nBody.\n")
 }
 
@@ -76,13 +79,13 @@ fn probe_b_the_write_path_carries_hostile_unknown_values_as_bytes() {
 
     for (name, extra) in cases {
         let text = note_with(extra);
-        let note = Note::parse(id(), text.as_bytes())
+        let note = Note::parse(&schema(), id(), text.as_bytes())
             .unwrap_or_else(|e| panic!("{name}: the input must parse: {e}\n{text}"));
 
         let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
 
         // Round-trips, and reaches a fixed point.
-        let reparsed = Note::parse(id(), written.as_bytes()).unwrap_or_else(|e| {
+        let reparsed = Note::parse(&schema(), id(), written.as_bytes()).unwrap_or_else(|e| {
             panic!("{name}: jot wrote something it cannot read: {e}\n{written}")
         });
         assert_eq!(
@@ -140,7 +143,6 @@ fn probe_b_the_write_path_survives_a_hostile_title() {
         "emoji 🎉 title",
         "one\ntwo",
         "tab\there",
-        "",
         "---",
         "...",
         "[bracketed]",
@@ -149,11 +151,11 @@ fn probe_b_the_write_path_survives_a_hostile_title() {
     ];
 
     for title in titles {
-        let mut note = Note::parse(id(), note_with("").as_bytes()).unwrap();
+        let mut note = Note::parse(&schema(), id(), note_with("").as_bytes()).unwrap();
         note.frontmatter.title = Some(title.to_string());
 
         let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
-        let reparsed = Note::parse(id(), written.as_bytes())
+        let reparsed = Note::parse(&schema(), id(), written.as_bytes())
             .unwrap_or_else(|e| panic!("{title:?}: emitted unparseable YAML: {e}\n{written}"));
 
         assert_eq!(
@@ -162,7 +164,7 @@ fn probe_b_the_write_path_survives_a_hostile_title() {
             "{title:?} did not survive:\n{written}"
         );
         assert_eq!(
-            reparsed.frontmatter.root, note.frontmatter.root,
+            reparsed.frontmatter.reply_to, note.frontmatter.reply_to,
             "{title:?}: a hostile title disturbed a neighbouring key:\n{written}"
         );
         assert!(
@@ -170,6 +172,34 @@ fn probe_b_the_write_path_survives_a_hostile_title() {
             "{title:?}: the body moved:\n{written}"
         );
     }
+}
+
+/// The one hostile title removed from the list above, asserted explicitly rather than dropped.
+///
+/// An **empty value parses as absent**, for every type — the rule that makes the new per-entry
+/// `required` safe on a relation, since the placeholder it writes reads back as nothing. So an
+/// empty title no longer round-trips to `Some("")`; it round-trips to untitled, and the key is not
+/// written at all. Losing this quietly would be losing the difference between "untitled" and
+/// "titled with nothing", which is exactly what the rule says is not a difference.
+#[test]
+fn probe_b_an_empty_title_round_trips_to_untitled_rather_than_to_an_empty_string() {
+    let mut note = Note::parse(&schema(), id(), note_with("").as_bytes()).unwrap();
+    note.frontmatter.title = Some(String::new());
+
+    let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
+    let reparsed = Note::parse(&schema(), id(), written.as_bytes()).unwrap();
+    assert_eq!(reparsed.frontmatter.title, None, "{written}");
+
+    // And the fixed point holds: writing what came back is byte-identical.
+    assert_bytes_eq(
+        &reparsed.to_bytes(&schema()),
+        written.as_bytes(),
+        "empty title",
+    );
+
+    // An explicitly empty key in the source reads the same way.
+    let from_source = Note::parse(&schema(), id(), b"---\ntitle: \"\"\n---\n\nBody.\n").unwrap();
+    assert_eq!(from_source.frontmatter.title, None);
 }
 
 /// Relations are emitted by hand rather than through the emitter, on the grounds that a
@@ -188,12 +218,11 @@ fn probe_b_every_relation_value_emits_as_a_plain_scalar_that_parses_back() {
     for raw in ids {
         let parsed: NoteId = raw.parse().unwrap();
         let mut fm = Frontmatter::new();
-        fm.root = Some(parsed);
         fm.reply_to = Some(parsed);
         fm.quote = Some(parsed);
 
         let block = fm.render(&schema());
-        for key in ["relation:root", "relation:reply_to", "relation:quote"] {
+        for key in ["relation:reply_to", "relation:quote_to"] {
             let value = top_level_value(&frontmatter_block(block.as_bytes()), key)
                 .unwrap_or_else(|| panic!("{raw}: {key} missing from\n{block}"));
             assert_eq!(
@@ -204,10 +233,10 @@ fn probe_b_every_relation_value_emits_as_a_plain_scalar_that_parses_back() {
             assert!(unquote(&value).is_none(), "{raw}: {key} was quoted");
         }
 
-        let back = Frontmatter::parse_document(Path::new("m.md"), block.as_bytes())
+        let back = Frontmatter::parse_document(&schema(), Path::new("m.md"), block.as_bytes())
             .unwrap()
             .0;
-        assert_eq!(back.root, Some(parsed), "{raw}");
+        assert_eq!(back.reply_to, Some(parsed), "{raw}");
     }
 }
 
@@ -217,11 +246,15 @@ fn probe_b_every_relation_value_emits_as_a_plain_scalar_that_parses_back() {
 fn probe_b_writing_every_fixture_three_times_reaches_the_same_bytes() {
     for path in vault_note_paths() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let note = Note::load(&schema(), &path).unwrap_or_else(|e| panic!("{name}: {e}"));
 
         let first = note.to_bytes(&schema());
-        let second = Note::parse(note.id, &first).unwrap().to_bytes(&schema());
-        let third = Note::parse(note.id, &second).unwrap().to_bytes(&schema());
+        let second = Note::parse(&schema(), note.id, &first)
+            .unwrap()
+            .to_bytes(&schema());
+        let third = Note::parse(&schema(), note.id, &second)
+            .unwrap()
+            .to_bytes(&schema());
 
         assert_bytes_eq(
             &second,
@@ -247,7 +280,7 @@ fn probe_b_a_crlf_note_stays_crlf_throughout() {
     // Already in schema order, so a byte-identical round trip is a claim about the terminators
     // and nothing else.
     let crlf = "---\r\ntitle: A note\r\nrelation:root: 01a03d21-7c11-7a02-b3de-9f0e21c4a771\r\nsummary: |\r\n  preserved\r\n---\r\n\r\nBody.\r\n";
-    let note = Note::parse(id(), crlf.as_bytes()).expect("a CRLF note is a note");
+    let note = Note::parse(&schema(), id(), crlf.as_bytes()).expect("a CRLF note is a note");
     assert_eq!(note.frontmatter.newline(), Newline::Crlf);
     assert_bytes_eq(
         &note.to_bytes(&schema()),
@@ -273,7 +306,7 @@ fn probe_b_a_crlf_note_stays_crlf_throughout() {
 
     // An LF note is not turned into a CRLF one by the same code path.
     let lf = note_with("summary: x\n");
-    let lf_note = Note::parse(id(), lf.as_bytes()).unwrap();
+    let lf_note = Note::parse(&schema(), id(), lf.as_bytes()).unwrap();
     assert_eq!(lf_note.frontmatter.newline(), Newline::Lf);
     assert!(
         !String::from_utf8(lf_note.to_bytes(&schema()))
@@ -300,10 +333,9 @@ fn probe_b_every_public_field_of_frontmatter_reaches_the_bytes() {
 
     for path in vault_note_paths() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let mut note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let mut note = Note::load(&schema(), &path).unwrap_or_else(|e| panic!("{name}: {e}"));
 
         note.frontmatter.title = Some("mutated title".into());
-        note.frontmatter.root = Some(other);
         note.frontmatter.reply_to = Some(other);
         note.frontmatter.quote = Some(other);
 
@@ -315,7 +347,7 @@ fn probe_b_every_public_field_of_frontmatter_reaches_the_bytes() {
             Some("mutated title"),
             "{name}: the title edit did not reach the bytes:\n{written}"
         );
-        for key in ["relation:root", "relation:reply_to", "relation:quote"] {
+        for key in ["relation:reply_to", "relation:quote_to"] {
             assert_eq!(
                 top_level_value(&block, key).as_deref(),
                 Some(other.to_string().as_str()),
@@ -329,8 +361,12 @@ fn probe_b_every_public_field_of_frontmatter_reaches_the_bytes() {
 #[test]
 fn probe_b_clearing_a_field_removes_its_key_rather_than_emptying_it() {
     let mut note = Note::parse(
+        &schema(),
         id(),
-        note_with(&format!("relation:reply_to: {ID}\nrelation:quote: {ID}\n")).as_bytes(),
+        note_with(&format!(
+            "relation:reply_to: {ID}\nrelation:quote_to: {ID}\n"
+        ))
+        .as_bytes(),
     )
     .unwrap();
 
@@ -342,7 +378,7 @@ fn probe_b_clearing_a_field_removes_its_key_rather_than_emptying_it() {
     assert_eq!(
         top_level_keys(&frontmatter_block(written.as_bytes())),
         ["relation:root"],
-        "a cleared field must be absent, not empty:\n{written}"
+        "a cleared field must be absent, not empty (the undeclared key stays):\n{written}"
     );
 }
 
@@ -364,7 +400,7 @@ fn probe_b_an_indented_fence_is_not_reported_as_an_unterminated_one() {
     let write = |name: &str, text: &str| {
         let path = tmp.path().join(name);
         std::fs::write(&path, text).unwrap();
-        Note::load(&path).expect_err(&format!("{name} must not load"))
+        Note::load(&schema(), &path).expect_err(&format!("{name} must not load"))
     };
 
     let unterminated = write(&format!("{ID}.md"), "---\ntitle: a\n\nBody.\n");
@@ -404,7 +440,8 @@ fn probe_b_the_body_begins_exactly_after_the_closing_fence() {
         ),
     ];
     for (name, doc) in cases {
-        let note = Note::parse(id(), doc.as_bytes()).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let note =
+            Note::parse(&schema(), id(), doc.as_bytes()).unwrap_or_else(|e| panic!("{name}: {e}"));
         let expected = &doc[doc.find("---\n").map_or(0, |_| 0)..];
         let _ = expected;
 
@@ -448,7 +485,7 @@ fn probe_b_a_utf8_bom_before_the_fence_does_not_hide_the_fence() {
             format!("{BOM}{}", note_with("").replace('\n', "\r\n")),
         ),
     ] {
-        let note = Note::parse(id(), doc.as_bytes())
+        let note = Note::parse(&schema(), id(), doc.as_bytes())
             .unwrap_or_else(|e| panic!("{name}: a BOM must not hide the fence: {e}"));
         assert_eq!(note.frontmatter.title.as_deref(), Some("A note"), "{name}");
         assert!(
@@ -465,8 +502,12 @@ fn probe_b_the_bom_tolerance_does_not_leak_past_the_opening_fence() {
     const BOM: &str = "\u{FEFF}";
 
     // Two BOMs: the second is not stripped, so the first line is not a fence.
-    let err = Note::parse(id(), format!("{BOM}{BOM}{}", note_with("")).as_bytes())
-        .expect_err("only one leading BOM is tolerated");
+    let err = Note::parse(
+        &schema(),
+        id(),
+        format!("{BOM}{BOM}{}", note_with("")).as_bytes(),
+    )
+    .expect_err("only one leading BOM is tolerated");
     assert!(
         matches!(err, Error::MissingFrontmatterFence { .. }),
         "{err:?}"
@@ -474,7 +515,7 @@ fn probe_b_the_bom_tolerance_does_not_leak_past_the_opening_fence() {
 
     // A BOM inside the body is content, and must come back untouched.
     let doc = format!("---\ntitle: A note\n---\n\n{BOM}Body.\n");
-    let note = Note::parse(id(), doc.as_bytes()).unwrap();
+    let note = Note::parse(&schema(), id(), doc.as_bytes()).unwrap();
     assert!(
         note.body.contains(BOM),
         "the BOM was stripped from the body"
@@ -529,7 +570,7 @@ fn probe_b_note_load_and_fs_parse_note_filename_accept_the_same_filenames() {
 
         let path = tmp.path().join(&name);
         std::fs::write(&path, &body).unwrap();
-        let load_accepts = match Note::load(&path) {
+        let load_accepts = match Note::load(&schema(), &path) {
             Ok(_) => true,
             Err(Error::InvalidNoteFilename { .. }) => false,
             Err(other) => panic!("{name} ({why}) failed for an unrelated reason: {other}"),
@@ -585,7 +626,11 @@ fn probe_b_every_filename_creation_can_produce_is_one_enumeration_accepts() {
                 note_id.as_uuid(),
                 "{name} does not parse back"
             );
-            assert_eq!(Note::load(&target).unwrap().id, note_id, "{name}");
+            assert_eq!(
+                Note::load(&schema(), &target).unwrap().id,
+                note_id,
+                "{name}"
+            );
             assert_eq!(
                 ws.note_path(note_id).unwrap().as_deref(),
                 Some(target.as_path()),
@@ -619,7 +664,7 @@ fn probe_b_two_files_claiming_one_identity_both_enumerate_without_complaint() {
     let live = jot_fs::live_note_paths(&root).unwrap();
     assert_eq!(live.len(), 2, "both files are enumerated");
     for path in &live {
-        assert_eq!(Note::load(path).unwrap().id, id());
+        assert_eq!(Note::load(&schema(), path).unwrap().id, id());
     }
     assert!(
         ws.note_path(id()).unwrap().is_some(),
@@ -642,36 +687,50 @@ fn probe_b_self_referential_and_dangling_links_parse_without_complaint() {
         format!("relation:reply_to: {other}\n"),
         format!("relation:quote: {other}\n"),
     ] {
-        let note = Note::parse(id(), note_with(&extra).as_bytes())
+        let note = Note::parse(&schema(), id(), note_with(&extra).as_bytes())
             .unwrap_or_else(|e| panic!("{extra:?}: {e}"));
         assert_eq!(note.id, id());
     }
 
-    // A dangling root parses, and survives a write untouched.
-    let text = format!("---\nrelation:root: {other}\n---\n\nx\n");
-    let note = Note::parse(id(), text.as_bytes()).expect("a dangling root is a designed state");
-    assert_eq!(note.frontmatter.root.unwrap().to_string(), other);
-    assert_bytes_eq(&note.to_bytes(&schema()), text.as_bytes(), "dangling root");
+    // A dangling reply_to parses, and survives a write untouched.
+    let text = format!("---\nrelation:reply_to: {other}\n---\n\nx\n");
+    let note = Note::parse(&schema(), id(), text.as_bytes())
+        .expect("a dangling reply_to is a designed state");
+    assert_eq!(note.frontmatter.reply_to.unwrap().to_string(), other);
+    assert_bytes_eq(
+        &note.to_bytes(&schema()),
+        text.as_bytes(),
+        "dangling parent",
+    );
 
-    // A cycle is corruption, and is reported rather than walked forever.
+    // A cycle is corruption, and is reported rather than walked forever. It is a `Problem` now,
+    // not an `Error`: one bad file must not make the rest of the vault unreadable.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("v");
-    let ws = Workspace::init(&root).unwrap();
+    let mut ws = Workspace::init(&root).unwrap();
     std::fs::write(
         root.join(format!("{ID}.md")),
         format!("---\nrelation:reply_to: {ID}\n---\n"),
     )
     .unwrap();
-    assert!(matches!(
-        ws.open_note(id()).unwrap_err(),
-        Error::ReplyCycle { .. }
-    ));
+    ws.sync().unwrap();
+    assert!(
+        ws.problems()
+            .iter()
+            .any(|p| matches!(p, Problem::ReplyCycle { .. })),
+        "{:?}",
+        ws.problems()
+    );
+    assert!(
+        ws.open_note(id()).unwrap().is_some(),
+        "the note stays readable"
+    );
 }
 
-/// Opening every note in the corpus is idempotent. A repair that is not a fixed point rewrites the
-/// vault on every open, which in a git-tracked vault is a diff a day forever.
+/// Opening a note writes nothing at all. Stage 1b could only ask that a repair be a fixed point;
+/// with the repair gone, the stronger property is available and is what stage 4 inherits.
 #[test]
-fn probe_b_opening_every_note_twice_writes_at_most_once() {
+fn probe_b_opening_every_note_twice_writes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("vault");
     copy_tree(&fixture_vault(), &root);
@@ -683,11 +742,6 @@ fn probe_b_opening_every_note_twice_writes_at_most_once() {
         let after_first = std::fs::read(&first.path).unwrap();
 
         let second = ws.open_note(note_id).unwrap().unwrap();
-        assert!(
-            !second.repaired,
-            "{} is rewritten on every open",
-            path.display()
-        );
         assert_bytes_eq(
             &std::fs::read(&second.path).unwrap(),
             &after_first,
@@ -726,7 +780,7 @@ fn probe_b_an_empty_vault_enumerates_discovers_and_writes() {
     jot_fs::atomic_write(&target, &ws.tmp_dir(), body.as_bytes())
         .expect("the tmp/ init created must be a usable staging directory");
     assert_eq!(jot_fs::live_note_paths(&root).unwrap().len(), 1);
-    assert!(Note::load(&target).is_ok());
+    assert!(Note::load(&schema(), &target).is_ok());
     assert_eq!(
         std::fs::read_dir(ws.tmp_dir()).unwrap().count(),
         0,
@@ -777,7 +831,7 @@ fn probe_b_a_non_v7_uuid_is_a_valid_note_id_with_no_creation_time() {
     let path = tmp.path().join(format!("{v4}.md"));
     std::fs::write(&path, format!("---\nrelation:root: {v4}\n---\n\nx\n")).unwrap();
 
-    let note = Note::load(&path).expect("a v4 uuid is a uuid");
+    let note = Note::load(&schema(), &path).expect("a v4 uuid is a uuid");
     assert_eq!(note.id.to_string(), v4);
     assert_eq!(note.id.short(), "9f1b3c2e");
     assert_eq!(note.id.short().len(), 8);
@@ -802,7 +856,7 @@ fn probe_b_a_non_v7_uuid_is_a_valid_note_id_with_no_creation_time() {
 fn probe_b_every_fixture_recovers_a_creation_time_from_its_filename() {
     for path in vault_note_paths() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let note = Note::load(&schema(), &path).unwrap_or_else(|e| panic!("{name}: {e}"));
         let created = note
             .created_at()
             .unwrap_or_else(|| panic!("{name}: no creation time recoverable from the filename"));
@@ -833,7 +887,7 @@ fn probe_b_every_fixture_recovers_a_creation_time_from_its_filename() {
 fn probe_b_short_is_a_real_prefix_and_the_corpus_contains_a_collision() {
     let mut shorts = Vec::new();
     for path in vault_note_paths() {
-        let note = Note::load(&path).unwrap();
+        let note = Note::load(&schema(), &path).unwrap();
         let short = note.id.short();
         assert_eq!(short.len(), 8, "{path:?}");
         assert!(
@@ -1246,49 +1300,56 @@ fn probe_b_enumeration_is_sorted_and_therefore_deterministic() {
     );
 }
 
-/// Kills **M29** (`open` ignores the manifest's `kind` and always reports `Jot`).
+/// Superseded mutant. **M29** was "`open` ignores the manifest's `kind` and always reports
+/// `Jot`". The field, the accessor and the `plain` kind are all deleted: the distinction moved
+/// into the schema, where a workspace declaring no `relation:*` entry *is* what `plain` meant.
 ///
-/// Criterion 1 checks that the manifest *file* says `kind = "jot"`; nothing in the acceptance suite
-/// ever called `Workspace::kind()`, so a `plain` vault opening as a `jot` vault would have shipped.
-/// `Plain` gets its behavior in stage 7, but the manifest must round-trip it from stage 1 onward.
+/// The mutant that replaces it is the one the new design makes possible: `open` ignoring a
+/// declared role and falling back to the key name a hardcoded constant used to hold.
 #[test]
-fn probe_b_open_reports_the_kind_the_manifest_records() {
+fn probe_b_open_reports_the_role_the_manifest_declares_not_a_default_key_name() {
     let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("v");
+    std::fs::create_dir_all(root.join(".jot")).unwrap();
+    std::fs::write(
+        root.join(".jot/workspace.toml"),
+        "schema_version = 2\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+         name = \"V\"\n\n\
+         [[schema.frontmatter]]\nkey = \"heading\"\ntype = \"document:title\"\n\n\
+         [[schema.frontmatter]]\ntype = \"relation:reply_to\"\n",
+    )
+    .unwrap();
 
-    for (dir, kind, spelling) in [
-        ("j", WorkspaceKind::Jot, "jot"),
-        ("p", WorkspaceKind::Plain, "plain"),
-    ] {
-        let root = tmp.path().join(dir);
-        let created = Workspace::init(&root, kind).expect("init");
-        assert_eq!(
-            created.kind(),
-            kind,
-            "init must report the kind it was given"
-        );
+    let ws = Workspace::open(&root).expect("open");
+    assert_eq!(
+        ws.schema().key_for(Role::Title),
+        Some("heading"),
+        "the title role must be read from the declared type, not from the key name `title`"
+    );
 
-        let opened = Workspace::open(&root).expect("open");
-        assert_eq!(
-            opened.kind(),
-            kind,
-            "open must report the kind the manifest records, not a default"
-        );
+    // And it reaches the parser: a note titled under `heading` is titled, and a `title:` key in
+    // the same vault is an ordinary preserved key.
+    let id = NoteId::new();
+    let source = "---\nheading: H\ntitle: not the title\n---\n\nB.\n";
+    let note = Note::parse(ws.schema(), id, source.as_bytes()).unwrap();
+    assert_eq!(note.frontmatter.title.as_deref(), Some("H"));
+    assert_eq!(
+        note.frontmatter.unknown_source("title"),
+        Some("title: not the title\n"),
+        "an undeclared `title` must be preserved, not interpreted"
+    );
+    assert_bytes_eq(&note.to_bytes(ws.schema()), source.as_bytes(), "round-trip");
 
-        // Belt and braces: the manifest text agrees, so the accessor cannot be reading a field the
-        // file does not have.
-        let manifest: toml::Value =
-            toml::from_str(&read_text(&root.join(".jot/workspace.toml"))).unwrap();
-        assert_eq!(
-            manifest["workspace"]["kind"].as_str(),
-            Some(spelling),
-            "the manifest spelling must match the kind"
-        );
-
-        // And `discover` carries it, since that is how every surface will obtain a Workspace.
-        let deep = root.join("a").join("b");
-        std::fs::create_dir_all(&deep).unwrap();
-        assert_eq!(Workspace::discover(&deep).unwrap().kind(), kind);
-    }
+    // And `discover` carries the schema, since that is how every surface obtains a Workspace.
+    let deep = root.join("a").join("b");
+    std::fs::create_dir_all(&deep).unwrap();
+    assert_eq!(
+        Workspace::discover(&deep)
+            .unwrap()
+            .schema()
+            .key_for(Role::Title),
+        Some("heading")
+    );
 }
 
 /// Kills **M32** (`init` mints a constant workspace id).

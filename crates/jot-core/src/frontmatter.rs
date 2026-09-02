@@ -785,7 +785,10 @@ impl Frontmatter {
         };
         match entry.role() {
             Some(Role::Title) => {
-                let Some(title) = &self.title else {
+                // An empty title is filtered here and not only at parse time, so the two agree:
+                // `Some(String::new())` would otherwise emit `title: ''`, which reads back as
+                // `None` and would make render → parse → render take two steps to settle.
+                let Some(title) = self.title.as_ref().filter(|t| !t.is_empty()) else {
                     placeholder(out);
                     return Ok(());
                 };

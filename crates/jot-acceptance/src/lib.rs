@@ -75,11 +75,19 @@ pub const SLUG_FILENAME_NOTE: &str = "01a03d4d-5790-7855-9af5-c362987fc91e_first
 pub const TRASHED_NOTE: &str = "01a03d52-fce0-756a-8944-abff289098e4.md";
 
 /// The schema the fixture vault declares, which is also `FrontmatterSchema::jot_default`.
-pub const SCHEMA_KEY_ORDER: [&str; 4] = [
+///
+/// `relation:root` is deliberately absent: the key was deleted with the pre-stage-4 refactor and a
+/// root is derived from `relation:reply_to` at scan time. Fixture notes still carrying one exercise
+/// the other half of that decision — it is an undeclared key now, preserved and never migrated.
+pub const SCHEMA_KEY_ORDER: [&str; 3] = ["title", "relation:reply_to", "relation:quote_to"];
+
+/// The declared keys of [`ALL_INTERPRETED_KEYS_NOTE`], which carries a legacy `relation:root`
+/// between them.
+pub const ALL_INTERPRETED_KEYS_NOTE_ORDER: [&str; 4] = [
     "title",
     "relation:root",
     "relation:reply_to",
-    "relation:quote",
+    "relation:quote_to",
 ];
 
 /// Every `.md` file the vault contains, live notes plus `.jot/.trash/`, sorted for a stable
@@ -470,7 +478,7 @@ mod harness_self_tests {
         let all_interpreted = read_bytes(&fixture_vault().join(ALL_INTERPRETED_KEYS_NOTE));
         assert_eq!(
             top_level_keys(&frontmatter_block(&all_interpreted)),
-            SCHEMA_KEY_ORDER.to_vec(),
+            ALL_INTERPRETED_KEYS_NOTE_ORDER.to_vec(),
             "this fixture is already in schema order, which is why it cannot be the only input \
              to the key-order test"
         );

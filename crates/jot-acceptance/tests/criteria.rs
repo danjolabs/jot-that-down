@@ -24,10 +24,12 @@
 
 use jot_acceptance::*;
 use jot_core::error::Error;
-use jot_core::frontmatter::{Frontmatter, FrontmatterSchema};
+use jot_core::frontmatter::{FieldType, Frontmatter, FrontmatterEntry, FrontmatterSchema, Role};
 use jot_core::fs as jot_fs;
 use jot_core::note::{Note, NoteId};
-use jot_core::workspace::{Warning, Workspace, WorkspaceKind};
+use jot_core::query::TimelineQuery;
+use jot_core::snapshot::Problem;
+use jot_core::workspace::{Warning, Workspace};
 use std::path::{Path, PathBuf};
 
 fn schema() -> FrontmatterSchema {
@@ -76,16 +78,16 @@ fn a_note_written_by_jot_has_its_keys_in_exactly_schema_order() {
     let id: NoteId = "01a03d4e-78a0-76bc-be78-8ae41b38eefa".parse().unwrap();
     let other = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5";
     let source = format!(
-        "---\nrelation:quote: {other}\nsummary: in the middle\nrelation:root: {other}\n\
+        "---\nrelation:quote_to: {other}\nsummary: in the middle\nrelation:root: {other}\n\
          title: T\nrelation:reply_to: {other}\n---\n\nBody.\n"
     );
 
-    let note = Note::parse(id, source.as_bytes()).expect("the fixture shape must parse");
+    let note = Note::parse(&schema(), id, source.as_bytes()).expect("the fixture shape must parse");
     let written = note.to_bytes(&schema());
     let keys = top_level_keys(&frontmatter_block(&written));
 
     assert_eq!(
-        &keys[..4],
+        &keys[..3],
         &SCHEMA_KEY_ORDER,
         "emitted key order is not the declared order; full order was {keys:?}"
     );
@@ -93,10 +95,10 @@ fn a_note_written_by_jot_has_its_keys_in_exactly_schema_order() {
         keys,
         [
             "title",
-            "relation:root",
             "relation:reply_to",
-            "relation:quote",
-            "summary"
+            "relation:quote_to",
+            "summary",
+            "relation:root"
         ],
         "unknown keys belong after the declared ones, in the order they were read"
     );
@@ -114,14 +116,19 @@ fn a_note_written_by_jot_has_its_keys_in_exactly_schema_order__a_different_schem
     // nowhere else.
     let id = NoteId::new();
     let other = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5";
-    let source = format!("---\ntitle: T\nrelation:root: {other}\nsummary: S\n---\n\nB.\n");
-    let note = Note::parse(id, source.as_bytes()).unwrap();
+    let source = format!("---\ntitle: T\nrelation:reply_to: {other}\nsummary: S\n---\n\nB.\n");
+    let note = Note::parse(&schema(), id, source.as_bytes()).unwrap();
 
-    let declared = FrontmatterSchema::new(["summary", "relation:root", "title"]);
+    let declared = FrontmatterSchema::try_new(vec![
+        FrontmatterEntry::with_key("summary", FieldType::Text(None)),
+        FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+        FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title)),
+    ])
+    .unwrap();
     let written = note.to_bytes(&declared);
     assert_eq!(
         top_level_keys(&frontmatter_block(&written)),
-        ["summary", "relation:root", "title"]
+        ["summary", "relation:reply_to", "title"]
     );
 }
 
@@ -133,10 +140,10 @@ fn a_note_written_by_jot_has_its_keys_in_exactly_schema_order__a_different_schem
 fn render_parse_render_is_a_fixed_point() {
     for path in vault_note_paths() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let note = Note::load(&schema(), &path).unwrap_or_else(|e| panic!("{name}: {e}"));
 
         let once = note.to_bytes(&schema());
-        let reparsed = Note::parse(note.id, &once)
+        let reparsed = Note::parse(&schema(), note.id, &once)
             .unwrap_or_else(|e| panic!("{name}: jot wrote something it cannot read back: {e}"));
         let twice = reparsed.to_bytes(&schema());
 
@@ -164,7 +171,7 @@ fn a_note_carrying_summary_survives_a_title_edit_with_its_bytes_unchanged() {
     for fixture in [SUMMARY_BLOCK_SCALAR_NOTE, SUMMARY_NESTED_MAPPING_NOTE] {
         let path = fixture_vault().join(fixture);
         let original = read_text(&path);
-        let mut note = Note::load(&path).unwrap_or_else(|e| panic!("{fixture}: {e}"));
+        let mut note = Note::load(&schema(), &path).unwrap_or_else(|e| panic!("{fixture}: {e}"));
 
         assert!(
             !schema().contains("summary"),
@@ -226,80 +233,65 @@ const A: &str = "01a03d60-0000-7000-8000-00000000000a";
 const B: &str = "01a03d61-0000-7000-8000-00000000000b";
 const C: &str = "01a03d62-0000-7000-8000-00000000000c";
 
+/// Superseded criterion. Stage 1b required `relation:root` to be *recomputed and written back*
+/// when a hand edit deleted it. The key itself is now deleted, and the property it stood for — the
+/// thread root of a note three deep is still found by walking `reply_to` to the top — is asserted
+/// here against the derived root instead. Nothing is written.
 #[test]
-fn a_deleted_relation_root_is_recomputed_on_open() {
+fn a_thread_root_is_derived_by_walking_reply_to_to_the_top() {
     let tmp = tempfile::tempdir().unwrap();
-    let ws = vault_of(
+    let mut ws = vault_of(
         tmp.path(),
         &[
-            (
-                format!("{A}.md"),
-                format!("---\nrelation:root: {A}\n---\n\nA.\n"),
-            ),
+            (format!("{A}.md"), "---\ntitle: a\n---\n\nA.\n".to_string()),
             (
                 format!("{B}.md"),
-                format!("---\nrelation:root: {A}\nrelation:reply_to: {A}\n---\n\nB.\n"),
+                format!("---\nrelation:reply_to: {A}\n---\n\nB.\n"),
             ),
-            // `relation:root` deleted by hand, three deep in the thread.
             (
                 format!("{C}.md"),
                 format!("---\nrelation:reply_to: {B}\n---\n\nC.\n"),
             ),
         ],
     );
+    ws.sync().unwrap();
+    let before = tree_bytes(ws.root());
 
     let id: NoteId = C.parse().unwrap();
-    let opened = ws
-        .open_note(id)
-        .expect("open must succeed")
-        .expect("the note is in the vault");
-
     assert_eq!(
-        opened
-            .note
-            .frontmatter
-            .root
-            .map(|r| r.to_string())
-            .as_deref(),
+        ws.meta(id).unwrap().root.map(|r| r.to_string()).as_deref(),
         Some(A),
-        "the root must be recomputed by walking reply_to to the top of the thread"
-    );
-    assert!(
-        opened.repaired,
-        "the repair must reach the file, not just memory"
+        "the root must be found by walking reply_to to the top of the thread"
     );
 
-    let on_disk = std::fs::read_to_string(&opened.path).unwrap();
+    // The replacement half of the old criterion: where stage 1b demanded the repair reach the
+    // file, deriving the root must reach *no* file.
+    ws.open_note(id).unwrap().unwrap();
     assert_eq!(
-        top_level_value(&frontmatter_block(on_disk.as_bytes()), "relation:root").as_deref(),
-        Some(A),
-        "on disk:\n{on_disk}"
+        tree_bytes(ws.root()),
+        before,
+        "deriving a root must not write to the vault"
     );
-    assert!(on_disk.ends_with("\nC.\n"), "the body moved:\n{on_disk}");
 }
 
 #[test]
 fn a_deleted_relation_reply_to_becomes_top_level_and_is_not_written_back_as_empty() {
     let tmp = tempfile::tempdir().unwrap();
-    let ws = vault_of(
+    let mut ws = vault_of(
         tmp.path(),
         &[(
             format!("{C}.md"),
             "---\ntitle: orphaned\n---\n\nC.\n".to_string(),
         )],
     );
+    ws.sync().unwrap();
 
     let id: NoteId = C.parse().unwrap();
     let opened = ws.open_note(id).unwrap().unwrap();
 
     assert_eq!(opened.note.frontmatter.reply_to, None);
     assert_eq!(
-        opened
-            .note
-            .frontmatter
-            .root
-            .map(|r| r.to_string())
-            .as_deref(),
+        ws.meta(id).unwrap().root.map(|r| r.to_string()).as_deref(),
         Some(C),
         "a note with no parent is its own root, which is what `top-level` means"
     );
@@ -311,7 +303,51 @@ fn a_deleted_relation_reply_to_becomes_top_level_and_is_not_written_back_as_empt
         "an absent parent was written back as an empty key — `empty` means `something was here` \
          and nothing can act on it. On disk:\n{on_disk}"
     );
-    assert_eq!(keys, ["title", "relation:root"]);
+    assert_eq!(keys, ["title"]);
+}
+
+/// A `reply_to` cycle is a `Problem`, not an `Error`, and the looped note stays visible.
+///
+/// New with the derived root. Under stage 1b a cycle could only be met by `open_note`, which
+/// raised `Error::ReplyCycle`; the read path drew a truncated tree and said nothing.
+#[test]
+fn a_reply_cycle_is_reported_as_a_problem_and_the_note_roots_at_itself() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ws = vault_of(
+        tmp.path(),
+        &[
+            (
+                format!("{A}.md"),
+                format!("---\nrelation:reply_to: {A}\n---\n\nA.\n"),
+            ),
+            (
+                format!("{B}.md"),
+                "---\ntitle: fine\n---\n\nB.\n".to_string(),
+            ),
+        ],
+    );
+    ws.sync().unwrap();
+
+    let looped: NoteId = A.parse().unwrap();
+    assert_eq!(
+        ws.meta(looped).unwrap().root,
+        Some(looped),
+        "a note in a cycle is its own root"
+    );
+    assert!(
+        ws.problems()
+            .iter()
+            .any(|p| matches!(p, Problem::ReplyCycle { id, .. } if *id == looped)),
+        "the cycle must be reported: {:?}",
+        ws.problems()
+    );
+    assert!(
+        ws.timeline(&TimelineQuery::default())
+            .items
+            .iter()
+            .any(|row| row.note.id == looped),
+        "something that needs fixing has to be findable"
+    );
 }
 
 // =============================================================================================
@@ -327,10 +363,10 @@ fn a_read_pass_over_a_clean_vault_writes_nothing() {
 
     let ws = Workspace::open(&root).expect("the fixture vault must open");
     for path in jot_fs::live_note_paths(&root).unwrap() {
-        Note::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        Note::load(&schema(), &path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     }
     for path in jot_fs::trashed_note_paths(&root).unwrap() {
-        Note::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        Note::load(&schema(), &path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     }
     let _ = ws.manifest();
 
@@ -425,7 +461,7 @@ fn created_at_recovered_from_the_filename_uuid_equals_the_mint_time() {
     let path = tmp.path().join(&name);
     std::fs::write(&path, "---\ntitle: A Title\n---\n\nB.\n").unwrap();
 
-    let loaded = Note::load(&path).unwrap();
+    let loaded = Note::load(&schema(), &path).unwrap();
     assert_eq!(loaded.id, minted, "the filename is the identity");
     assert_eq!(
         loaded.created_at(),
@@ -451,24 +487,35 @@ fn created_at_recovered_from_the_filename_uuid_equals_the_mint_time() {
 // =============================================================================================
 // Criterion — "A workspace whose `schema.frontmatter` omits a relation key is rejected at `open`,
 //              naming what is missing."  (contingent; ratified the other way — see module docs)
+//
+// Superseded in shape, kept in substance. With roles declared rather than hardcoded, a schema
+// that omits a relation is not an omission at all — it is a workspace that keeps no such
+// relation, which is what the deleted `plain` kind used to mean. The "warn, never refuse"
+// criterion the ratification turned on now has a different subject: a declared `type` this build
+// does not understand.
 // =============================================================================================
 
 #[test]
-fn a_thin_schema_warns_and_opens_rather_than_being_rejected() {
+fn an_unknown_declared_type_warns_and_opens_rather_than_being_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("v");
     std::fs::create_dir_all(root.join(".jot")).unwrap();
     std::fs::write(
         root.join(".jot").join("workspace.toml"),
-        "schema_version = 1\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
-         kind = \"jot\"\nname = \"V\"\n\n[schema]\nfrontmatter = [ \"title\", \"relation:root\" ]\n",
+        "schema_version = 2\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+         name = \"V\"\n\n\
+         [[schema.frontmatter]]\nkey = \"title\"\ntype = \"document:title\"\n\n\
+         [[schema.frontmatter]]\nkey = \"mood\"\ntype = \"document:mood\"\n",
     )
     .unwrap();
 
-    let ws = Workspace::open(&root).expect("a thin schema warns; it does not refuse");
+    let ws = Workspace::open(&root).expect("an unknown type warns; it does not refuse");
     match ws.warnings() {
-        [Warning::SchemaMissingRelationKeys { path, missing }] => {
-            assert_eq!(missing, &["relation:reply_to", "relation:quote"]);
+        [Warning::UnknownFrontmatterTypes { path, entries }] => {
+            assert_eq!(
+                entries,
+                &[("mood".to_string(), "document:mood".to_string())]
+            );
             assert_eq!(
                 path,
                 &ws.manifest_path(),
@@ -478,30 +525,30 @@ fn a_thin_schema_warns_and_opens_rather_than_being_rejected() {
         other => panic!("expected exactly one schema warning, got {other:?}"),
     }
     let shown = ws.warnings()[0].to_string();
-    for key in ["relation:reply_to", "relation:quote"] {
-        assert!(shown.contains(key), "the warning must name {key}: {shown}");
-    }
+    assert!(
+        shown.contains("document:mood"),
+        "the warning must name the type: {shown}"
+    );
 }
 
-/// Why warning is safe: a relation the schema omits is still written when the note has one, so the
-/// omission costs diff shape and never thread structure. Without this the ratified answer would be
-/// silent data loss and the stage doc's recommendation would be the right one.
+/// Why warning is safe, and the guarantee that has to survive the change of mechanism: a key the
+/// schema gives no role to is **never dropped**. Under stage 1b an omitted relation was written
+/// anyway by a second emission pass; now it is carried as a preserved key. Either way, a schema
+/// that does not name a relation must not cost a note its parent.
 #[test]
-fn a_thin_schema_never_drops_a_relation_the_note_carries() {
+fn a_schema_that_names_no_relation_never_drops_a_relation_the_note_carries() {
     let id = NoteId::new();
-    let source = format!(
-        "---\nrelation:root: {A}\nrelation:reply_to: {B}\nrelation:quote: {C}\n---\n\nB.\n"
-    );
-    let note = Note::parse(id, source.as_bytes()).unwrap();
+    let source = format!("---\nrelation:reply_to: {B}\nrelation:quote_to: {C}\n---\n\nB.\n");
 
-    let thin = FrontmatterSchema::new(["title", "relation:root"]);
+    let thin = FrontmatterSchema::try_new(vec![FrontmatterEntry::with_key(
+        "title",
+        FieldType::Reserved(Role::Title),
+    )])
+    .unwrap();
+    let note = Note::parse(&thin, id, source.as_bytes()).unwrap();
     let written = String::from_utf8(note.to_bytes(&thin)).unwrap();
 
-    for (key, value) in [
-        ("relation:root", A),
-        ("relation:reply_to", B),
-        ("relation:quote", C),
-    ] {
+    for (key, value) in [("relation:reply_to", B), ("relation:quote_to", C)] {
         assert_eq!(
             top_level_value(&frontmatter_block(written.as_bytes()), key).as_deref(),
             Some(value),
@@ -526,7 +573,7 @@ fn every_fixture_note_reconstitutes_from_the_three_slices() {
         // slices from the public parse and from the file's own text. `body` is what the parser
         // returned; `prefix` and `block` are everything before it. If the parser kept a byte of
         // the body inside the block, or dropped one between them, this arithmetic breaks.
-        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let note = Note::load(&schema(), &path).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(
             text.ends_with(&note.body),
             "{name}: the returned body is not a suffix of the file"
@@ -568,7 +615,7 @@ fn no_fence_and_an_unterminated_fence_produce_two_different_errors_each_naming_t
     let staged = |fixture: &str, uuid: &str| -> (PathBuf, Error) {
         let path = tmp.path().join(format!("{uuid}.md"));
         std::fs::copy(fixture_invalid().join(fixture), &path).unwrap();
-        let err = Note::load(&path).expect_err(&format!("{fixture} must not load"));
+        let err = Note::load(&schema(), &path).expect_err(&format!("{fixture} must not load"));
         (path, err)
     };
 
@@ -611,7 +658,7 @@ fn no_fence_and_an_unterminated_fence_produce_two_different_errors_each_naming_t
 fn a_markdown_body_survives_a_title_edit_with_every_byte_unchanged() {
     let path = fixture_vault().join(MARKDOWN_BODY_NOTE);
     let original = read_text(&path);
-    let mut note = Note::load(&path).unwrap();
+    let mut note = Note::load(&schema(), &path).unwrap();
 
     // The fixture must actually contain what the criterion names, or the test is vacuous.
     for (what, needle) in [
@@ -675,8 +722,9 @@ fn workspace_init_on_an_empty_directory_produces_the_exact_tree() {
     // The manifest declares the schema notes are written in. Stage 1's `[notes] filename` knob is
     // gone; a manifest still carrying it would mean the removal did not land.
     let manifest = read_text(&root.join(".jot").join("workspace.toml"));
-    assert!(manifest.contains("[schema]"), "{manifest}");
-    assert!(manifest.contains("frontmatter"), "{manifest}");
+    assert!(manifest.contains("[[schema.frontmatter]]"), "{manifest}");
+    // The type is the identity; a key equal to its type string is not written.
+    assert!(manifest.contains("type = \"document:title\""), "{manifest}");
     assert!(
         !manifest.contains("[notes]"),
         "the removed filename knob is still being written:\n{manifest}"
@@ -733,7 +781,7 @@ fn an_interrupted_write_leaves_the_original_intact() {
         "the target was damaged by a write that failed",
     );
     assert!(
-        Note::load(&target).is_ok(),
+        Note::load(&schema(), &target).is_ok(),
         "the surviving file must still be a readable note"
     );
 }
@@ -771,7 +819,7 @@ fn discover_finds_the_workspace_from_three_directories_deep() {
 fn every_unknown_key_in_the_corpus_survives_a_write_byte_for_byte() {
     for path in vault_note_paths() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let note = Note::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let note = Note::load(&schema(), &path).unwrap_or_else(|e| panic!("{name}: {e}"));
         if note.frontmatter.unknown().is_empty() {
             continue;
         }
@@ -804,9 +852,8 @@ fn every_unknown_key_in_the_corpus_survives_a_write_byte_for_byte() {
 fn is_dropped_by_design(key: &str, fm: &Frontmatter) -> bool {
     match key {
         "title" => fm.title.is_none(),
-        "relation:root" => fm.root.is_none(),
         "relation:reply_to" => fm.reply_to.is_none(),
-        "relation:quote" => fm.quote.is_none(),
+        "relation:quote_to" => fm.quote.is_none(),
         _ => false,
     }
 }

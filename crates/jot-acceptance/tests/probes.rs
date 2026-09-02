@@ -23,9 +23,14 @@ use jot_core::frontmatter::FrontmatterSchema;
 use jot_core::fs as jot_fs;
 use jot_core::note::{Note, NoteId};
 use jot_core::registry::{self, Registry};
-use jot_core::workspace::{Workspace, WorkspaceKind};
+use jot_core::workspace::Workspace;
 use std::mem::discriminant;
 use std::path::{Path, PathBuf};
+
+/// The schema every probe parses against: what `init` writes.
+fn schema() -> FrontmatterSchema {
+    FrontmatterSchema::jot_default()
+}
 
 // ---------------------------------------------------------------------------------------------
 // Rejecting gracefully: "each produces a distinct error naming the path" (stage1.md, Frontmatter)
@@ -53,7 +58,7 @@ const UNPRESERVABLE: (&str, &str) = ("unpreservable.md", "01a03d54-e130-7f83-b45
 
 fn load_err(spec: (&str, &str)) -> (tempfile::TempDir, PathBuf, Error) {
     let (tmp, path) = staged_invalid(spec.0, spec.1);
-    match Note::load(&path) {
+    match Note::load(&schema(), &path) {
         Ok(_) => panic!("{} must be rejected, not parsed", spec.0),
         Err(e) => (tmp, path, e),
     }
@@ -182,7 +187,7 @@ fn load_synthesized(
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(filename);
     std::fs::write(&path, text).unwrap();
-    let result = Note::load(&path);
+    let result = Note::load(&schema(), &path);
     (tmp, path, result)
 }
 
@@ -224,7 +229,7 @@ fn probe_a_stage_one_note_still_loads_and_keeps_its_old_keys_as_unknown() {
         .collect();
     assert_eq!(unknown, ["id", "created_at", "root"]);
 
-    let written = String::from_utf8(note.to_bytes(&FrontmatterSchema::jot_default())).unwrap();
+    let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
     for key in ["id: ", "created_at: ", "root: "] {
         assert!(written.contains(key), "{key} was dropped:\n{written}");
     }
@@ -522,7 +527,7 @@ fn probe_open_refuses_a_schema_version_from_the_future() {
     Workspace::init(&root).unwrap();
 
     let manifest = root.join(".jot/workspace.toml");
-    let bumped = read_text(&manifest).replace("schema_version = 1", "schema_version = 9999");
+    let bumped = read_text(&manifest).replace("schema_version = 2", "schema_version = 9999");
     std::fs::write(&manifest, &bumped).unwrap();
 
     let err = Workspace::open(&root).expect_err("a schema_version from the future must be refused");
@@ -732,14 +737,14 @@ fn probe_atomic_write_actually_stages_in_the_tmp_dir_it_is_given() {
 fn probe_a_note_with_an_empty_body_round_trips() {
     let path = fixture_vault().join(EMPTY_BODY_NOTE);
     let original = read_bytes(&path);
-    let note = Note::load(&path).expect("an empty body is legal");
+    let note = Note::load(&schema(), &path).expect("an empty body is legal");
     assert!(
         note.body.trim().is_empty(),
         "body should be empty, got {:?}",
         note.body
     );
     assert_bytes_eq(
-        &note.to_bytes(&FrontmatterSchema::jot_default()),
+        &note.to_bytes(&schema()),
         &original,
         "empty-body round trip",
     );
@@ -751,7 +756,7 @@ fn probe_a_note_whose_body_starts_on_the_next_line_keeps_its_first_character() {
     // off by one either eats this note's first character or gives it a leading blank line.
     let path = fixture_vault().join(TIGHT_BODY_NOTE);
     let original = read_bytes(&path);
-    let note = Note::load(&path).expect("a body starting immediately is legal");
+    let note = Note::load(&schema(), &path).expect("a body starting immediately is legal");
 
     assert!(
         note.body
@@ -764,7 +769,7 @@ fn probe_a_note_whose_body_starts_on_the_next_line_keeps_its_first_character() {
         "this fixture has no final newline; the parser invented one"
     );
     assert_bytes_eq(
-        &note.to_bytes(&FrontmatterSchema::jot_default()),
+        &note.to_bytes(&schema()),
         &original,
         "tight-body round trip",
     );
@@ -774,7 +779,7 @@ fn probe_a_note_whose_body_starts_on_the_next_line_keeps_its_first_character() {
 fn probe_a_body_containing_a_fence_line_at_column_zero_is_not_a_second_fence() {
     let path = fixture_vault().join(FENCE_IN_BODY_NOTE);
     let original = read_bytes(&path);
-    let note = Note::load(&path).expect("a `---` in the body is legal markdown");
+    let note = Note::load(&schema(), &path).expect("a `---` in the body is legal markdown");
 
     assert!(
         note.body.contains("That line above is body content"),
@@ -786,7 +791,7 @@ fn probe_a_body_containing_a_fence_line_at_column_zero_is_not_a_second_fence() {
         "the horizontal rule itself belongs to the body"
     );
     assert_bytes_eq(
-        &note.to_bytes(&FrontmatterSchema::jot_default()),
+        &note.to_bytes(&schema()),
         &original,
         "fence-in-body round trip",
     );
@@ -801,9 +806,9 @@ fn probe_the_trashed_fixture_parses_and_carries_no_trashed_at() {
         .join(".trash")
         .join(TRASHED_NOTE);
     let original = read_bytes(&path);
-    let note = Note::load(&path).expect("a trashed note is still a note");
+    let note = Note::load(&schema(), &path).expect("a trashed note is still a note");
     assert_bytes_eq(
-        &note.to_bytes(&FrontmatterSchema::jot_default()),
+        &note.to_bytes(&schema()),
         &original,
         "trashed note round trip",
     );
@@ -816,7 +821,7 @@ fn probe_the_trashed_fixture_parses_and_carries_no_trashed_at() {
 #[test]
 fn probe_load_from_a_path_accepts_the_slug_filename_form() {
     let path = fixture_vault().join(SLUG_FILENAME_NOTE);
-    let note = Note::load(&path).expect("the slug is decorative; load must ignore it");
+    let note = Note::load(&schema(), &path).expect("the slug is decorative; load must ignore it");
     assert_eq!(
         note.id.to_string(),
         "01a03d4d-5790-7855-9af5-c362987fc91e",
@@ -830,13 +835,14 @@ fn probe_every_valid_fixture_loads_from_its_path() {
     // gone with the rule that needed it. Every note in the corpus now loads.
     for path in vault_note_paths() {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        Note::load(&path).unwrap_or_else(|e| panic!("{name} must load cleanly from its path: {e}"));
+        Note::load(&schema(), &path)
+            .unwrap_or_else(|e| panic!("{name} must load cleanly from its path: {e}"));
     }
 }
 
 #[test]
 fn probe_parse_of_an_empty_file_is_an_error_not_a_panic() {
-    let err = Note::parse(NoteId::new(), b"")
+    let err = Note::parse(&schema(), NoteId::new(), b"")
         .expect_err("an empty file has no frontmatter and cannot be a note");
     assert!(!err.to_string().is_empty());
 }
@@ -848,17 +854,22 @@ fn probe_a_fence_only_file_is_an_untitled_top_level_note_not_an_error() {
     // With identity in the filename an empty block is a note with nothing said about it, which is
     // a state the vault represents rather than a failure.
     let id = NoteId::new();
-    let note = Note::parse(id, b"---\n---\n").expect("an empty block is an untitled note");
+    let note =
+        Note::parse(&schema(), id, b"---\n---\n").expect("an empty block is an untitled note");
     assert_eq!(note.id, id);
     assert_eq!(note.frontmatter.title, None);
-    assert_eq!(note.frontmatter.root, None);
+    assert_eq!(note.frontmatter.reply_to, None);
     assert!(note.frontmatter.unknown().is_empty());
 }
 
 #[test]
 fn probe_a_frontmatter_block_that_is_a_sequence_is_not_a_mapping() {
-    let err = Note::parse(NoteId::new(), b"---\n- one\n- two\n---\n\nBody.\n")
-        .expect_err("a sequence is well-formed YAML but is not a frontmatter mapping");
+    let err = Note::parse(
+        &schema(),
+        NoteId::new(),
+        b"---\n- one\n- two\n---\n\nBody.\n",
+    )
+    .expect_err("a sequence is well-formed YAML but is not a frontmatter mapping");
     assert!(
         matches!(err, Error::FrontmatterNotAMapping { .. }),
         "a YAML sequence must be distinguished from malformed YAML, got {err:?}"
