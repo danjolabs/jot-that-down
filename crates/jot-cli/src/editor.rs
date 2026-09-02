@@ -102,14 +102,15 @@ pub fn edit(schema: &FrontmatterSchema, seed: &str) -> Result<Edited> {
 
 /// The text handed to the editor for a note with this frontmatter and body.
 ///
-/// Rendered as a **template**: every key the workspace's schema declares is present, and the ones
-/// this note does not carry appear as empty placeholders. An empty block tells you nothing about
-/// what a note in this vault may hold; `title:` tells you it is yours to fill in.
+/// This is the same render a file gets, deliberately. The buffer used to show a blank placeholder
+/// for *every* declared key; now `required = true` decides, so the vault says in its manifest
+/// which keys it wants staring back at you. `jot_default` marks `document:title` required, so a
+/// new vault behaves as it always did for the key anyone actually fills in.
 ///
-/// Placeholders left alone round-trip to nothing — `title:` is YAML null, and null is read as
-/// absent — so the file written is exactly the one an untouched template would have produced.
+/// A required placeholder left alone round-trips to nothing — `title:` is YAML null, and null is
+/// read as absent — so the file written is exactly the one an untouched buffer would produce.
 pub fn seed(frontmatter: &Frontmatter, body: &str, schema: &FrontmatterSchema) -> String {
-    format!("{}{}", frontmatter.render_template(schema), body)
+    format!("{}{}", frontmatter.render(schema), body)
 }
 
 /// The editor to launch: `$VISUAL`, then `$EDITOR`.
@@ -168,19 +169,44 @@ mod tests {
     }
 
     #[test]
-    fn the_seed_offers_every_schema_key_and_the_blanks_round_trip_to_nothing() {
+    fn the_seed_offers_the_required_keys_only_and_the_blanks_round_trip_to_nothing() {
         let text = seed(&Frontmatter::new(), "\n", &schema());
-        for key in ["title", "relation:reply_to", "relation:quote_to"] {
-            assert!(text.contains(&format!("{key}:")), "no `{key}` in:\n{text}");
+
+        // `jot_default` marks `document:title` required and the two relations not.
+        assert!(text.contains("title:"), "no `title` in:\n{text}");
+        for key in ["relation:reply_to", "relation:quote_to"] {
+            assert!(
+                !text.contains(&format!("{key}:")),
+                "`{key}` is not required and must not be offered as a blank:\n{text}"
+            );
         }
 
-        // Left untouched, the template is worth nothing: every placeholder reads back as absent.
+        // Left untouched, the buffer is worth nothing: the placeholder reads back as absent.
         let (parsed, _) =
             Frontmatter::parse_document(&schema(), Path::new("draft.md"), text.as_bytes()).unwrap();
         assert_eq!(parsed.title, None);
         assert_eq!(parsed.reply_to, None);
         assert_eq!(parsed.quote, None);
         assert_eq!(parsed, Frontmatter::new());
+    }
+
+    /// `required` is the manifest's to set, so a vault that asks for a blank relation gets one.
+    #[test]
+    fn a_relation_the_schema_marks_required_is_offered_as_a_blank() {
+        use jot_core::frontmatter::{FieldType, FrontmatterEntry, Role};
+
+        let schema = FrontmatterSchema::try_new([
+            FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title)).required(true),
+            FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)).required(true),
+        ])
+        .unwrap();
+
+        let text = seed(&Frontmatter::new(), "\n", &schema);
+        assert!(text.contains("relation:reply_to:"), "in:\n{text}");
+
+        let (parsed, _) =
+            Frontmatter::parse_document(&schema, Path::new("draft.md"), text.as_bytes()).unwrap();
+        assert_eq!(parsed, Frontmatter::new(), "the blank reads back as absent");
     }
 
     #[test]

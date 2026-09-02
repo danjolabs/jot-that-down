@@ -83,6 +83,13 @@ pub struct Record {
     /// `(src_id, dst_id)`. The individual occurrences, with their offsets, come from
     /// [`link::extract`] on demand — a body is not stored here.
     pub links: Vec<NoteId>,
+    /// Frontmatter keys this note carries that no `[[schema.frontmatter]]` entry declares, in the
+    /// order the file writes them.
+    ///
+    /// Kept per record rather than tallied as files are read, so that the vault-wide
+    /// [`Problem::UndeclaredKey`] can be rebuilt from scratch whenever the record set changes. A
+    /// key that stops being carried, or starts being declared, stops being reported.
+    pub undeclared: Vec<String>,
 }
 
 /// Something the scan found that a person may want to know about.
@@ -127,6 +134,24 @@ pub enum Problem {
         /// The note the walk came back to.
         id: NoteId,
     },
+    /// Notes carry a frontmatter key that no `[[schema.frontmatter]]` entry declares.
+    ///
+    /// An undeclared key is a **legitimate state**, never an error: it is preserved verbatim
+    /// through every write, which is the rule this project is built on. What it is not is
+    /// *interpreted* — core will not read a role out of it, and stage 4's index will not cache it.
+    /// Reporting it is how a person gets the chance to declare it and have it mean something.
+    ///
+    /// Aggregated per key across the vault rather than raised per file. The actionable unit is one
+    /// manifest line, not nine hundred notes, and a per-file variant would bury every other problem
+    /// under a legacy key that every note carries.
+    UndeclaredKey {
+        /// The undeclared key.
+        key: String,
+        /// One note that carries it, first in scan order — somewhere to look.
+        example: PathBuf,
+        /// How many notes carry it.
+        notes: usize,
+    },
 }
 
 impl std::fmt::Display for Problem {
@@ -145,6 +170,17 @@ impl std::fmt::Display for Problem {
                 f,
                 "`{}`: `relation:reply_to` loops back to note `{id}`; treating it as its own root",
                 path.display()
+            ),
+            Problem::UndeclaredKey {
+                key,
+                example,
+                notes,
+            } => write!(
+                f,
+                "`{key}` is carried by {notes} {} but declared by no `[[schema.frontmatter]]` \
+                 entry, so it is preserved and never interpreted — e.g. `{}`",
+                if *notes == 1 { "note" } else { "notes" },
+                example.display()
             ),
         }
     }
@@ -252,6 +288,15 @@ impl Snapshot {
             return;
         }
 
+        let undeclared = note
+            .frontmatter
+            .unknown()
+            .iter()
+            .map(|key| key.name())
+            .filter(|name| !schema.contains(name))
+            .map(str::to_owned)
+            .collect();
+
         self.records.insert(
             note.id,
             Record {
@@ -260,11 +305,17 @@ impl Snapshot {
                 state,
                 edited_at: mtime(path),
                 links: distinct_targets(&note.body),
+                undeclared,
             },
         );
     }
 
-    /// Fill in every record's derived `root`, and report any `reply_to` cycle on the way.
+    /// Fill in every record's derived `root`, and rebuild the problem list.
+    ///
+    /// Roots first, reporting any `reply_to` cycle on the way; then the vault-wide undeclared-key
+    /// tally. Both are functions of the record set, so both are recomputed whenever it changes
+    /// rather than patched — which is what lets a fixed cycle, or a newly declared key, stop being
+    /// reported instead of accumulating one entry per rescan.
     ///
     /// One memoized upward walk per note. A walk stops at the first ancestor whose root is already
     /// known, so the whole pass is O(n) however deep the threads are.
@@ -326,6 +377,39 @@ impl Snapshot {
         for (id, path) in cycles {
             self.problems.push(Problem::ReplyCycle { path, id });
         }
+        self.report_undeclared_keys();
+    }
+
+    /// Raise one [`Problem::UndeclaredKey`] per key the vault carries and the schema does not
+    /// declare.
+    ///
+    /// Rebuilt from the records rather than tallied as files are read, so it is correct after an
+    /// incremental [`Snapshot::reindex`] or [`Snapshot::forget`] and not only after a full scan —
+    /// the same reason the cycle walk above is redone rather than patched.
+    ///
+    /// Keyed order, and the lexicographically first path as the example, so two scans of one vault
+    /// report the same thing in the same order.
+    fn report_undeclared_keys(&mut self) {
+        let mut seen: BTreeMap<&str, (&Path, usize)> = BTreeMap::new();
+        for record in self.records.values() {
+            for key in &record.undeclared {
+                let entry = seen
+                    .entry(key.as_str())
+                    .or_insert((record.path.as_path(), 0));
+                entry.0 = entry.0.min(record.path.as_path());
+                entry.1 += 1;
+            }
+        }
+
+        let raised: Vec<Problem> = seen
+            .into_iter()
+            .map(|(key, (example, notes))| Problem::UndeclaredKey {
+                key: key.to_owned(),
+                example: example.to_path_buf(),
+                notes,
+            })
+            .collect();
+        self.problems.extend(raised);
     }
 
     /// Re-read one file into the snapshot after a write, replacing whatever it held for `id`.
@@ -816,6 +900,10 @@ mod tests {
             self.2 = body.to_owned();
             self
         }
+        fn line(mut self, line: &str) -> Self {
+            self.1.push(line.to_owned());
+            self
+        }
         fn render(&self) -> String {
             let mut out = String::from("---\n");
             for line in &self.1 {
@@ -853,6 +941,110 @@ mod tests {
             note(C).reply_to(B).title("deep"),
             note(D).reply_to(A).title("fork"),
         ]
+    }
+
+    // --------------------------------------------------------------------- undeclared keys
+
+    /// An undeclared key is preserved and never interpreted. Reporting it is how a person learns
+    /// it could be declared and made to mean something.
+    #[test]
+    fn a_key_the_schema_does_not_declare_is_reported_once_for_the_whole_vault() {
+        let (_tmp, ws) = vault(
+            vec![
+                note(A).title("a").line("summary: one"),
+                note(B).title("b").line("summary: two"),
+                note(C).title("c"),
+            ],
+            &[],
+        );
+        let snap = scan(&ws);
+
+        let [
+            Problem::UndeclaredKey {
+                key,
+                example,
+                notes,
+            },
+        ] = snap.problems()
+        else {
+            panic!("expected one undeclared-key problem: {:?}", snap.problems());
+        };
+        assert_eq!(key, "summary");
+        assert_eq!(*notes, 2, "counted per note, not per vault-wide occurrence");
+        assert!(example.ends_with(format!("{A}.md")), "{example:?}");
+        assert!(
+            snap.problems()[0].to_string().contains("summary"),
+            "the message names the key: {}",
+            snap.problems()[0]
+        );
+    }
+
+    /// The rule the whole refactor turns on: a `relation:root` written before it is an ordinary
+    /// undeclared key. Reported, preserved, and never interpreted as a role.
+    #[test]
+    fn a_legacy_relation_root_is_reported_rather_than_read() {
+        let (_tmp, ws) = vault(
+            vec![note(A).title("a").line(&format!("relation:root: {A}"))],
+            &[],
+        );
+        let snap = scan(&ws);
+
+        assert!(
+            matches!(snap.problems(), [Problem::UndeclaredKey { key, .. }] if key == "relation:root"),
+            "{:?}",
+            snap.problems()
+        );
+        assert_eq!(
+            snap.get(nid(A)).unwrap().meta.root,
+            Some(nid(A)),
+            "the root is derived from `reply_to`, not read from the legacy key"
+        );
+    }
+
+    /// Declaring the key is what makes the report stop — that is the point of raising it.
+    #[test]
+    fn declaring_the_key_stops_the_report() {
+        use crate::frontmatter::{FieldType, FrontmatterEntry, FrontmatterSchema};
+
+        let (_tmp, ws) = vault(vec![note(A).title("a").line("summary: one")], &[]);
+        assert_eq!(scan(&ws).problems().len(), 1);
+
+        let declared = FrontmatterSchema::try_new(
+            ws.schema()
+                .entries()
+                .iter()
+                .cloned()
+                .chain([FrontmatterEntry::with_key("summary", FieldType::Text(None))]),
+        )
+        .unwrap();
+        let snap = Snapshot::scan(&declared, ws.root()).unwrap();
+        assert!(snap.problems().is_empty(), "{:?}", snap.problems());
+    }
+
+    /// The tally is a function of the record set, so an incremental update corrects it. Without
+    /// this the count would climb on every write that re-reads a file.
+    #[test]
+    fn forgetting_the_last_note_carrying_a_key_retires_its_report() {
+        let (_tmp, ws) = vault(
+            vec![
+                note(A).title("a").line("summary: one"),
+                note(B).title("b").line("summary: two"),
+            ],
+            &[],
+        );
+        let mut snap = scan(&ws);
+        assert!(matches!(
+            snap.problems(),
+            [Problem::UndeclaredKey { notes: 2, .. }]
+        ));
+
+        snap.forget(nid(B));
+        assert!(matches!(
+            snap.problems(),
+            [Problem::UndeclaredKey { notes: 1, .. }]
+        ));
+        snap.forget(nid(A));
+        assert!(snap.problems().is_empty(), "{:?}", snap.problems());
     }
 
     // ------------------------------------------------------------------------------- scanning

@@ -27,7 +27,7 @@ use jot_core::error::Error;
 use jot_core::frontmatter::{FieldType, Frontmatter, FrontmatterEntry, FrontmatterSchema, Role};
 use jot_core::fs as jot_fs;
 use jot_core::note::{Note, NoteId};
-use jot_core::query::TimelineQuery;
+use jot_core::query::{Edit, TimelineQuery};
 use jot_core::snapshot::Problem;
 use jot_core::workspace::{Warning, Workspace};
 use std::path::{Path, PathBuf};
@@ -348,6 +348,175 @@ fn a_reply_cycle_is_reported_as_a_problem_and_the_note_roots_at_itself() {
             .any(|row| row.note.id == looped),
         "something that needs fixing has to be findable"
     );
+}
+
+// =============================================================================================
+// Criterion — "A key no entry declares is reported once for the vault, with a count and an example
+//              path; declaring it, or removing it from the last note that carries it, retires the
+//              report."
+// =============================================================================================
+
+/// Reordering was already implemented; this is the other half of the same decision.
+///
+/// An undeclared key is a **legitimate state** — preserved verbatim through every write — so it can
+/// never be an error. What it is not is *interpreted*, and reporting it is how a person learns the
+/// key could be declared and made to mean something.
+///
+/// The variant is aggregated per key rather than raised per file because the problem list is
+/// printed for every command: the actionable unit is one manifest line, not every note carrying the
+/// key.
+#[test]
+fn an_undeclared_key_is_reported_once_for_the_vault_with_a_count_and_an_example() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ws = vault_of(
+        tmp.path(),
+        &[
+            (
+                format!("{A}.md"),
+                "---\ntitle: a\nsummary: one\n---\n\nA.\n".to_string(),
+            ),
+            (
+                format!("{B}.md"),
+                "---\ntitle: b\nsummary: two\n---\n\nB.\n".to_string(),
+            ),
+            (format!("{C}.md"), "---\ntitle: c\n---\n\nC.\n".to_string()),
+        ],
+    );
+    ws.sync().unwrap();
+
+    let [
+        Problem::UndeclaredKey {
+            key,
+            example,
+            notes,
+        },
+    ] = ws.problems()
+    else {
+        panic!(
+            "expected exactly one undeclared-key problem: {:?}",
+            ws.problems()
+        );
+    };
+    assert_eq!(key, "summary");
+    assert_eq!(*notes, 2, "counted per note carrying the key");
+    assert!(
+        example.ends_with(format!("{A}.md")),
+        "the example must name a note that carries it: {example:?}"
+    );
+    assert!(
+        example.exists(),
+        "the example path must be somewhere a person can look: {example:?}"
+    );
+
+    // Never an error, and never a reason to drop the key: the vault stays wholly readable and the
+    // note keeps its bytes.
+    assert_eq!(ws.timeline(&TimelineQuery::default()).items.len(), 3);
+    let a: NoteId = A.parse().unwrap();
+    let a_path = ws.open_note(a).unwrap().unwrap().path;
+    assert!(read_text(&a_path).contains("summary: one"));
+    ws.edit(a, Edit::new().title("renamed")).unwrap();
+    let after = read_text(&a_path);
+    assert!(
+        after.contains("summary: one"),
+        "the key survived a write: {after}"
+    );
+
+    // Removing it from the last note that carries it retires the report — the tally is a function
+    // of what the vault holds, not a counter that only grows.
+    for id in [A, B] {
+        let id: NoteId = id.parse().unwrap();
+        let path = ws.open_note(id).unwrap().unwrap().path;
+        let text = read_text(&path);
+        let stripped: String = text
+            .lines()
+            .filter(|line| !line.starts_with("summary:"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        std::fs::write(&path, stripped).unwrap();
+    }
+    ws.rebuild().unwrap();
+    assert!(
+        ws.problems().is_empty(),
+        "the report must retire: {:?}",
+        ws.problems()
+    );
+}
+
+/// The other way it retires: declare the key. That is the point of raising it at all.
+#[allow(non_snake_case)]
+#[test]
+fn an_undeclared_key_is_reported_once_for_the_vault__declaring_it_retires_the_report() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("v");
+    std::fs::create_dir_all(root.join(".jot")).unwrap();
+    std::fs::write(
+        root.join(".jot").join("workspace.toml"),
+        "schema_version = 2\n\n[workspace]\nid = \"01a03d4c-3680-7c70-aade-6c016dd177d2\"\n\
+         name = \"V\"\n\n\
+         [[schema.frontmatter]]\nkey = \"title\"\ntype = \"document:title\"\n\n\
+         [[schema.frontmatter]]\nkey = \"summary\"\ntype = \"text\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(format!("{A}.md")),
+        "---\ntitle: a\nsummary: one\n---\n\nA.\n",
+    )
+    .unwrap();
+
+    let mut ws = Workspace::open(&root).unwrap();
+    ws.sync().unwrap();
+    assert!(
+        ws.problems().is_empty(),
+        "a declared key is not an undeclared key: {:?}",
+        ws.problems()
+    );
+}
+
+// =============================================================================================
+// Criterion — "A new vault's `$EDITOR` buffer carries `title:` and not `relation:reply_to:`, and a
+//              vault that marks a relation required gets that blank too."
+// =============================================================================================
+
+/// The buffer itself lives in `jot-cli`, which this crate does not depend on. What is testable
+/// here is the whole of what the buffer is: since this refactor it is the **same render a file
+/// gets**, and `required` is the only thing that decides which absent keys appear in it.
+///
+/// So the criterion reduces to two claims about `render`, plus the fact that `jot_default` marks
+/// the title required and the relations not.
+#[test]
+fn a_required_key_is_rendered_blank_and_an_optional_one_is_omitted() {
+    let empty = Frontmatter::new();
+
+    let written = empty.render(&schema());
+    assert!(
+        written.contains("title:"),
+        "`jot_default` requires the title, so the blank is offered:\n{written}"
+    );
+    for key in ["relation:reply_to", "relation:quote_to"] {
+        assert!(
+            !written.contains(key),
+            "`{key}` is not required and must not be offered as a blank:\n{written}"
+        );
+    }
+
+    // A vault that wants the relation blank says so in its manifest, and gets it.
+    let requiring = FrontmatterSchema::try_new([
+        FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title)).required(true),
+        FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)).required(true),
+    ])
+    .unwrap();
+    let written = empty.render(&requiring);
+    assert!(written.contains("relation:reply_to:"), "{written}");
+
+    // Cosmetic and nothing more: every blank reads back as absent, so the file means what an
+    // omitted key would have meant.
+    let (parsed, _) = Frontmatter::parse_document(
+        &requiring,
+        Path::new("draft.md"),
+        format!("{written}\nBody.\n").as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(parsed, Frontmatter::new());
 }
 
 // =============================================================================================

@@ -182,9 +182,11 @@ impl Role {
 /// attached to the *element*: `multitext:url` rather than the nested `array:string:url` that the
 /// other spelling forces.
 ///
-/// Cardinality lives in the type name, which works only while relations are single-valued. If a
-/// note ever needs several parents, this is the design that has to change — a `multirelation:*`
-/// namespace, or cardinality promoted to its own field.
+/// Cardinality lives in the type name, and for relations it is **single-valued by decision, not by
+/// assumption**. `relation:reply_to` and `relation:quote_to` are one-to-many in the direction that
+/// matters — many notes may reply to or quote one note — and each is unidirectional, so the note
+/// holding the key needs exactly one value. There is no `multirelation:*` namespace and none is
+/// planned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldType {
     /// One of the reserved roles core interprets.
@@ -339,7 +341,13 @@ pub struct FrontmatterSchema {
 }
 
 impl FrontmatterSchema {
-    /// The schema `init` writes: a title, and the two relations.
+    /// The schema `init` writes: a **required** title, and the two relations.
+    ///
+    /// `document:title` is `required = true` so that a new vault's `$EDITOR` buffer opens with
+    /// `title:` in it. That is the whole of what `required` is for here — it is a render rule, and
+    /// the buffer is the render it exists to shape. The relations are not required: a blank
+    /// `relation:reply_to:` in every buffer is noise, and the two commands that set one
+    /// (`--reply`, `--quote`) fill it in before the editor ever opens.
     ///
     /// `relation:root` is deliberately absent. It was a denormalized cache of a walk over
     /// `relation:reply_to`, and keeping the original and the derived value side by side in the
@@ -348,7 +356,8 @@ impl FrontmatterSchema {
     pub fn jot_default() -> Self {
         FrontmatterSchema {
             entries: vec![
-                FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title)),
+                FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title))
+                    .required(true),
                 FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
                 FrontmatterEntry::new(FieldType::Reserved(Role::QuoteTo)),
             ],
@@ -697,28 +706,6 @@ impl Frontmatter {
             .unwrap_or_else(|e| panic!("frontmatter render failed: {e}"))
     }
 
-    /// Render as an **editing template**: every key the schema declares is present, and the ones
-    /// this note does not carry are written as empty placeholders.
-    ///
-    /// For handing a note to `$EDITOR`. [`Self::render`] omits an absent key entirely, which is
-    /// right for a file — a note is not obliged to carry a key just because the schema names one —
-    /// but wrong for a buffer someone is about to type into, where an empty block gives no hint
-    /// that `title` is a thing you may fill in. A declared schema is a statement about what notes
-    /// in this vault look like, so a new note's buffer should show it.
-    ///
-    /// The placeholders round-trip to nothing: `title:` is YAML null, null is read as absent, and
-    /// an absent key is never written back. So a template whose placeholders are left alone
-    /// produces exactly the file [`Self::render`] would have produced.
-    ///
-    /// Only keys the schema **declares** get placeholders. An interpreted key the schema omits is
-    /// still emitted when the note carries one (the same step 2 as [`Self::try_render`]), but is
-    /// not offered as a blank: the vault has said it does not want that key in its notes.
-    #[must_use]
-    pub fn render_template(&self, schema: &FrontmatterSchema) -> String {
-        self.try_render_with(schema, Absent::Placeholder)
-            .unwrap_or_else(|e| panic!("frontmatter render failed: {e}"))
-    }
-
     /// [`Self::render`], returning [`Error::SerializeFrontmatter`] instead of panicking.
     ///
     /// The emit order is:
@@ -741,22 +728,13 @@ impl Frontmatter {
     ///
     /// [`Error::SerializeFrontmatter`] if `yaml_serde` cannot emit `title`.
     pub fn try_render(&self, schema: &FrontmatterSchema) -> Result<String> {
-        self.try_render_with(schema, Absent::Declared)
-    }
-
-    /// The body of both render modes.
-    fn try_render_with(&self, schema: &FrontmatterSchema, absent: Absent) -> Result<String> {
         let nl = self.newline.as_str();
         let mut out = String::from("---");
         out.push_str(nl);
 
         let mut emitted: Vec<&str> = Vec::new();
         for entry in schema.entries() {
-            let blank = match absent {
-                Absent::Placeholder => true,
-                Absent::Declared => entry.is_required(),
-            };
-            self.emit_entry(entry, nl, &mut out, &mut emitted, blank)?;
+            self.emit_entry(entry, nl, &mut out, &mut emitted, entry.is_required())?;
         }
         for unknown in &self.unknown {
             if emitted.contains(&unknown.name.as_str()) {
@@ -838,15 +816,6 @@ impl Frontmatter {
         emitted.push(key);
         Ok(())
     }
-}
-
-/// What [`Frontmatter::emit_entry`] does with a key the note does not carry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Absent {
-    /// Let each entry's `required` decide. What a file gets.
-    Declared,
-    /// Write `key:` for every declared key. What an `$EDITOR` buffer gets.
-    Placeholder,
 }
 
 /// Emit `key: <value>` through `yaml_serde`, so escaping and scalar-style selection stay the
@@ -1263,6 +1232,19 @@ mod tests {
         FrontmatterSchema::jot_default()
     }
 
+    /// `jot_default`'s roles and order with `required` off everywhere.
+    ///
+    /// `jot_default` marks `document:title` required so a `$EDITOR` buffer opens with `title:` in
+    /// it. Tests about what an *absent* key does need the other setting, and saying so here beats
+    /// hand-building the same three entries in each of them.
+    fn jot_optional() -> FrontmatterSchema {
+        schema(vec![
+            title_entry("title"),
+            FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
+            FrontmatterEntry::new(FieldType::Reserved(Role::QuoteTo)),
+        ])
+    }
+
     const MINIMAL: &str = "\
 ---
 title: A note
@@ -1645,7 +1627,7 @@ Body.
         assert_eq!(fm.title, None);
         assert_eq!(fm.reply_to, None);
         assert_eq!(fm.quote, None);
-        assert_eq!(fm.render(&jot()), "---\n---\n");
+        assert_eq!(fm.render(&jot_optional()), "---\n---\n");
     }
 
     /// An **empty** value parses as absent too, and uniformly across every type. This is what
@@ -1803,7 +1785,7 @@ Body.
         let doc = "---\nsummary: &a\n  reused: true\ncopy: *a\n---\n\nB.\n";
         let (fm, body) = parse(doc).unwrap();
         assert_eq!(unknown_names(&fm), ["summary", "copy"]);
-        assert_eq!(format!("{}{}", fm.render(&jot()), body), doc);
+        assert_eq!(format!("{}{}", fm.render(&jot_optional()), body), doc);
     }
 
     // ========================================================================= the write path
@@ -1893,7 +1875,7 @@ Body.
     #[test]
     fn an_absent_key_is_omitted_entirely_rather_than_written_empty() {
         let fm = ok(&format!("---\nrelation:reply_to: {ROOT_ID}\n---\n"));
-        let out = fm.render(&jot());
+        let out = fm.render(&jot_optional());
         assert_eq!(out, format!("---\nrelation:reply_to: {ROOT_ID}\n---\n"));
         assert!(!out.contains("title"), "{out}");
         assert!(!out.contains("quote_to"), "{out}");

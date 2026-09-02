@@ -112,3 +112,92 @@ pass across the default members and 113 in the acceptance suite. Not run on Wind
 **Not done, and deliberately out of scope:** the mutation spot-check. It is phase B, it is the
 verifier's, and this run was implementation under a granted appeal — running it here would collapse
 the role split the appeal was careful to preserve.
+
+---
+
+# Sealing pass — 2026-09-02
+
+Three decisions taken after the first implementation landed, folded back into
+`pre-stage4-refactor.md` and implemented here.
+
+## 1. `multirelation:*` is ruled out, not deferred
+
+The plan carried the cardinality note as a live assumption ("recorded so the assumption is visible
+when it breaks"). It is now a decision: `relation:reply_to` and `relation:quote_to` are one-to-many
+in the direction that matters — many notes may reply to or quote one note — and each is
+unidirectional, so the note holding the key needs exactly one value. There is no `multirelation:*`
+namespace and none is planned. Doc-only, in `FieldType` and the plan.
+
+## 2. `required` decides the `$EDITOR` buffer, and `document:title` is required by default
+
+The plan moved `Absent` from a whole-render mode to a per-entry property but left `render_template`
+using `Absent::Placeholder` — so the buffer still forced a blank for **every** declared key, and
+`required` decided nothing a person could see. That was the half of the decision that did not land.
+
+- `Frontmatter::render_template` and the `Absent` enum are **gone**. `try_render` is one path, and
+  `editor::seed` uses the same render a file gets.
+- `jot_default` marks `document:title` `required = true`. That is what keeps `title:` in a new
+  vault's buffer, where stage 3 put it. The relations are not required: `--reply` and `--quote` fill
+  them in before the editor opens, so a blank would be noise.
+- `promote_v1` marks the promoted title required too. v1 had no way to say it and v1's buffer
+  blanked every declared key, so requiring the title *preserves* a promoted vault's behaviour for
+  the one key that had it. No other entry is promoted — for the rest, v1's blanks were core's
+  decision and this refactor hands that decision to the manifest.
+
+**The consequence, stated plainly:** a hand-written file that omits `title:` **gains** the line on
+its first write. Nothing is lost (an empty value parses as absent, every other byte is untouched)
+but a write is no longer byte-identity for such a file — only the second write is. Three probes were
+asserting the old property; see below.
+
+## 3. `Problem::UndeclaredKey` is implemented
+
+The plan's Work checklist ticked this and no code existed — a checkbox ticked in error, found by
+renaming a vault's title key and watching `index status` report `problems 0`.
+
+`UndeclaredKey { key, example, notes }`, **aggregated per key across the vault** rather than raised
+per file. `report_problems` prints the problem list on stderr for every command, so a per-file
+variant would put nine hundred lines in front of a person whose fix is one manifest line. `Record`
+gains `undeclared: Vec<String>`, and the tally is rebuilt inside `derive_roots` next to the cycle
+walk — both are functions of the record set, so an incremental `reindex`/`forget` corrects the count
+and a key that gets declared stops being reported.
+
+## The acceptance suite, under a second granted appeal
+
+Same terms as the first: no assertion weakened or deleted, every substantive edit listed.
+
+| Test | Change | Why |
+| --- | --- | --- |
+| `probe_b_a_non_v7_uuid_is_a_valid_note_id_with_no_creation_time` | Fixture text gains `title:` | Byte-exact round trip must be against the file jot writes |
+| `probe_b_self_referential_and_dangling_links_parse_without_complaint` | Same, for the dangling-parent fixture | Same |
+| `probe_b_clearing_a_field_removes_its_key_rather_than_emptying_it` → `…_unless_the_schema_requires_it` | Split into both halves | The successor property. The old assertion is kept verbatim as the not-required half, and the required half is new |
+| `probe_a_note_with_an_empty_body_round_trips`, `…_whose_body_starts_on_the_next_line_keeps_its_first_character`, `…_body_containing_a_fence_line_at_column_zero_is_not_a_second_fence` | Round-trip compares under a new `schema_without_required()` | These test **body slicing** against titleless fixtures; an added `title:` masks the byte they exist to catch. Parsing still uses `schema()` |
+| — | **New:** `probe_a_a_titleless_fixture_gains_the_required_key_once_and_then_settles` | The coverage the three probes above no longer carry, made explicit: first write adds the key, second write is the fixed point, and the note still means what it meant |
+
+The fixture vault was **not** touched. Keeping titleless notes in the corpus is what makes the new
+probe possible, and a corpus that only contains files jot wrote cannot test what jot does to files
+it did not.
+
+## Gate
+
+`cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace`
+(470 tests), and `-p jot-acceptance --features stage1b` with clippy (117 tests). All green on Linux.
+Not run on Windows.
+
+## Criteria written for the two new Acceptance lines
+
+Appeal extended to cover writing them. Three tests in `criteria.rs`, under the file's existing
+conventions (a `__` sub-case name for the second, as `stage1b.md`'s criteria already use):
+
+| Test | Criterion |
+| --- | --- |
+| `an_undeclared_key_is_reported_once_for_the_vault_with_a_count_and_an_example` | The report's shape — one problem per key, the count, an example path that exists — plus the two things it must not do: reject the vault, or cost the note its key on the next write. Ends by stripping the key from the last notes carrying it and asserting the report retires |
+| `an_undeclared_key_is_reported_once_for_the_vault__declaring_it_retires_the_report` | The other way it retires, and the reason to raise it at all |
+| `a_required_key_is_rendered_blank_and_an_optional_one_is_omitted` | The `$EDITOR` buffer criterion, reduced to what this crate can reach. `jot-cli` is not a dependency, but since this refactor the buffer **is** the file's render, so the criterion is two claims about `render` plus `jot_default`'s settings — and the fixed-point check that keeps `required` cosmetic |
+
+**Mutation-checked, both directions:**
+
+- `report_undeclared_keys` made a no-op → the first criterion fails, the other 22 pass.
+- `required(true)` dropped from `jot_default` → the third criterion fails, the other 22 pass.
+
+Each mutant is killed by exactly the criterion written for it, which is the property that says these
+are criteria rather than restatements of the implementation.

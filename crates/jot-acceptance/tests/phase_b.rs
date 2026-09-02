@@ -357,29 +357,66 @@ fn probe_b_every_public_field_of_frontmatter_reaches_the_bytes() {
     }
 }
 
-/// The other half: clearing a field removes the key rather than writing it empty.
+/// The other half: clearing a field removes the key — unless the schema declares it `required`,
+/// which keeps the key and empties it.
+///
+/// Both halves matter, and they are the same rule seen from two sides: `required` is a **render**
+/// rule and nothing else. It never changes what the file means, because an empty value parses as
+/// absent either way.
 #[test]
-fn probe_b_clearing_a_field_removes_its_key_rather_than_emptying_it() {
-    let mut note = Note::parse(
-        &schema(),
-        id(),
-        note_with(&format!(
-            "relation:reply_to: {ID}\nrelation:quote_to: {ID}\n"
-        ))
-        .as_bytes(),
+fn probe_b_clearing_a_field_removes_its_key_unless_the_schema_requires_it() {
+    let cleared = || {
+        let mut note = Note::parse(
+            &schema(),
+            id(),
+            note_with(&format!(
+                "relation:reply_to: {ID}\nrelation:quote_to: {ID}\n"
+            ))
+            .as_bytes(),
+        )
+        .unwrap();
+        note.frontmatter.title = None;
+        note.frontmatter.reply_to = None;
+        note.frontmatter.quote = None;
+        note
+    };
+
+    // `jot_default`: the title is required and the two relations are not.
+    let written = String::from_utf8(cleared().to_bytes(&schema())).unwrap();
+    assert_eq!(
+        top_level_keys(&frontmatter_block(written.as_bytes())),
+        ["title", "relation:root"],
+        "the required key stays, the optional ones go, the undeclared one is preserved:\n{written}"
+    );
+    assert!(
+        written.contains("title:\n"),
+        "the required key is emitted empty, not with a value:\n{written}"
+    );
+
+    // Nothing required: every cleared key goes, and only the undeclared one is left.
+    let optional = FrontmatterSchema::try_new(
+        schema()
+            .entries()
+            .iter()
+            .cloned()
+            .map(|entry| entry.required(false)),
     )
     .unwrap();
-
-    note.frontmatter.title = None;
-    note.frontmatter.reply_to = None;
-    note.frontmatter.quote = None;
-
-    let written = String::from_utf8(note.to_bytes(&schema())).unwrap();
+    let written = String::from_utf8(cleared().to_bytes(&optional)).unwrap();
     assert_eq!(
         top_level_keys(&frontmatter_block(written.as_bytes())),
         ["relation:root"],
         "a cleared field must be absent, not empty (the undeclared key stays):\n{written}"
     );
+
+    // Either way the file means the same thing, which is what makes `required` cosmetic.
+    let bytes = cleared().to_bytes(&schema());
+    let (parsed, _) =
+        jot_core::frontmatter::Frontmatter::parse_document(&schema(), Path::new("n.md"), &bytes)
+            .unwrap();
+    assert_eq!(parsed.title, None);
+    assert_eq!(parsed.reply_to, None);
+    assert_eq!(parsed.quote, None);
 }
 
 // =============================================================================================
@@ -692,8 +729,9 @@ fn probe_b_self_referential_and_dangling_links_parse_without_complaint() {
         assert_eq!(note.id, id());
     }
 
-    // A dangling reply_to parses, and survives a write untouched.
-    let text = format!("---\nrelation:reply_to: {other}\n---\n\nx\n");
+    // A dangling reply_to parses, and survives a write untouched. `title:` is present because the
+    // schema marks it required, and a byte-exact round trip is against what jot writes.
+    let text = format!("---\ntitle:\nrelation:reply_to: {other}\n---\n\nx\n");
     let note = Note::parse(&schema(), id(), text.as_bytes())
         .expect("a dangling reply_to is a designed state");
     assert_eq!(note.frontmatter.reply_to.unwrap().to_string(), other);
@@ -829,7 +867,14 @@ fn probe_b_a_non_v7_uuid_is_a_valid_note_id_with_no_creation_time() {
     let v4 = "9f1b3c2e-4d5a-4b6c-8d7e-9f0a1b2c3d4e";
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join(format!("{v4}.md"));
-    std::fs::write(&path, format!("---\nrelation:root: {v4}\n---\n\nx\n")).unwrap();
+    // `jot_default` marks `document:title` required, so a file jot writes always carries the key,
+    // empty when there is no title. The round-trip below is byte-exact, which means the fixture has
+    // to be the file jot would write — an absent `title:` is a line the write path *adds*.
+    std::fs::write(
+        &path,
+        format!("---\ntitle:\nrelation:root: {v4}\n---\n\nx\n"),
+    )
+    .unwrap();
 
     let note = Note::load(&schema(), &path).expect("a v4 uuid is a uuid");
     assert_eq!(note.id.to_string(), v4);

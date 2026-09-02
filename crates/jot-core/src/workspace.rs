@@ -291,11 +291,19 @@ impl Manifest {
 /// time, so a schema entry for it would declare a key nothing writes. In note files it is not
 /// migrated either: it simply becomes an undeclared key, preserved and ignored, which is the one
 /// place the forward-compat rule visibly pays for itself.
+///
+/// The title comes back `required = true`, matching [`FrontmatterSchema::jot_default`]. v1 had no
+/// way to say it, and v1's `$EDITOR` buffer offered a blank for every declared key — so requiring
+/// the title is what *preserves* the promoted vault's behaviour for the one key that had it. No
+/// other entry is promoted to required: for the rest, v1's buffer blanks were core's decision and
+/// this refactor hands that decision to the manifest.
 fn promote_v1(keys: &[String]) -> Vec<FrontmatterEntry> {
     keys.iter()
         .filter(|key| key.as_str() != "relation:root")
         .map(|key| match key.as_str() {
-            "title" => FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title)),
+            "title" => {
+                FrontmatterEntry::with_key("title", FieldType::Reserved(Role::Title)).required(true)
+            }
             "relation:reply_to" => FrontmatterEntry::new(FieldType::Reserved(Role::ReplyTo)),
             // v1 spelled it `relation:quote`; v2 renames it for symmetry with `relation:reply_to`.
             // The *key* is kept as it was, so notes written under v1 still round-trip.
@@ -2301,6 +2309,7 @@ name = \"Thoughts\"
 [[schema.frontmatter]]
 key = \"title\"
 type = \"document:title\"
+required = true
 
 [[schema.frontmatter]]
 type = \"relation:reply_to\"
@@ -2895,15 +2904,24 @@ mod lifecycle_tests {
         assert_eq!(edited.frontmatter.reply_to, note.frontmatter.reply_to);
     }
 
+    /// `jot_default` marks `document:title` required, so clearing a title leaves the key behind,
+    /// empty. That is the point of `required` — the key a vault always wants to see stays visible
+    /// in the file and in the `$EDITOR` buffer — and it costs nothing, because an empty value
+    /// parses as absent.
     #[test]
-    fn clearing_a_title_removes_the_key_rather_than_writing_it_empty() {
+    fn clearing_a_title_leaves_the_required_key_behind_empty() {
         let (_tmp, mut ws) = workspace();
         let note = ws.create(Draft::new("b").title("gone")).unwrap();
 
         ws.edit(note.id, Edit::new().clear_title()).unwrap();
         let text = String::from_utf8(bytes_of(&ws, note.id)).unwrap();
-        assert!(!text.contains("title"), "{text}");
-        assert!(ws.get(note.id).unwrap().is_some(), "still parses");
+        assert!(text.contains("title:"), "the required key stays: {text}");
+        assert!(!text.contains("gone"), "the value is gone: {text}");
+        assert_eq!(
+            ws.get(note.id).unwrap().unwrap().frontmatter.title,
+            None,
+            "an empty required key reads back as no title"
+        );
     }
 
     #[test]

@@ -67,8 +67,9 @@ id = "<uuid-v4>"
 name = "workspace"
 
 [[schema.frontmatter]]
-key  = "title"
-type = "document:title"
+key      = "title"
+type     = "document:title"
+required = true
 
 [[schema.frontmatter]]
 type = "relation:reply_to"
@@ -121,9 +122,10 @@ It reads naturally in both directions: `document:title` is always written with a
 to the *element* — `multitext:url` rather than the nested `array:string:url` that the other spelling
 forces.
 
-> Cardinality lives in the type name, which works only while relations are single-valued. If a note
-> ever needs several parents, this is the design that has to change — a `multirelation:*` namespace,
-> or cardinality promoted to its own field. Recorded so the assumption is visible when it breaks.
+> Cardinality lives in the type name, and for relations that is a **decision, not an assumption**.
+> `relation:reply_to` and `relation:quote_to` are one-to-many in the direction that matters — many
+> notes may reply to or quote one note — and each is unidirectional, so the note holding the key
+> needs exactly one value. There is no `multirelation:*` namespace and none is planned.
 
 `relation:quote` is renamed to `relation:quote_to`, for symmetry with `relation:reply_to`.
 
@@ -139,6 +141,17 @@ required = true
 `required = true` means **the key is always emitted, empty if the note has no value** — so a titleless
 note renders `title:` rather than omitting the line. Default `false`. It is opt-in, because
 defaulting to required would put `required = false` on nearly every entry.
+
+It is also what decides the **`$EDITOR` buffer**. Stage 3 seeded that buffer with a blank for every
+declared key, from a whole-render `Absent::Placeholder` mode. That mode is gone: the buffer is now
+the same render a file gets, and `required` alone says which absent keys appear in it. So the vault
+states in its manifest which keys it wants staring back at it, rather than core deciding that every
+declared key qualifies.
+
+Which makes `document:title` **required in `jot_default`** — that is what keeps `title:` in a new
+vault's buffer, where stage 3 put it. The two relations are not required: a blank
+`relation:reply_to:` in every buffer is noise, and the two commands that set one (`--reply`,
+`--quote`) fill it in before the editor opens.
 
 It **never rejects a file**. Refusing to read a file a person wrote is the one thing this project
 does not do.
@@ -181,6 +194,14 @@ then interpreted keys the schema omits, then unknown keys verbatim at the end. N
 What is new is the other half: a key present in a note but absent from the schema should be
 **reported**, so a person can choose to declare it. A `Problem` variant, surfaced like every other
 scan problem — never an error, because an undeclared key is a legitimate state.
+
+**Aggregated per key across the vault**, not raised per file: `UndeclaredKey { key, example, notes }`.
+The actionable unit is one manifest line, not nine hundred notes, and a per-file variant would bury
+every other problem under a legacy key that every note carries — `report_problems` prints the list on
+stderr for *every* command, so the shape of this variant is the difference between a hint and noise.
+It is rebuilt from the records inside `derive_roots`, alongside the cycle walk and for the same
+reason: both are functions of the record set, so a key that gets declared stops being reported
+rather than accumulating one entry per rescan.
 
 ## What leaves
 
@@ -328,10 +349,15 @@ in `open_note`, and the read path silently renders a truncated tree.
 - An unknown `type` in the manifest warns, and every key under it survives a write untouched.
 - `required = true` on a title-less note renders `title:`; reading that file back gives no title, and
   re-rendering is byte-identical (idempotence — the property `edit`'s no-op check depends on).
+- A new vault's `$EDITOR` buffer carries `title:` and **not** `relation:reply_to:`, and a vault that
+  marks a relation required gets that blank too. The buffer is the file's render; `required` is the
+  only thing that decides.
 - Purging the middle of a chain leaves the children live, with `reply_to` resolving to `Deleted`.
 - A note whose `reply_to` points at itself is reported as a problem, appears in the timeline as a
   root, and does not hang.
 - A three-note `reply_to` cycle: same.
+- A key no entry declares is reported once for the vault, with a count and an example path;
+  declaring it, or removing it from the last note that carries it, retires the report.
 - Every remaining `jot-cli` test passes. The CLI's public behaviour does not change here.
 
 ## Risks

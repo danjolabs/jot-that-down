@@ -32,6 +32,24 @@ fn schema() -> FrontmatterSchema {
     FrontmatterSchema::jot_default()
 }
 
+/// [`schema`] with `required` off everywhere.
+///
+/// `jot_default` marks `document:title` required, so writing a note that carries no title *adds*
+/// `title:` to the file. That is the intended behaviour and it is pinned by
+/// `probe_a_a_titleless_fixture_gains_the_required_key_once_and_then_settles` below. The probes
+/// that use this helper are testing **body slicing** against titleless fixtures, and the added key
+/// would mask the byte they exist to catch.
+fn schema_without_required() -> FrontmatterSchema {
+    FrontmatterSchema::try_new(
+        schema()
+            .entries()
+            .iter()
+            .cloned()
+            .map(|entry| entry.required(false)),
+    )
+    .expect("relaxing `required` cannot invalidate a valid schema")
+}
+
 // ---------------------------------------------------------------------------------------------
 // Rejecting gracefully: "each produces a distinct error naming the path" (stage1.md, Frontmatter)
 // ---------------------------------------------------------------------------------------------
@@ -744,7 +762,7 @@ fn probe_a_note_with_an_empty_body_round_trips() {
         note.body
     );
     assert_bytes_eq(
-        &note.to_bytes(&schema()),
+        &note.to_bytes(&schema_without_required()),
         &original,
         "empty-body round trip",
     );
@@ -769,9 +787,55 @@ fn probe_a_note_whose_body_starts_on_the_next_line_keeps_its_first_character() {
         "this fixture has no final newline; the parser invented one"
     );
     assert_bytes_eq(
-        &note.to_bytes(&schema()),
+        &note.to_bytes(&schema_without_required()),
         &original,
         "tight-body round trip",
+    );
+}
+
+/// The consequence of `document:title` being `required` in `jot_default`: a hand-written file that
+/// omits the key **gains** it on the first write, and is then a fixed point.
+///
+/// Nothing is lost — an empty value parses as absent, so the note means what it always meant, and
+/// every other byte is untouched. What is no longer true is that a write is byte-identity for such
+/// a file, and that is worth a probe rather than a footnote: `edit`'s no-op check and stage 4's
+/// rebuild invariant both rest on the *second* write settling, which this pins.
+#[test]
+fn probe_a_a_titleless_fixture_gains_the_required_key_once_and_then_settles() {
+    let path = fixture_vault().join(EMPTY_BODY_NOTE);
+    let original = read_bytes(&path);
+    assert!(
+        !String::from_utf8(original.clone())
+            .unwrap()
+            .contains("title"),
+        "this fixture is chosen because it carries no title"
+    );
+
+    let note = Note::load(&schema(), &path).expect("a titleless note is legal");
+    assert_eq!(note.frontmatter.title, None);
+
+    let first = note.to_bytes(&schema());
+    let text = String::from_utf8(first.clone()).unwrap();
+    assert!(
+        text.contains("title:\n"),
+        "the required key was added:\n{text}"
+    );
+    assert_ne!(first, original, "the first write is not byte-identity");
+
+    // Everything else survives: the undeclared key, its value, and the empty body.
+    assert_eq!(
+        top_level_keys(&frontmatter_block(&first)),
+        ["title", "relation:root"],
+        "{text}"
+    );
+
+    // Re-read and re-write: the second write settles, and the note still means the same thing.
+    let reparsed = Note::parse(&schema(), note.id, &first).expect("what jot writes, jot reads");
+    assert_eq!(reparsed.frontmatter.title, None, "an empty key is absent");
+    assert_bytes_eq(
+        &reparsed.to_bytes(&schema()),
+        &first,
+        "the second write is the fixed point",
     );
 }
 
@@ -791,7 +855,7 @@ fn probe_a_body_containing_a_fence_line_at_column_zero_is_not_a_second_fence() {
         "the horizontal rule itself belongs to the body"
     );
     assert_bytes_eq(
-        &note.to_bytes(&schema()),
+        &note.to_bytes(&schema_without_required()),
         &original,
         "fence-in-body round trip",
     );
