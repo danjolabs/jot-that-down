@@ -19,4 +19,14 @@ micro-blog. Rust core, three surfaces — CLI, then TUI, then desktop.
 - No cascading trash, no cascading delete, no foreign keys. Dangling references are a designed state.
 - Frontmatter keys we don't recognize are preserved verbatim on every write.
 - `crates/jot-acceptance/` is read-only to implementers. Appeal, don't edit.
+- Use the LSP tools when they're available, in preference to grep, for anything the language server
+  answers better: finding references before a rename, locating a definition, checking a type. A
+  `FrontmatterSchema` is 50-odd references across 8 files and `findReferences` is the honest way to
+  see all of them.
+
+  **`cargo` is the arbiter, not the language server.** rust-analyzer's diagnostics go stale during a
+  wide refactor and will report errors against code you already replaced. Never conclude the tree is
+  broken — or clean — from LSP diagnostics alone; confirm with `cargo check --workspace
+  --all-targets`. The mechanical gate in `orchestration.md` is unchanged and is what actually
+  decides.
 
