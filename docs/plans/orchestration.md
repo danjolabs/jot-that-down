@@ -312,9 +312,13 @@ your global settings, so this repo can genuinely produce commits from two differ
 `claude-opus-5` versus `gpt-5.4` is not enough to tell them apart on its own.
 
 **Defaults come from settings, not from habit.** Your global `effortLevel` is `high`, with
-`claude-opus-5` overridden to `xhigh` — which is why `high` is the table's default and why an Opus
-commit will usually read `xhigh`. If those settings change, the defaults in this table change with
-them.
+`claude-opus-5` overridden to `medium` — which is why `high` is the table's default and why an Opus
+commit reads `medium`. If those settings change, the defaults in this table change with them.
+
+**Checked 2026-09-02 and it had drifted**: this paragraph said the Opus override was `xhigh`, and
+`.claude/settings.json` says `medium`. A trailer copied from the table rather than from the file
+would have been a confident wrong attribution — exactly what the section above warns about — so
+read the setting at commit time rather than trusting this sentence.
 
 **One deviation from the sketch.** `claude code` and `Opus 5` both contain spaces, which makes the
 fields ambiguous to split. Hyphenating the tool and using the model *id* keeps every token space-free

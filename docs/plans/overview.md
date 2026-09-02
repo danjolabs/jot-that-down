@@ -24,7 +24,7 @@ Carried in from `docs/conversation/initial.md`; stages assume these without re-a
 | Frontmatter meaning | A key's **role** is declared by its `type`, not by its name. `workspace.toml` carries an ordered `[[schema.frontmatter]]` list; `manifest schema_version = 2`. A key the schema gives no role is preserved verbatim and never interpreted. |
 | Trash | Move the file into `.jot/.trash/`. Location on disk *is* the state — the frontmatter stamp is gone (stage 1b). There is no `trashed_at`: the index keeps one `mtime_ns` per note, and `state` says whether it means "last edited" or "moved to the trash". Amended in [stage4.md](stage4.md), because a rename leaves mtime alone and writes nothing else, so a separate stamp would be state living only in the database. |
 | Trashing a parent | Replies stay live and render a trashed-parent placeholder. Trash is never cascading. |
-| Index scope | Title, dates, relations, links, and the whole frontmatter block as JSON. Note bodies are not stored in the index. One table per kind of fact: `notes`, `relations`, `links` — no `files` table, because it would be 1:1 with `notes` and the filename is already the join key. |
+| Index scope | Title, dates, relations, links, and the whole frontmatter block as JSON. Note bodies are not stored in the index. One table per kind of fact: `notes`, `relations`, `links` — no `files` table, because it would be 1:1 with `notes` and the filename is already the join key. A fourth table, `index_meta`, holds housekeeping only — the digest of the declared frontmatter schema the rows were built against — and never a fact a note asserts. See [stage4.md](stage4.md). |
 | Search | Title and metadata only. Full-text deferred — see `docs/sidenote.md`. |
 | Tags | Out of scope. Links in. |
 | Link scope | Resolve within one workspace only. A workspace is an independent unit. |
@@ -173,7 +173,9 @@ they were correctness costs the deferral would have been a mistake.
   **decoded from the note's UUIDv7 identity**, and `edited_at` is index-only, from filesystem mtime
   at scan time (stage 1b). Outside that one field, mtime remains a change *hint* and never a fact
   about a note — `edited_at` is the deliberate, isolated exception, and the rebuild invariant below
-  exempts it explicitly rather than letting it spread. A note whose id is not a v7 UUID has no
+  exempts it explicitly rather than letting it spread. The index stores it as `mtime_ns`,
+  nanoseconds since the epoch, so a change check never round-trips through a rendered string. A
+  note whose id is not a v7 UUID has no
   recoverable `created_at`, which is a real state and reads as `NULL` rather than as an invention.
 - **Paths in the index** — relative to the workspace root, forward slashes, so the DB survives moving
   the vault between machines and platforms.
