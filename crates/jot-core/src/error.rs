@@ -255,6 +255,41 @@ pub enum Error {
     /// the user's action.
     #[error("cannot serialize the workspace registry `{path}`: {message}")]
     RegistrySerialize { path: PathBuf, message: String },
+
+    // -------------------------------------------------------------------- the index (stage 4)
+    //
+    // The index is derived and disposable, so every variant here has the same remedy — delete the
+    // file and let `rebuild()` put it back — and each message says so, because a person holding a
+    // database error wants to know that before they want to know anything else.
+    /// The index database could not be opened, created, or migrated.
+    #[error(
+        "cannot open the index `{path}`: {message} (the index is derived — deleting it is safe)"
+    )]
+    IndexOpen { path: PathBuf, message: String },
+
+    /// The index's `user_version` is from a newer build of jot than this one.
+    ///
+    /// Migrations are forward-only, so a binary cannot know what a later version did to the
+    /// schema. Refusing is the only honest answer, and it costs nothing: the index carries no
+    /// state the notes do not.
+    // One line on purpose. A `\`-continued literal here got re-joined by `cargo fmt` with the
+    // continuation's indentation left inside the string, and shipped ten spaces mid-sentence to
+    // anyone whose index was from a newer build.
+    #[error(
+        "the index `{path}` is version {found} and this build understands {supported} — delete it and it will be rebuilt"
+    )]
+    IndexTooNew {
+        /// The database file.
+        path: PathBuf,
+        /// The `user_version` the file carries.
+        found: u32,
+        /// The newest version this binary has a migration for.
+        supported: u32,
+    },
+
+    /// A read or a write against the index failed.
+    #[error("index `{path}`: {message} (the index is derived — deleting it is safe)")]
+    IndexQuery { path: PathBuf, message: String },
 }
 
 impl Error {
@@ -292,7 +327,10 @@ impl Error {
             | Error::InvalidWorkspaceId { path, .. }
             | Error::RegistryUnreadable { path, .. }
             | Error::RegistryCorrupt { path, .. }
-            | Error::RegistrySerialize { path, .. } => Some(path),
+            | Error::RegistrySerialize { path, .. }
+            | Error::IndexOpen { path, .. }
+            | Error::IndexTooNew { path, .. }
+            | Error::IndexQuery { path, .. } => Some(path),
             Error::Rename { to, .. } => Some(to),
             Error::WorkspaceNotFound { from } => Some(from),
             Error::SerializeFrontmatter { .. }

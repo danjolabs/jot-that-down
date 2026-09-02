@@ -122,6 +122,7 @@ fn ws_new_creates_the_documented_tree_and_nothing_else() {
         assert!(vault.path().join(expected).exists(), "missing `{expected}`");
     }
     // The index is derived and disposable; creating an empty one would be a lie about that.
+    // Stage 4 keeps this true by materialising the database on the first row it has to write.
     assert!(!vault.path().join(".jot/index.db").exists());
 }
 

@@ -23,6 +23,12 @@ indexmap = { version = "2.14", features = ["serde"] }
 # parser, never a renderer, so the body stays a slice of the original bytes. Stage 3 needs it
 # anyway for `[[uuid]]` extraction.
 markdown = "1.0.0"
+# Stage 4's index. `bundled` compiles SQLite from vendored C rather than linking a system one, so
+# every platform builds the same version and a machine without libsqlite3 is not a special case.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# `notes.content_hash`. The `(size, mtime_ns)` fast path is a hint; this is what makes trusting it
+# safe, and `stage4.md` names blake3 in the schema itself.
+blake3 = "1.8"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 toml = "1.1"
@@ -32,13 +38,17 @@ toml = "1.1"
 uuid = { version = "1.26", features = ["serde", "v4", "v7"] }
 yaml_serde = "0.10.7"
 
-# Surface-only, added for stage 4's CLI. None of these may reach `jot-core`: `anyhow` is the
-# binaries' error type by convention (`overview.md`), and a `clap` or `serde_json` type in a core
-# signature would make the domain depend on how one surface happens to present it.
+# Surface-only, added for stage 3's CLI. None of these may reach `jot-core`: `anyhow` is the
+# binaries' error type by convention (`overview.md`), and a `clap` type in a core signature would
+# make the domain depend on how one surface happens to present it.
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
-serde_json = "1.0"
+# Not surface-only. `jot-core` uses it for the index's `raw` column — a JSON projection of the
+# frontmatter block — inside a module that is private to the crate. `preserve_order` keeps the
+# object in the key order the file writes, which is what `Record::undeclared` is ordered by. No
+# `serde_json` type appears in a public `jot-core` signature; the rule above is about signatures.
+serde_json = { version = "1.0", features = ["preserve_order"] }
 
 # dev only
 assert_cmd = "2.0"
