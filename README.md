@@ -24,6 +24,12 @@ are built.
 | ✅ SQLite index, incremental sync, deterministic rebuild | stage 4 |
 | ⏳ TUI, desktop app, user-declared schema fields | stages 5–7 |
 
+The version is `0.0.<stage>-<letter>` while this is a prototype — the patch is the stage number, the
+letter is a round of change made after that stage landed, and a bare `0.0.<stage>` means the stage is
+sealed. `jot --version` therefore says which stage the binary on your PATH came from. Nothing is
+published to crates.io at these versions; see the versioning convention in
+[`docs/plans/overview.md`](docs/plans/overview.md).
+
 Stages 2 and 3 were built **before** stage 4, because nothing in them needs a database: threads,
 reference resolution, links and prefix resolution are all functions of the set of notes in the
 vault, and the index is a speed layer over that set. `jot-core` read the whole vault into memory

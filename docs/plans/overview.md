@@ -177,6 +177,16 @@ they were correctness costs the deferral would have been a mistake.
   nanoseconds since the epoch, so a change check never round-trips through a rendered string. A
   note whose id is not a v7 UUID has no
   recoverable `created_at`, which is a real state and reads as `NULL` rather than as an invention.
+- **Versioning** — `0.0.<stage>-<letter>`, one version for the whole workspace
+  (`workspace.package.version`; every crate inherits it). While this is a prototype the major and
+  minor stay `0.0`: **the patch is the stage number** from the table above, and the **letter is the
+  revision within that stage** — `-a`, `-b`, `-c` for rounds of change made after the stage's
+  planned work landed. Stage 1b, read backwards, is `0.0.1-b`. The plain `0.0.<stage>` with no
+  letter is the *sealed* stage, not its start, because semver orders a prerelease **before** its
+  release (`0.0.4-a` < `0.0.4`); a stage therefore ends at its bare number rather than beginning
+  there. Nothing is published to crates.io at these versions — they exist so a dogfooded
+  `jot --version` says which stage the binary on your PATH came from. The first release version is
+  a decision for after stage 6, not a convention to fix here.
 - **Paths in the index** — relative to the workspace root, forward slashes, so the DB survives moving
   the vault between machines and platforms.
 - **Tests** — one `tests/fixtures/vault/` used by every stage. Add to it, never fork it. Property
