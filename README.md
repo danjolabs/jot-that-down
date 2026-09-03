@@ -60,7 +60,8 @@ cd ~/notes                   # commands below discover it by walking up
 
 jot new -t "First thought" -m "Something worth keeping."
 echo "captured from a pipe" | jot new
-jot new                      # opens $EDITOR; an empty body cancels
+jot new -t "A title alone"   # a title is a note; the body is optional
+jot new                      # opens $EDITOR; an untouched buffer cancels
 
 jot list                     # thread roots, newest first
 jot list --flat              # replies too

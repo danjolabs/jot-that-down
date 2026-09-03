@@ -158,7 +158,8 @@ struct NewArgs {
     /// The note's title.
     #[arg(short, long)]
     title: Option<String>,
-    /// The note's body. Without this, jot reads stdin when piped, or opens $EDITOR.
+    /// The note's body. Optional: a title on its own is a note. Without this, jot reads stdin
+    /// when piped, or opens $EDITOR.
     #[arg(short = 'm', long)]
     message: Option<String>,
     /// Reply to this note, joining its thread.
@@ -229,7 +230,7 @@ struct EditArgs {
     /// Replace the title.
     #[arg(short, long, conflicts_with = "no_title")]
     title: Option<String>,
-    /// Remove the title.
+    /// Remove the title. Refused if it would leave the note with no title and no body.
     #[arg(long)]
     no_title: bool,
     /// Replace the body. Without this or --title, jot opens $EDITOR.
@@ -492,8 +493,9 @@ fn new(workspace: &mut Workspace, args: &NewArgs, cli: &Cli, style: &Style) -> R
             let edited = editor::edit(workspace.schema(), &seed).map_err(Failure::runtime)?;
             if edited.is_empty() {
                 // A note that was never written is the failure this app exists to prevent — but a
-                // deliberately empty buffer is how every editor-driven tool says "cancel".
-                eprintln!("jot: empty body, nothing written");
+                // buffer left wholly untouched is how every editor-driven tool says "cancel". A
+                // title with no body is not that: it is a capture, and it gets written.
+                eprintln!("jot: nothing typed, nothing written");
                 return Ok(());
             }
 
@@ -511,8 +513,10 @@ fn new(workspace: &mut Workspace, args: &NewArgs, cli: &Cli, style: &Style) -> R
         }
     };
 
+    // A note needs a title *or* a body; neither is how you cancel. The title alone is enough,
+    // because a title is what a captured thought starts as.
     if draft.is_empty() {
-        eprintln!("jot: empty body, nothing written");
+        eprintln!("jot: no title and no body, nothing written");
         return Ok(());
     }
 
@@ -663,8 +667,8 @@ fn edit(
     }
 
     // No flags means "open it": that is what `jot edit <id>` reads as.
+    let note = load(workspace, id)?;
     if change.is_empty() {
-        let note = load(workspace, id)?;
         let seed = editor::seed(&note.frontmatter, &note.body, &workspace.manifest().schema);
         let edited = editor::edit(workspace.schema(), &seed).map_err(Failure::runtime)?;
         if edited.unchanged {
@@ -680,6 +684,18 @@ fn edit(
         };
     }
 
+    // The same rule `new` capture applies, applied to what the note would become: a title *or* a
+    // body, either one on its own being enough. Emptying both is not an edit anyone means to make
+    // — `jot remove` is how a note goes away — so it is refused rather than written.
+    if would_be_blank(&note, &change) {
+        eprintln!("jot: that would leave no title and no body; nothing written");
+        eprintln!(
+            "hint: `jot remove {}` is how a note goes away",
+            style.show(id)
+        );
+        return Ok(());
+    }
+
     let note = workspace.edit(id, change).map_err(anyhow::Error::from)?;
     if cli.json {
         emit(&output::note_json(&note, state_of(workspace, id)))?;
@@ -687,6 +703,23 @@ fn edit(
         println!("{}", style.show(note.id));
     }
     Ok(())
+}
+
+/// Whether applying `change` would leave the note with neither a title nor a body.
+///
+/// Both halves have to be read through the change, not off the file: `--no-title` on a note whose
+/// body is already blank empties it just as surely as `-m ""` on an untitled one does.
+fn would_be_blank(note: &Note, change: &Edit) -> bool {
+    use jot_core::query::Field;
+
+    let title = match &change.title {
+        Field::Unchanged => note.frontmatter.title.as_deref(),
+        Field::Cleared => None,
+        Field::Set(title) => Some(title.as_str()),
+    };
+    let body = change.body.as_deref().unwrap_or(&note.body);
+
+    title.unwrap_or_default().trim().is_empty() && body.trim().is_empty()
 }
 
 /// An editor round-trip states every field, so absence means "removed", not "unchanged".
