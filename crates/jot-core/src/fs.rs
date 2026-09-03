@@ -316,7 +316,20 @@ pub fn slugify(title: &str) -> String {
 /// absent vault root is a real fault (the vault moved, or the caller has the wrong path), not the
 /// ordinary empty case; an existing but empty root yields an empty vector.
 pub fn live_note_paths(root: &Path) -> Result<Vec<PathBuf>> {
-    note_paths_in(root)
+    Ok(live_note_entries(root)?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect())
+}
+
+/// [`live_note_paths`], keeping the size and modification time the directory read already carried.
+///
+/// On Windows a directory entry *contains* both — `FindNextFile` returns them — so
+/// [`std::fs::DirEntry::metadata`] costs nothing there, while a separate `metadata()` call per file
+/// is a syscall per file. At 10k notes that is the difference between a warm sync you notice and
+/// one you do not, and the scanner needs exactly these two numbers for every file it enumerates.
+pub(crate) fn live_note_entries(root: &Path) -> Result<Vec<NoteEntry>> {
+    note_entries_in(root)
 }
 
 /// The trashed notes of a `jot` workspace: every `*.md` file directly inside `<root>/.jot/.trash/`.
@@ -337,6 +350,15 @@ pub fn live_note_paths(root: &Path) -> Result<Vec<PathBuf>> {
 /// would hide every trashed note in the vault behind a successful, empty result — the same
 /// reasoning that makes an absent *vault root* an error rather than an empty listing.
 pub fn trashed_note_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    Ok(trashed_note_entries(root)?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect())
+}
+
+/// [`trashed_note_paths`], with the metadata the directory read already carried. See
+/// [`live_note_entries`].
+pub(crate) fn trashed_note_entries(root: &Path) -> Result<Vec<NoteEntry>> {
     let trash = trash_dir(root);
     // `symlink_metadata`, not `metadata`: a dangling symlink is *something* standing where the
     // trash should be, and must not be mistaken for nothing being there at all.
@@ -347,8 +369,18 @@ pub fn trashed_note_paths(root: &Path) -> Result<Vec<PathBuf>> {
             source,
         }),
         // Anything that is not a listable directory fails in `read_dir`, which names the path.
-        Ok(_) => note_paths_in(&trash),
+        Ok(_) => note_entries_in(&trash),
     }
+}
+
+/// One enumerated note file, and what the directory read already knew about it.
+#[derive(Debug, Clone)]
+pub(crate) struct NoteEntry {
+    /// The file.
+    pub(crate) path: PathBuf,
+    /// Size in bytes, and modification time — `None` when the platform declined to report them,
+    /// in which case the caller must `stat` or hash rather than assume.
+    pub(crate) stat: Option<(u64, std::time::SystemTime)>,
 }
 
 /// `<root>/.jot/.trash` — the one place this module encodes the on-disk layout.
@@ -356,7 +388,7 @@ pub fn trash_dir(root: &Path) -> PathBuf {
     root.join(".jot").join(".trash")
 }
 
-fn note_paths_in(dir: &Path) -> Result<Vec<PathBuf>> {
+fn note_entries_in(dir: &Path) -> Result<Vec<NoteEntry>> {
     let read_dir_err = |source| Error::ReadDir {
         path: dir.to_path_buf(),
         source,
@@ -364,7 +396,7 @@ fn note_paths_in(dir: &Path) -> Result<Vec<PathBuf>> {
 
     let entries = std::fs::read_dir(dir).map_err(read_dir_err)?;
 
-    let mut paths = Vec::new();
+    let mut found = Vec::new();
     for entry in entries {
         let entry = entry.map_err(read_dir_err)?;
         if is_dir(&entry) {
@@ -377,10 +409,17 @@ fn note_paths_in(dir: &Path) -> Result<Vec<PathBuf>> {
         if name.starts_with('.') || !name.ends_with(NOTE_EXTENSION) {
             continue;
         }
-        paths.push(entry.path());
+        let stat = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok().map(|time| (meta.len(), time)));
+        found.push(NoteEntry {
+            path: entry.path(),
+            stat,
+        });
     }
-    paths.sort();
-    Ok(paths)
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(found)
 }
 
 /// Whether a directory entry is a directory, following symlinks — a symlink pointing at a directory

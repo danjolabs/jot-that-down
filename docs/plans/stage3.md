@@ -49,8 +49,15 @@ Three, in priority order — each one exists because it removes friction from a 
 
 1. `-m "text"` — one-liner, scriptable.
 2. stdin when piped — `echo "..." | jot new`, `pbpaste | jot new`. This is the integration point.
-3. `$EDITOR` otherwise — opens a template with the frontmatter pre-filled, saves on exit, discards on
-   an empty body.
+3. `$EDITOR` otherwise — opens a template with the frontmatter pre-filled, saves on exit, discards
+   only on an untouched buffer.
+
+**A title is enough; the body is the optional half.** Dogfooding found the discard rule backwards:
+the title is the field that always gets filled in, and a titled note with nothing under it — a
+thought parked to be written later — was being thrown away as "empty". So `jot new` writes whenever
+*either* half has something in it, and cancels only when neither does. `jot edit` holds the same
+invariant from the other side: an edit that would leave a note with no title and no body is refused,
+because `jot remove` is how a note goes away.
 
 A note that is never written is the failure mode this app exists to prevent. `jot new` with a piped
 body should complete in well under 100 ms, and that budget is a real constraint on stage 4's `sync()`.

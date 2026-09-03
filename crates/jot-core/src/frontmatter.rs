@@ -1190,6 +1190,96 @@ fn relation(
     }
 }
 
+// =============================================================================================
+// The index's JSON projection
+// =============================================================================================
+
+/// The whole frontmatter block as a JSON object, keyed by the **key as written**.
+///
+/// This is `notes.raw` from `docs/plans/stage4.md`, and it lives here because this is the module
+/// that knows what a frontmatter block is — not because [`Frontmatter`] holds it. It deliberately
+/// **does not**: in memory an unknown key keeps its exact source text, which is what makes a write
+/// splice it back byte-for-byte. The index gets a queryable projection instead, and a YAML→JSON
+/// flattening that would be unacceptable in the file (an anchor resolved, a block scalar folded
+/// into one string) is fine in a cache that is rebuilt from the file.
+///
+/// Every key is here — declared, undeclared, relation, title alike — which is what lets
+/// `Problem::UndeclaredKey` be recomputed from the index against whatever the manifest declares
+/// *now*, with no `undeclared` column and no migration when a key becomes declared.
+///
+/// # Errors
+///
+/// Whatever [`split_document`] and the YAML parser raise, each naming `path`.
+pub(crate) fn raw_json(path: &Path, bytes: &[u8]) -> Result<String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::NotUtf8 {
+        path: path.to_path_buf(),
+    })?;
+    let interior = split_document(path, text)?.interior;
+    let map = parse_interior_mapping(path, interior)?;
+
+    let mut object = serde_json::Map::new();
+    for (key, value) in map {
+        // A non-string key never reaches here — `Frontmatter::from_interior` refuses the block
+        // first — but this function is called on its own, so it renders one rather than dropping
+        // it. Dropping is the one thing `raw` must not do: it is the undeclared set's source.
+        let name = match &key {
+            Value::String(s) => s.clone(),
+            other => scalar_text(other),
+        };
+        object.insert(name, json_of(&value));
+    }
+    serde_json::to_string(&serde_json::Value::Object(object)).map_err(|e| {
+        Error::SerializeFrontmatter {
+            key: String::from("<the whole block>"),
+            message: e.to_string(),
+        }
+    })
+}
+
+/// One YAML value as JSON.
+///
+/// Lossy on purpose, and only in the directions a derived cache can afford: a YAML value with no
+/// JSON counterpart becomes the text YAML would emit for it, rather than being dropped or making
+/// the whole note unindexable.
+fn json_of(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Number(n) => n
+            .as_i64()
+            .map(serde_json::Value::from)
+            .or_else(|| n.as_u64().map(serde_json::Value::from))
+            .or_else(|| {
+                n.as_f64()
+                    .and_then(serde_json::Number::from_f64)
+                    .map(serde_json::Value::Number)
+            })
+            .unwrap_or_else(|| serde_json::Value::String(n.to_string())),
+        Value::Sequence(items) => serde_json::Value::Array(items.iter().map(json_of).collect()),
+        Value::Mapping(map) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in map {
+                let name = match key {
+                    Value::String(s) => s.clone(),
+                    other => scalar_text(other),
+                };
+                object.insert(name, json_of(value));
+            }
+            serde_json::Value::Object(object)
+        }
+        other => serde_json::Value::String(scalar_text(other)),
+    }
+}
+
+/// A YAML value rendered as the text YAML would emit, trimmed of its trailing newline.
+fn scalar_text(value: &Value) -> String {
+    yaml_serde::to_string(value)
+        .unwrap_or_default()
+        .trim_end()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -39,12 +39,21 @@ pub struct Edited {
 }
 
 impl Edited {
-    /// Whether the body is empty or only whitespace.
+    /// Whether nothing at all was typed: no title, and a body that is empty or only whitespace.
     ///
-    /// `jot new` discards on this, which is why "empty" has to include the newline every editor
-    /// leaves behind.
+    /// A title with no body is a note worth keeping — it is how most captures start, and
+    /// dogfooding says the title is the field that always gets filled in. So the discard test is
+    /// about the buffer as a whole, not the body alone. "Empty" has to include the newline every
+    /// editor leaves behind, or a buffer nobody touched would look written-in.
     pub fn is_empty(&self) -> bool {
         self.body.trim().is_empty()
+            && self
+                .frontmatter
+                .title
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
     }
 }
 
@@ -274,5 +283,27 @@ mod tests {
             unchanged: false,
         };
         assert!(!written.is_empty());
+    }
+
+    /// The title is the field that always gets filled in, so it alone makes a buffer worth saving.
+    #[test]
+    fn a_title_with_no_body_is_not_empty() {
+        let mut frontmatter = Frontmatter::new();
+        frontmatter.title = Some("a thought I have not written yet".into());
+        let titled = Edited {
+            frontmatter,
+            body: "\n".into(),
+            unchanged: false,
+        };
+        assert!(!titled.is_empty());
+
+        let mut blank = Frontmatter::new();
+        blank.title = Some("   ".into());
+        let whitespace = Edited {
+            frontmatter: blank,
+            body: "\n".into(),
+            unchanged: false,
+        };
+        assert!(whitespace.is_empty(), "a whitespace title is no title");
     }
 }

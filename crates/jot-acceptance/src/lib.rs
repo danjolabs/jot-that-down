@@ -281,6 +281,131 @@ fn collect_tree(root: &Path, dir: &Path, out: &mut Vec<String>) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The index as a black-box artifact, and the vault as bytes around it (stage 4)
+// ---------------------------------------------------------------------------------------------
+//
+// Stage 4 puts a file in `.jot/` that every earlier stage's "a read pass writes nothing" check
+// would flag. The suite has to be able to say two different things:
+//
+//   * "no *note* changed" — the rule that survives stage 4 unchanged, and
+//   * "the index is the only thing that appeared" — the rule stage 4 adds.
+//
+// So the exclusion is named once, here, rather than re-spelled per test. The names come from
+// `stage4.md`'s schema block and `workspace::GITIGNORE`, which already excludes `index.db*`.
+
+/// `.jot/index.db` — the one path `stage4.md` and `overview.md` both name.
+pub fn index_db_path(root: &Path) -> PathBuf {
+    root.join(".jot").join("index.db")
+}
+
+/// Whether a workspace-relative, forward-slashed path is an index artifact: the database itself,
+/// or a WAL/SHM sidecar. `journal_mode=WAL` is a stage-4 work item, so the sidecars are expected.
+pub fn is_index_artifact(rel: &str) -> bool {
+    rel.starts_with(".jot/index.db") || rel == ".jot/tmp" || rel.starts_with(".jot/tmp/")
+}
+
+/// Every file under `root` as `(relative path, bytes)`, sorted, **excluding index artifacts and
+/// the staging directory**.
+///
+/// This is the "a scan wrote nothing" observable for stage 4: the notes, the manifest, and the
+/// `.gitignore`, byte for byte.
+pub fn vault_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    walk_files(root, root, &mut |rel, path| {
+        if !is_index_artifact(&rel) {
+            out.push((rel, fs::read(path).unwrap_or_default()));
+        }
+    });
+    out.sort();
+    out
+}
+
+/// Every file under `root` as `(relative path, len, mtime)`, sorted, excluding index artifacts.
+///
+/// Bytes alone would not catch a scan that rewrote a file with identical contents, which is a real
+/// way to lose the "strictly read-only" property: `git status` stays clean but every backup tool
+/// and every `(size, mtime)` fast path in the world sees a change.
+pub fn vault_stats(root: &Path) -> Vec<(String, u64, Option<std::time::SystemTime>)> {
+    let mut out = Vec::new();
+    walk_files(root, root, &mut |rel, path| {
+        if is_index_artifact(&rel) {
+            return;
+        }
+        let meta = fs::metadata(path).unwrap_or_else(|e| panic!("stat {}: {e}", path.display()));
+        out.push((rel, meta.len(), meta.modified().ok()));
+    });
+    out.sort();
+    out
+}
+
+fn walk_files(root: &Path, dir: &Path, visit: &mut impl FnMut(String, &Path)) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => panic!("read_dir {}: {e}", dir.display()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .expect("walked path is under root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if path.is_dir() {
+            walk_files(root, &path, visit);
+        } else {
+            visit(rel, &path);
+        }
+    }
+}
+
+/// A file's modification time.
+pub fn mtime_of(path: &Path) -> std::time::SystemTime {
+    fs::metadata(path)
+        .unwrap_or_else(|e| panic!("stat {}: {e}", path.display()))
+        .modified()
+        .unwrap_or_else(|e| panic!("mtime of {}: {e}", path.display()))
+}
+
+/// Set a file's modification time, which is how this suite forges the `(size, mtime_ns)` fast
+/// path's two inputs without waiting on the clock.
+pub fn set_mtime(path: &Path, when: std::time::SystemTime) {
+    let file = fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|e| panic!("open {} for mtime: {e}", path.display()));
+    file.set_modified(when)
+        .unwrap_or_else(|e| panic!("set mtime on {}: {e}", path.display()));
+}
+
+/// Bump a file's mtime forward by `secs` without touching a byte of it — "touching a file without
+/// changing its content", stated exactly.
+pub fn touch_forward(path: &Path, secs: u64) {
+    let when = mtime_of(path) + std::time::Duration::from_secs(secs);
+    set_mtime(path, when);
+}
+
+/// A UUIDv7-shaped id built from a millisecond timestamp and a counter, so a synthetic vault has
+/// ids that sort in creation order and decode to a real `created_at`.
+///
+/// Generated here rather than with the `uuid` crate for the reason the version checks above give:
+/// a second `uuid` major in the lockfile would make this crate's ids a different type from
+/// `jot-core`'s. The layout is RFC 9562 §5.7 — 48 bits of milliseconds, version 7, variant 0b10 —
+/// and [`is_uuid_v7`] is asserted against the output.
+pub fn synthetic_v7(millis: u64, counter: u32) -> String {
+    let ms = millis & 0xffff_ffff_ffff;
+    // The counter goes in twice — the low 12 bits of `rand_a` and all 32 bits of `rand_b`'s tail —
+    // so ids stay distinct well past anything the perf fixture generates, and stay ordered.
+    format!(
+        "{:08x}-{:04x}-7{:03x}-8{:03x}-{:012x}",
+        u32::try_from(ms >> 16).expect("48-bit ms, top 32 bits"),
+        (ms & 0xffff) as u16,
+        counter & 0x0fff,
+        (counter >> 12) & 0x0fff,
+        u64::from(counter),
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
 // UUID shape, checked without taking a `uuid` dependency
 // ---------------------------------------------------------------------------------------------
 //
@@ -627,6 +752,85 @@ mod harness_self_tests {
              interrupted-write criterion cannot be tested this way here"
         );
         assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
+
+    #[test]
+    fn synthetic_v7_ids_are_v7_shaped_distinct_and_ordered() {
+        let a = synthetic_v7(1_800_000_000_000, 0);
+        let b = synthetic_v7(1_800_000_000_000, 1);
+        let c = synthetic_v7(1_800_000_000_001, 0);
+        for id in [&a, &b, &c] {
+            assert!(is_uuid_v7(id), "{id} is not a v7-shaped id");
+        }
+        assert!(a < b && b < c, "{a} {b} {c} are not in generation order");
+        let many: std::collections::BTreeSet<String> = (0..10_000)
+            .map(|i| synthetic_v7(1_800_000_000_000 + u64::from(i) / 4, i))
+            .collect();
+        assert_eq!(many.len(), 10_000, "the generator collides at perf scale");
+    }
+
+    #[test]
+    fn the_vault_walkers_exclude_index_artifacts_and_include_notes() {
+        assert!(is_index_artifact(".jot/index.db"));
+        assert!(is_index_artifact(".jot/index.db-wal"));
+        assert!(is_index_artifact(".jot/index.db-shm"));
+        assert!(is_index_artifact(".jot/tmp/staged.tmp"));
+        assert!(!is_index_artifact(".jot/workspace.toml"));
+        assert!(!is_index_artifact(&format!(".jot/.trash/{TRASHED_NOTE}")));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("v");
+        fs::create_dir_all(root.join(".jot").join(".trash")).unwrap();
+        fs::write(root.join("a.md"), b"note").unwrap();
+        fs::write(root.join(".jot").join("workspace.toml"), b"manifest").unwrap();
+        fs::write(index_db_path(&root), b"sqlite").unwrap();
+        fs::write(root.join(".jot").join("index.db-wal"), b"wal").unwrap();
+
+        let names: Vec<String> = vault_bytes(&root).into_iter().map(|(p, _)| p).collect();
+        assert_eq!(
+            names,
+            vec!["a.md".to_string(), ".jot/workspace.toml".to_string()].also_sorted()
+        );
+        assert_eq!(
+            vault_stats(&root)
+                .into_iter()
+                .map(|(p, ..)| p)
+                .collect::<Vec<_>>(),
+            names,
+            "both walkers must agree on what counts as vault content"
+        );
+    }
+
+    /// A trait local to the self-test, so the expectation above is written in the order a person
+    /// thinks of it rather than in sorted order.
+    trait AlsoSorted {
+        fn also_sorted(self) -> Self;
+    }
+    impl AlsoSorted for Vec<String> {
+        fn also_sorted(mut self) -> Self {
+            self.sort();
+            self
+        }
+    }
+
+    #[test]
+    fn set_mtime_moves_the_stamp_without_moving_a_byte() {
+        // The zero-reparse criterion rests entirely on this: if `touch_forward` silently did
+        // nothing, the criterion test would assert "unchanged" about a file nothing had touched.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("n.md");
+        fs::write(&path, b"contents").unwrap();
+
+        let before = mtime_of(&path);
+        touch_forward(&path, 120);
+        let after = mtime_of(&path);
+
+        assert!(
+            after > before,
+            "the mtime did not move ({before:?} -> {after:?}); this platform cannot express the \
+             touch the zero-reparse criterion is about"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"contents");
     }
 
     #[test]

@@ -4,14 +4,13 @@ members = ["crates/*"]
 default-members = ["crates/jot-core", "crates/jot-cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.4-a"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/danjolabs/jot-that-down"
 
 [workspace.dependencies]
-# Chosen in docs/plans/runs/stage1/yaml-crate.md (T2.1, 2026-08-30). Read that file before
-# changing anything here — each of these is a decision with a written rationale.
+blake3 = "1.8"
 chrono = { version = "0.4.45", default-features = false, features = [
     "clock",
     "serde",
@@ -19,28 +18,21 @@ chrono = { version = "0.4.45", default-features = false, features = [
 ] }
 directories = "6.0.0"
 indexmap = { version = "2.14", features = ["serde"] }
-# markdown-rs. Chosen in docs/plans/runs/stage1b/markdown-crate.md (2026-08-31): it is an AST
-# parser, never a renderer, so the body stays a slice of the original bytes. Stage 3 needs it
-# anyway for `[[uuid]]` extraction.
 markdown = "1.0.0"
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
 thiserror = "2.0.20"
 toml = "1.1"
-# `v4` for workspace ids, `v7` for note ids. The asymmetry is deliberate and argued in
-# `workspace::Manifest::id`: only a note has its creation time and its ordering read back out of
-# its identity, and v7's timestamp prefix is what makes a short id long.
 uuid = { version = "1.26", features = ["serde", "v4", "v7"] }
 yaml_serde = "0.10.7"
 
-# Surface-only, added for stage 4's CLI. None of these may reach `jot-core`: `anyhow` is the
-# binaries' error type by convention (`overview.md`), and a `clap` or `serde_json` type in a core
-# signature would make the domain depend on how one surface happens to present it.
+# Surfaces only. None of these may reach `jot-core`
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
-serde_json = "1.0"
 
-# dev only
+# Dev only.
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.27"

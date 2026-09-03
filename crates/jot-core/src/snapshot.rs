@@ -199,6 +199,20 @@ pub struct SyncReport {
     pub unchanged: usize,
     /// Problems the scan is holding. Not a diff — the current scan's full list.
     pub problems: Vec<Problem>,
+    /// How many note files this sync opened, because `(size, mtime_ns)` did not match the index.
+    ///
+    /// Not a diff. Every sync enumerates every path — a directory read is how "which files exist"
+    /// is answered at all — so this is the number the index actually saves.
+    pub files_read: usize,
+    /// How many of those it went on to **parse** into a `Note`, because the content hash did not
+    /// match either.
+    ///
+    /// The expensive half, and the one stage 4's "touching a file without changing its content
+    /// produces zero reparses" is about. It exists because a criterion nothing can observe is a
+    /// criterion nothing tests: `unchanged` counts records equal to the last scan's, which a
+    /// scanner that reparses the whole vault every time also reports — so it cannot tell
+    /// "answered from the index" from "read the file again".
+    pub reparsed: usize,
 }
 
 impl SyncReport {
@@ -212,6 +226,15 @@ impl SyncReport {
     #[must_use]
     pub fn changed(&self) -> usize {
         self.added.len() + self.updated.len() + self.removed.len()
+    }
+
+    /// Whether this sync answered entirely from the index — nothing opened, nothing parsed.
+    ///
+    /// Zero of both on a vault where nothing moved, which is the whole of stage 4's performance
+    /// story.
+    #[must_use]
+    pub fn was_free(&self) -> bool {
+        self.files_read == 0 && self.reparsed == 0
     }
 }
 
@@ -274,40 +297,60 @@ impl Snapshot {
             Ok(bytes) => bytes,
             Err(source) => return self.problem_at(path, &source.to_string()),
         };
-        let note = match Note::parse_at(schema, path, &bytes) {
-            Ok(note) => note,
+        let record = match record_at(schema, path, state, mtime(path), &bytes) {
+            Ok(record) => record,
             Err(err) => return self.problem_at(path, &err.to_string()),
         };
 
-        if let Some(kept) = self.records.get(&note.id) {
+        if let Some(kept) = self.records.get(&record.meta.id) {
             self.file_problems.push(Problem::DuplicateId {
-                id: note.id,
+                id: record.meta.id,
                 kept: kept.path.clone(),
                 ignored: path.to_path_buf(),
             });
             return;
         }
+        self.records.insert(record.meta.id, record);
+    }
 
-        let undeclared = note
-            .frontmatter
-            .unknown()
-            .iter()
-            .map(|key| key.name())
-            .filter(|name| !schema.contains(name))
-            .map(str::to_owned)
-            .collect();
+    /// Assemble a snapshot from records the index handed back and files the scanner read.
+    ///
+    /// The scanner's entry point. It exists because a warm `sync()` does not read most of its
+    /// records from disk any more, so the ingest loop above is no longer the only way in — but
+    /// [`Snapshot::derive_roots`] still is, which is what keeps the derived half identical
+    /// whichever way a record arrived.
+    pub(crate) fn from_parts(
+        records: BTreeMap<NoteId, Record>,
+        file_problems: Vec<Problem>,
+    ) -> Snapshot {
+        let mut snapshot = Snapshot {
+            records,
+            file_problems,
+            problems: Vec::new(),
+        };
+        snapshot.derive_roots();
+        snapshot
+    }
 
-        self.records.insert(
-            note.id,
-            Record {
-                meta: note.meta(),
-                path: path.to_path_buf(),
-                state,
-                edited_at: mtime(path),
-                links: distinct_targets(&note.body),
-                undeclared,
-            },
-        );
+    /// Every note's derived root, for the index to store.
+    ///
+    /// A note whose walk found no parent, or a cycle, roots at itself — so this never yields a
+    /// `None`, which is what lets `notes.root_id` be `NOT NULL`.
+    pub(crate) fn roots(&self) -> Vec<(NoteId, NoteId)> {
+        self.records
+            .values()
+            .map(|record| (record.meta.id, record.meta.root.unwrap_or(record.meta.id)))
+            .collect()
+    }
+
+    /// Put one already-read record in place of whatever the snapshot held for its id.
+    ///
+    /// The mutation path's half of [`Snapshot::reindex`]: `Workspace` has just written the file
+    /// and parsed it once to update the index, and re-reading it here to do the same work again
+    /// would make every `jot new` pay for two reads of the note it just wrote.
+    pub(crate) fn replace(&mut self, record: Record) {
+        self.records.insert(record.meta.id, record);
+        self.derive_roots();
     }
 
     /// Fill in every record's derived `root`, and rebuild the problem list.
@@ -852,8 +895,43 @@ fn distinct_targets(body: &str) -> Vec<NoteId> {
         .collect()
 }
 
+/// One note's bytes as a [`Record`].
+///
+/// Shared by the cold scan above and by the index scanner, so that a record read from a file has
+/// exactly one definition however it was reached. `root` is left `None`: no note's own bytes can
+/// answer it, and [`Snapshot::derive_roots`] fills it for every record at once.
+///
+/// # Errors
+///
+/// Whatever [`Note::parse_at`] raises, naming `path`.
+pub(crate) fn record_at(
+    schema: &FrontmatterSchema,
+    path: &Path,
+    state: State,
+    edited_at: Option<DateTime<Utc>>,
+    bytes: &[u8],
+) -> Result<Record> {
+    let note = Note::parse_at(schema, path, bytes)?;
+    let undeclared = note
+        .frontmatter
+        .unknown()
+        .iter()
+        .map(|key| key.name())
+        .filter(|name| !schema.contains(name))
+        .map(str::to_owned)
+        .collect();
+    Ok(Record {
+        meta: note.meta(),
+        path: path.to_path_buf(),
+        state,
+        edited_at,
+        links: distinct_targets(&note.body),
+        undeclared,
+    })
+}
+
 /// A file's modification time, or `None` when the platform will not report one.
-fn mtime(path: &Path) -> Option<DateTime<Utc>> {
+pub(crate) fn mtime(path: &Path) -> Option<DateTime<Utc>> {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
         .ok()

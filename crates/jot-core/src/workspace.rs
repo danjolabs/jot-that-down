@@ -61,6 +61,7 @@ use uuid::Uuid;
 use crate::error::{Error, Result};
 use crate::frontmatter::{FieldType, FrontmatterEntry, FrontmatterSchema, Role};
 use crate::fs::{self, FilenameSlug};
+use crate::index::{self, Index};
 use crate::link::{self, Link};
 use crate::note::{Note, NoteId, NoteMeta};
 use crate::query::{
@@ -83,6 +84,9 @@ const TMP_DIR: &str = "tmp";
 
 /// The trash directory, inside [`JOT_DIR`]. Kept in step with [`crate::fs::trash_dir`].
 const TRASH_DIR: &str = ".trash";
+
+/// The index database, inside [`JOT_DIR`]. Already covered by the `.gitignore` this module writes.
+const INDEX_FILE: &str = "index.db";
 
 /// Contents of `.jot/.gitignore`.
 ///
@@ -473,12 +477,20 @@ impl std::fmt::Display for Warning {
 /// answers from it and every mutation updates it, so the seam the whole project rests on is the
 /// same one it will be when a database is behind it: **surfaces call these methods and never touch
 /// the filesystem.**
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Clone`, `PartialEq` and `Eq` are **deliberately absent**, and their absence is the whole of
+/// this stage's change to the public API. A workspace now owns an open SQLite connection, which is
+/// none of those things; nothing in this workspace ever cloned or compared one, so the swap stays
+/// invisible in every sense a caller can observe.
+#[derive(Debug)]
 pub struct Workspace {
     root: PathBuf,
     manifest: Manifest,
     warnings: Vec<Warning>,
+    /// The in-memory view every read answers from.
     snapshot: Snapshot,
+    /// The persistent half: change detection, and somewhere for a `Record` to live between
+    /// processes. Private to the crate, with no accessor, by design.
+    index: Index,
 }
 
 impl Workspace {
@@ -522,7 +534,7 @@ impl Workspace {
         };
 
         match Self::write_new_tree(&root, &jot, &manifest) {
-            Ok(()) => Workspace::assembled(root, manifest).synced(),
+            Ok(()) => Workspace::assembled(root, manifest)?.synced(),
             Err(e) => {
                 // `.jot/` did not exist a moment ago — this call made it — so removing it takes
                 // nothing that was not ours.
@@ -578,7 +590,7 @@ impl Workspace {
         })?;
 
         let manifest = Manifest::from_toml(&text, &manifest_path, &default_name(&root))?;
-        Workspace::assembled(root, manifest).synced()
+        Workspace::assembled(root, manifest)?.synced()
     }
 
     /// Walks up from `from` looking for a `.jot/` directory, and opens the first one found.
@@ -677,7 +689,7 @@ impl Workspace {
     }
 
     /// Build a workspace and collect whatever its manifest is worth warning about.
-    fn assembled(root: PathBuf, manifest: Manifest) -> Self {
+    fn assembled(root: PathBuf, manifest: Manifest) -> Result<Self> {
         let mut warnings = Vec::new();
         let unknown: Vec<(String, String)> = manifest
             .schema
@@ -691,7 +703,8 @@ impl Workspace {
                 entries: unknown,
             });
         }
-        Workspace {
+        let index = Index::open(&index_path_of(&root))?;
+        Ok(Workspace {
             root,
             manifest,
             warnings,
@@ -699,7 +712,8 @@ impl Workspace {
             // out. Assembling one with an empty snapshot and returning it would make every read
             // silently answer "nothing here".
             snapshot: Snapshot::default(),
-        }
+            index,
+        })
     }
 
     /// Scan the vault once, so a freshly opened workspace is never stale.
@@ -773,23 +787,70 @@ impl Workspace {
     /// *note* is a [`Problem`] on the report, not an error: one bad file must not make the vault
     /// unusable.
     pub fn sync(&mut self) -> Result<SyncReport> {
-        let fresh = Snapshot::scan(&self.manifest.schema, &self.root)?;
-        let report = fresh.diff(&self.snapshot);
+        let (fresh, cost) = index::sync(&mut self.index, &self.manifest.schema, &self.root)?;
+        let mut report = fresh.diff(&self.snapshot);
+        report.files_read = cost.read;
+        report.reparsed = cost.reparsed;
         self.snapshot = fresh;
         Ok(report)
     }
 
     /// Discard the in-memory view and build it again from the files.
     ///
-    /// Identical to [`Workspace::sync`] **in this build**, because the snapshot has no persistent
-    /// half to be wrong: every scan is a cold one. The method exists anyway, and is called by
-    /// `jot index rebuild`, because it is the operation whose meaning must not change when stage 4
-    /// puts SQLite behind this seam — at which point `sync` becomes incremental and this one stops
-    /// being its synonym. The rebuild invariant (`overview.md`) is the property that the two agree,
-    /// and it is trivially true here.
+    /// Drops every table, recreates them, and reads the whole vault back in. No longer a synonym
+    /// for [`Workspace::sync`]: from stage 4 that one is incremental, so the property that the two
+    /// agree — the rebuild invariant in `overview.md` — stopped being trivially true and started
+    /// being the thing worth testing.
+    ///
+    /// Always available as the answer to a broken index, because the database holds nothing the
+    /// notes do not.
+    ///
+    /// **Except `mtime_ns`.** Two scans of an untouched file are not guaranteed to observe the
+    /// same mtime, so `edited_at` is the one field the invariant exempts. The tempting fix — have
+    /// rebuild write mtime everywhere — spreads the lossiness instead of containing it.
     pub fn rebuild(&mut self) -> Result<SyncReport> {
-        self.snapshot = Snapshot::default();
-        self.sync()
+        let (fresh, cost) = index::rebuild(&mut self.index, &self.manifest.schema, &self.root)?;
+        let mut report = fresh.diff(&self.snapshot);
+        report.files_read = cost.read;
+        report.reparsed = cost.reparsed;
+        self.snapshot = fresh;
+        Ok(report)
+    }
+
+    /// Re-read one file into both halves of the view, after this crate has written it.
+    ///
+    /// The file is read **once**: the index scan parses it, and the record that produces is what
+    /// the snapshot takes. A note just captured is not read twice.
+    ///
+    /// A file this fails to parse is not a failed mutation — it is already on disk, and the vault
+    /// is the source of truth. The tolerant in-memory path takes over, recording a [`Problem`] the
+    /// way a scan would, and the index carries no row for it until the next [`Workspace::sync`]
+    /// reads the file again.
+    fn reindex(&mut self, id: NoteId, path: &Path, state: State) -> Result<()> {
+        match index::reindex_one(
+            &mut self.index,
+            &self.manifest.schema,
+            &self.root,
+            path,
+            state,
+        ) {
+            Ok(record) => self.snapshot.replace(record),
+            Err(_) => {
+                self.snapshot
+                    .reindex(&self.manifest.schema, id, path, state);
+                self.index.forget_all(&[id])?;
+            }
+        }
+        // A changed `reply_to` moves the root of everything beneath it, so the column follows the
+        // walk the snapshot has just redone. Only rows whose root actually moved are written.
+        self.index.set_roots(&self.snapshot.roots())
+    }
+
+    /// Drop one note from both halves of the view, after its file has gone.
+    fn forget(&mut self, id: NoteId) -> Result<()> {
+        self.snapshot.forget(id);
+        self.index.forget_all(&[id])?;
+        self.index.set_roots(&self.snapshot.roots())
     }
 
     /// The in-memory view, for this module's own tests only.
@@ -907,8 +968,7 @@ impl Workspace {
 
         let bytes = note.try_to_bytes(&self.manifest.schema)?;
         fs::atomic_write(&path, &self.tmp_dir(), &bytes)?;
-        self.snapshot
-            .reindex(&self.manifest.schema, id, &path, State::Active);
+        self.reindex(id, &path, State::Active)?;
         Ok(note)
     }
 
@@ -975,8 +1035,7 @@ impl Workspace {
                 source,
             })?;
         }
-        self.snapshot
-            .reindex(&self.manifest.schema, id, &target, state);
+        self.reindex(id, &target, state)?;
         Ok(note)
     }
 
@@ -1059,8 +1118,7 @@ impl Workspace {
             to: to.to_path_buf(),
             source,
         })?;
-        self.snapshot.reindex(&self.manifest.schema, id, to, state);
-        Ok(())
+        self.reindex(id, to, state)
     }
 
     /// Delete a note's file for good.
@@ -1085,8 +1143,7 @@ impl Workspace {
             path: path.clone(),
             source,
         })?;
-        self.snapshot.forget(id);
-        Ok(())
+        self.forget(id)
     }
 
     // =========================================================================================
@@ -1205,6 +1262,12 @@ fn jot_dir(root: &Path) -> PathBuf {
 
 fn manifest_path_of(root: &Path) -> PathBuf {
     jot_dir(root).join(MANIFEST_FILE)
+}
+
+/// Where the SQLite index lives. Deliberately inside `.jot/`, which `.jot/.gitignore` already
+/// excludes as `index.db*` — the WAL and shared-memory files land beside it.
+fn index_path_of(root: &Path) -> PathBuf {
+    jot_dir(root).join(INDEX_FILE)
 }
 
 /// Makes `path` absolute **and lexically normal** without touching the filesystem: the result
@@ -1358,6 +1421,17 @@ mod tests {
 
     /// Every path under `root`, relative and forward-slashed, sorted. Mirrors the acceptance
     /// suite's own tree walk so "the exact tree" means the same thing on both sides.
+    /// Whether a path is part of the vault, as opposed to the index it derives.
+    ///
+    /// `.jot/index.db` and its `-wal`/`-shm` companions appear on the first sync of a vault that
+    /// has notes in it. They are **not** vault content: `.jot/.gitignore` excludes them, deleting
+    /// them loses nothing, and `rebuild()` puts them back. The "a read pass wrote nothing"
+    /// assertions below are about the notes and the manifest — the files whose bytes a person
+    /// would miss — and would otherwise be asserting that jot has no cache at all.
+    fn is_vault_content(rel: &str) -> bool {
+        !rel.starts_with(".jot/index.db")
+    }
+
     fn tree(root: &Path) -> Vec<String> {
         fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).expect("read_dir").flatten() {
@@ -1402,6 +1476,10 @@ mod tests {
 
     /// The on-disk contract, read literally. A stray staging file left in `.jot/tmp/`, an
     /// `index.db` created early, or a missing `.trash/` all fail here.
+    ///
+    /// `index.db` survived stage 4 landing, and that is the point of the index being lazy: an
+    /// empty database file would be a claim that something is cached, and on an empty vault that
+    /// claim is false.
     #[test]
     fn init_produces_exactly_the_on_disk_contract() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1421,7 +1499,10 @@ mod tests {
         );
         assert!(root.join(".jot/.trash").is_dir());
         assert!(root.join(".jot/tmp").is_dir());
-        assert!(!root.join(".jot/index.db").exists(), "index.db is stage 4");
+        assert!(
+            !root.join(".jot/index.db").exists(),
+            "an empty vault has nothing to cache"
+        );
     }
 
     /// `atomic_write` stages inside `.jot/tmp/`; if a staged file were ever left behind, the very
@@ -2641,7 +2722,9 @@ type = \"relation:quote_to\"
                         .unwrap()
                         .to_string_lossy()
                         .replace('\\', "/");
-                    out.push((rel, std::fs::read(&path).unwrap()));
+                    if is_vault_content(&rel) {
+                        out.push((rel, std::fs::read(&path).unwrap()));
+                    }
                 }
             }
         }

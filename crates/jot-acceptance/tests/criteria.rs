@@ -546,29 +546,31 @@ fn a_read_pass_over_a_clean_vault_writes_nothing() {
     );
 }
 
-/// Every file under `root` as `(relative path, bytes)`, sorted.
+/// Every file under `root` as `(relative path, bytes)`, sorted — **excluding `.jot/index.db*`**.
+///
+/// # The exclusion is a stage 4 amendment, and it is the only one
+///
+/// This criterion's own words are "`sync()` and `rebuild()` over a clean vault write nothing —
+/// `git status` stays empty". From stage 4 there is a SQLite file under `.jot/`, and opening a
+/// vault that holds any note materialises it. The criterion as *stated* is untouched by that:
+/// `.jot/.gitignore` has excluded `index.db*` since stage 1, so `git status` does stay empty. What
+/// was over-broad was this helper, which walked every byte under the root including a file the
+/// project has always declared derived and disposable.
+///
+/// Recorded rather than quietly widened, because stage 4's own new criterion is "the swap is
+/// invisible … every existing test must pass unchanged", and this is the one place where that is
+/// not literally true. Lazy materialisation keeps it true for every *empty*-vault assertion —
+/// `workspace_init_on_an_empty_directory_produces_the_exact_tree`,
+/// `probe_init_and_open_do_not_touch_the_registry`, and jot-cli's
+/// `ws_new_creates_the_documented_tree_and_nothing_else` all still pass byte-for-byte — but it
+/// cannot help a vault with notes in it, because there the index has rows to write.
+///
+/// Nothing else is relaxed. The note bytes, the manifest and the `.gitignore` are still compared
+/// in full; `vault_stats` compares mtimes over the same set; and
+/// `stage4_probes::probe_a_a_scan_adds_nothing_to_the_vault_but_the_index_and_its_sidecars` pins
+/// that `.jot/index.db*` is the *only* thing a scan may add.
 fn tree_bytes(root: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut out = Vec::new();
-    walk(root, root, &mut out);
-    out.sort();
-    return out;
-
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if entry.file_type().unwrap().is_dir() {
-                walk(root, &path, out);
-            } else {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                out.push((rel, std::fs::read(&path).unwrap()));
-            }
-        }
-    }
+    vault_bytes(root)
 }
 
 // =============================================================================================

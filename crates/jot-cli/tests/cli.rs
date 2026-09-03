@@ -122,6 +122,7 @@ fn ws_new_creates_the_documented_tree_and_nothing_else() {
         assert!(vault.path().join(expected).exists(), "missing `{expected}`");
     }
     // The index is derived and disposable; creating an empty one would be a lie about that.
+    // Stage 4 keeps this true by materialising the database on the first row it has to write.
     assert!(!vault.path().join(".jot/index.db").exists());
 }
 
@@ -472,6 +473,57 @@ fn an_empty_piped_body_writes_nothing() {
         .stderr(predicates::str::contains("nothing written"));
 
     assert_eq!(count_notes(vault.path()), 0);
+}
+
+/// The title is the field that always gets filled in; the body is the optional half.
+#[test]
+fn a_title_with_no_body_is_a_note() {
+    let vault = Vault::new();
+    let id = vault.new_note(&["-t", "a thought I have not written yet"]);
+
+    let file = std::fs::read_to_string(vault.path().join(format!("{id}.md"))).unwrap();
+    assert!(
+        file.contains("title: a thought I have not written yet"),
+        "{file}"
+    );
+    assert_eq!(count_notes(vault.path()), 1);
+}
+
+#[test]
+fn an_edit_that_would_empty_a_note_writes_nothing() {
+    let vault = Vault::new();
+    let id = vault.new_note(&["-t", "a title", "-m", "a body"]);
+
+    vault
+        .cmd()
+        .args([
+            "--workspace",
+            vault.path().to_str().unwrap(),
+            "edit",
+            &id,
+            "--no-title",
+            "-m",
+            "  ",
+        ])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("nothing written"));
+
+    let file = std::fs::read_to_string(vault.path().join(format!("{id}.md"))).unwrap();
+    assert!(file.contains("title: a title"), "{file}");
+    assert!(file.contains("a body"), "{file}");
+}
+
+/// Clearing the body alone is fine — the title carries the note.
+#[test]
+fn an_edit_may_leave_a_note_with_only_a_title() {
+    let vault = Vault::new();
+    let id = vault.new_note(&["-t", "a title", "-m", "a body"]);
+    vault.run(&["edit", &id, "-m", ""]);
+
+    let file = std::fs::read_to_string(vault.path().join(format!("{id}.md"))).unwrap();
+    assert!(file.contains("title: a title"), "{file}");
+    assert!(!file.contains("a body"), "{file}");
 }
 
 #[test]

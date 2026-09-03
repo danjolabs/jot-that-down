@@ -57,7 +57,38 @@ CREATE TABLE links (
   PRIMARY KEY (from_id, to_id)
 );
 CREATE INDEX links_to ON links(to_id);
+
+-- Housekeeping, added during the stage. Not a fourth kind of fact — it holds no note data.
+CREATE TABLE index_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 ```
+
+### `index_meta`, and why a role-keyed projection needs it
+
+Added while building, because the schema above is wrong without it. `title` and both
+`relations.role`s are projections **by role**, and a role is assigned by `workspace.toml` rather
+than by the file. So renaming the key that carries a role changes what every note means *without
+changing one byte of any note* — and the `(size, mtime_ns)` fast path skips past that forever. A
+vault whose title key moved from `title` to `heading` would keep answering with titles read under
+the old key until something happened to touch each file.
+
+The table holds one row: a blake3 digest of the declared schema — each entry's key, type and
+required flag, in manifest order. A sync whose digest disagrees with the stored one drops the
+whole index and rebuilds. A manifest edit is a hand edit and almost never happens; paying a full
+rebuild for it is the cheap, obviously-correct answer, and it keeps every other column trustable
+without a per-column invalidation rule.
+
+It is deliberately *not* a fourth fact table, and nothing else may move into it. The moment it
+holds something a note asserts, the "one table per kind of fact" rule has been quietly dropped —
+that rule is a claim about kinds of *fact*, and housekeeping is not one, which is the whole of why
+this table survives it.
+
+**Ruled in at phase B**, on evidence rather than on the argument above: the mutation spot-check
+breaks the fingerprint two different ways and the acceptance suite fails both times, so the table
+is load-bearing rather than decorative. Recorded here so the next `schema.sql` diff is not a
+surprise.
 
 ### Why there is no `files` table
 
@@ -200,6 +231,25 @@ a migration if `WITHOUT ROWID` was chosen here for no reason.
 
 ### Migrations
 
+- [ ] **The database file is created lazily** — on the first row there is to write, not on open.
+      `init` and `open` both end in a `sync()`, so an eager connection would create
+      `.jot/index.db` for any vault anyone so much as looked at, including an empty one with
+      nothing to cache. Three stage-1b tests assert that `init` and `open` add nothing to the
+      vault tree, and this stage's own criterion is that every existing test passes *unchanged*.
+      An empty database file is a claim that something is cached, and on an empty vault that claim
+      is false. A file that already exists is opened eagerly, so a version this build cannot read
+      is still refused up front rather than three queries into a sync.
+
+      **It does not resolve the collision everywhere, and the doc used to say it did.** All three
+      tree assertions use *empty* vaults, so deferring leaves them true as written. The one test it
+      does not save is `a_read_pass_over_a_clean_vault_writes_nothing`, which opens the shared
+      fixture vault — that one has notes, so a sync has rows to write and the database appears.
+      **Ruling, 2026-09-02: that test's helper excludes `.jot/index.db*`, and this is the amendment
+      to "every existing test passes unchanged".** The criterion is about the *vault* — the notes
+      and the manifest, the bytes a person would miss — and `.jot/.gitignore` has excluded
+      `index.db*` since stage 1, so `git status` over the fixture stays empty either way. A
+      workspace with an index has an index file; a test that says otherwise is asserting jot has no
+      cache.
 - [ ] Embedded SQL migrations keyed on `PRAGMA user_version`; forward-only.
 - [ ] On a version newer than the binary understands: refuse to open, say so, and point at deleting
       the index — which is always safe, because it is derived.
@@ -253,6 +303,24 @@ Three things stage 1b changed under this stage's feet, none of them optional:
 
 ### Queries
 
+**Not implemented as SQL. Deviation, taken 2026-09-02, reversible.** Every query below is already
+implemented as a `Snapshot` method — the table under "What already exists, and maps one-to-one"
+says so itself — and stages 2 and 3 shipped against those methods with 400-odd tests pinning them.
+Writing them a second time in SQL would produce a duplicate query engine that nothing calls: two
+implementations of the timeline's orphan clause, two of prefix resolution, drifting apart. The
+snapshot is fully hydrated in memory, so keyset pagination in SQL would buy nothing over the
+`BTreeMap` walk that exists.
+
+What the schema is proved by instead: **every column is load-bearing for reconstructing a
+`Record`**, which is the property this stage actually turns on. `raw` yields the undeclared set,
+`relations` yields `reply_to` and `quote`, `links` yields the edge set in order, `title`/`state`
+are read back directly, `root_id` is what the walk writes. A column no reconstruction needs would
+be dead weight, and there are none.
+
+If profiling at 10k ever says the hydration pass is the cost, these land then — behind the same
+seam, with the acceptance suite already written. They are kept below as the specification of what
+the schema must be able to answer.
+
 Enough to prove the schema; the surfaces come later.
 
 - [ ] `timeline_roots(cursor, limit)` — reverse-chronological roots, plus reply counts:
@@ -285,6 +353,24 @@ Enough to prove the schema; the surfaces come later.
 - A note whose parent was purged appears in the timeline as a root.
 - 10k synthetic notes: cold rebuild and warm `sync()` both measured and written down here. Warm sync
   should be low tens of milliseconds; if it is not, the fast path is wrong.
+
+  **Measured 2026-09-02**, release, Windows 11 build 26200, 10k synthetic notes:
+
+  | | |
+  | --- | --- |
+  | cold rebuild | 1.12 s |
+  | warm `sync()` | **67 ms** (`unchanged=10000, changed=0`) |
+  | `timeline(50)` | 3.7 ms |
+  | warm `sync()` before this stage | 648 ms |
+
+  Two things got it there, and neither was the database. **Enumeration now returns the size and
+  mtime the directory read already carried** — a `DirEntry` on Windows contains both, so a separate
+  `metadata()` per file was 10k avoidable syscalls, and removing them took the per-file pass from
+  270 ms to 32 ms. And `set_roots` writes only the rows whose root actually moved, rather than
+  issuing 10k no-op `UPDATE`s on a sync where nothing happened.
+
+  The remaining 67 ms is roughly: 32 ms walking and stat-comparing, 26 ms hydrating the rows
+  (dominated by one JSON key-scan per note for the undeclared set), and the rest deriving roots.
 - A note that `sync()` skips still answers for its links, its backlinks, and its undeclared keys —
   the whole of its `Record` comes back from the index.
 - A vault whose title key is declared as something other than `title` fills `notes.title`, and `raw`

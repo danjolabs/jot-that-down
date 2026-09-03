@@ -13,7 +13,7 @@ git.
 
 ## Status
 
-**Usable from the command line.** Stages 1–3 of [`docs/plans/overview.md`](docs/plans/overview.md)
+**Usable from the command line.** Stages 1–4 of [`docs/plans/overview.md`](docs/plans/overview.md)
 are built.
 
 | | |
@@ -21,16 +21,28 @@ are built.
 | ✅ Vault, frontmatter round-trip, atomic writes | stages 1 and 1b |
 | ✅ Note lifecycle, thread algebra, links | stage 2 |
 | ✅ `jot` CLI | stage 3 |
-| ⏳ SQLite index | stage 4, **deliberately deferred** — see below |
+| ✅ SQLite index, incremental sync, deterministic rebuild | stage 4 |
 | ⏳ TUI, desktop app, user-declared schema fields | stages 5–7 |
 
-Stages 2 and 3 were built **before** stage 4. Nothing in them needs a database: threads, reference
-resolution, links, and prefix resolution are all functions of the set of notes in the vault, and the
-index is a speed layer over that set. So `jot-core` reads the vault into memory instead, behind the
-same public API SQLite will sit behind later.
+The version is `0.0.<stage>-<letter>` while this is a prototype — the patch is the stage number, the
+letter is a round of change made after that stage landed, and a bare `0.0.<stage>` means the stage is
+sealed. `jot --version` therefore says which stage the binary on your PATH came from. Nothing is
+published to crates.io at these versions; see the versioning convention in
+[`docs/plans/overview.md`](docs/plans/overview.md).
 
-The practical consequence: **every command rescans the whole vault.** That is instant at hundreds of
-notes and is what stage 4 exists to fix. It is a performance gap, not a correctness one.
+Stages 2 and 3 were built **before** stage 4, because nothing in them needs a database: threads,
+reference resolution, links and prefix resolution are all functions of the set of notes in the
+vault, and the index is a speed layer over that set. `jot-core` read the whole vault into memory
+instead, behind the same public API SQLite now sits behind.
+
+Stage 4 made that layer real without changing the API above it. A command no longer rescans the
+vault: `(size, mtime_ns)` decides whether a file is worth opening and a blake3 hash decides whether
+to believe it, so a note nothing has touched is answered from the index. At 5,000 notes on Windows
+that is the difference between **~700 ms per command and ~80 ms**, and the 700 ms is not gone —
+it is what the first run after `rm .jot/index.db` still costs.
+
+The index is derived and disposable. Deleting it loses nothing, `jot index rebuild` recreates it
+from the files, and nothing is ever stored there that the markdown does not already say.
 
 ## Install
 
@@ -54,7 +66,8 @@ cd ~/notes                   # commands below discover it by walking up
 
 jot new -t "First thought" -m "Something worth keeping."
 echo "captured from a pipe" | jot new
-jot new                      # opens $EDITOR; an empty body cancels
+jot new -t "A title alone"   # a title is a note; the body is optional
+jot new                      # opens $EDITOR; an untouched buffer cancels
 
 jot list                     # thread roots, newest first
 jot list --flat              # replies too
@@ -121,6 +134,7 @@ fences and inline code. `jot links <id>` shows outgoing links, backlinks, and qu
     workspace.toml     # identity and config
     .trash/            # trashed notes keep their filename
     tmp/               # staging for atomic writes
+    index.db           # derived and disposable; appears on the first note
     .gitignore         # index.db*, tmp/
   01a03d4c-….md
   01a03d4d-…_first_thoughts.md
@@ -147,7 +161,7 @@ mistake this tool could make quietly.
 
 ```sh
 cargo test --workspace                              # unit and integration
-cargo test -p jot-acceptance --features stage1b     # executable acceptance criteria
+cargo test -p jot-acceptance --features stage4      # executable acceptance criteria
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
@@ -155,6 +169,39 @@ cargo fmt --check
 `crates/jot-acceptance` is the executable form of each stage's acceptance criteria. It is
 deliberately owned by a different agent than the implementation, so the tests cannot be weakened to
 fit the code — see [`docs/plans/orchestration.md`](docs/plans/orchestration.md).
+
+### Dependencies
+
+`Cargo.toml` is a manifest and stays one; the reasoning lives here. Every version is a caret
+requirement, so `cargo update` moves the lock and only a `0.x` crate needs the manifest edited to
+gain a minor release.
+
+| Crate | Why this one, rather than a default |
+| --- | --- |
+| `blake3` | `notes.content_hash`. The `(size, mtime_ns)` fast path is a *hint*; the hash is what makes trusting it safe. Named in `stage4.md`'s schema. |
+| `chrono` | Times. `default-features = false` because the crate's default pulls in more than dates. |
+| `directories` | The OS config directory, for the workspace registry. |
+| `indexmap` | Insertion-ordered maps. Frontmatter key order is part of the file, so a `HashMap` would silently reorder someone's note. |
+| `markdown` | markdown-rs, chosen in [`docs/plans/runs/stage1b/markdown-crate.md`](docs/plans/runs/stage1b/markdown-crate.md): an AST parser and never a renderer, so a note's body stays a slice of the original bytes. Stage 3 needs it for `[[uuid]]` extraction anyway. |
+| `rusqlite` | The index. `bundled` compiles SQLite from vendored C rather than linking a system one, so every platform builds the same version and a machine without `libsqlite3` is not a special case. |
+| `serde`, `serde_json`, `toml`, `yaml_serde` | The four formats a vault touches. `serde_json`'s `preserve_order` keeps `notes.raw` in the key order the file writes, which is what `Record::undeclared` is ordered by. |
+| `thiserror` | The error taxonomy in `jot-core`. `anyhow` is for the binaries; the two never swap. |
+| `uuid` | `v4` for workspace ids, `v7` for note ids. The asymmetry is argued in `workspace::Manifest::id`: only a *note* has its creation time and its ordering read back out of its identity, and v7's timestamp prefix is what makes a short id long. |
+
+The YAML, TOML and time choices were settled together in
+[`docs/plans/runs/stage1/yaml-crate.md`](docs/plans/runs/stage1/yaml-crate.md) — read it before
+changing any of them.
+
+**Two of the groupings in `Cargo.toml` are rules, not tidiness.**
+
+*Surfaces only* — `anyhow`, `clap`, `clap_complete` may not reach `jot-core`. `anyhow` is the
+binaries' error type by convention (`overview.md`), and a `clap` type in a core signature would
+make the domain depend on how one surface happens to present it.
+
+*`serde_json` is the deliberate exception*, and sits with the core crates rather than the surface
+ones. `jot-core` uses it for the index's `raw` column — a JSON projection of the frontmatter block
+— inside a module that is private to the crate. The rule above is about **signatures**: no
+`serde_json` type appears in a public `jot-core` signature, so the domain does not depend on it.
 
 ## Documentation
 
