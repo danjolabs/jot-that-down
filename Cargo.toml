@@ -25,7 +25,7 @@ indexmap = { version = "2.14", features = ["serde"] }
 markdown = "1.0.0"
 # Stage 4's index. `bundled` compiles SQLite from vendored C rather than linking a system one, so
 # every platform builds the same version and a machine without libsqlite3 is not a special case.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # `notes.content_hash`. The `(size, mtime_ns)` fast path is a hint; this is what makes trusting it
 # safe, and `stage4.md` names blake3 in the schema itself.
 blake3 = "1.8"
