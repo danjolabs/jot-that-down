@@ -38,6 +38,14 @@ A split view: list on the left, reader on the right.
 
 - Sort orders, cycled with `s`: created ↓, created ↑, edited ↓, title A–Z. Each is a different way of
   finding the thing you cannot name.
+- **The reader is not the files view's alone.** It sits beside every list — timeline, files, search,
+  trash — because the question it answers ("what is this one?") is the same in all four, and a panel
+  that appeared and vanished as `Tab` cycled would read as a glitch. It is dropped below 90 columns,
+  where two bordered panels leave neither one usable.
+- Each row carries its short id ahead of the title, in `jot ls`'s spelling and from the same
+  abbreviation table, so an id read off the browser pastes into `jot show`. The floor is **13**
+  characters here rather than the CLI's 8 — the whole millisecond timestamp — because a column
+  under a moving cursor must not change width as the vault does.
 - The reader shows the focused note with its quoted note embedded one level, and its parent's state.
 - **Build it thread-agnostic.** This used to read "also serves `plain` workspaces in stage 7"; the
   `plain` type was deleted in the pre-stage-4 refactor, but the requirement it stood for is still
@@ -62,6 +70,11 @@ Branching is what distinguishes this from a linear reader — make forks visible
 ### Search and trash
 
 - Search over title and metadata, filtering as you type, with `--since`-style date filters.
+- **Search is not in the `Tab` cycle.** `/` opens it; `Tab` or `Esc` leaves. **Changed 2026-09-04,
+  at the user's direction** — it used to sit between files and trash, and because it is the one
+  view that takes the keyboard, cycling into it turned every following key into text and left `Tab`
+  doing nothing. The cycle appeared to stop dead there. `Tab` is now live in input mode purely so
+  search can never be a trap.
 - Trash lists trashed notes with restore and purge; purge confirms.
 
 ## Interaction
@@ -71,22 +84,28 @@ Branching is what distinguishes this from a linear reader — make forks visible
 | `j` / `k` | move |
 | `Enter` | open thread detail |
 | `u` | up to parent |
-| `Tab` | cycle timeline → files → search → trash |
-| `n` | new note |
-| `r` | reply to focused |
-| `q` | quote focused |
-| `e` | edit in `$EDITOR` |
+| `Tab` | cycle timeline → files → trash |
+| `Space n` | new note |
+| `Space r` | reply to focused |
+| `Space q` | quote focused |
+| `Space e` | edit in `$EDITOR` |
 | `s` | cycle sort (files view) |
 | `f` | flat toggle (timeline) |
-| `x` | trash, with undo toast |
+| `Space x` | trash, with undo toast |
+| `Space U` | undo the last trash |
 | `/` | search |
-| `y` | copy short id |
 | `g` / `G` | top / bottom |
 | `?` | help overlay |
+| `q` | quit |
 | `Esc` | back, then quit |
 
-Composing inside the TUI: a small inline editor for short notes, `e` to escalate to `$EDITOR` for
-anything longer. Do not build a text editor — shelling out is correct here and costs a day, not a month.
+**Every key that writes sits behind the `Space` prefix, and nothing else does.** A browser is a
+thing you read in, and one where a mistyped `x` trashes the note under the cursor spends its whole
+interaction budget on making you careful. The footer prints the prefix once at the head of the
+write run rather than on each hint.
+
+Composing inside the TUI: a small inline editor for short notes, `Space e` to escalate to `$EDITOR`
+for anything longer. Do not build a text editor — shelling out is correct here and costs a day, not a month.
 
 ## Decisions to take before planning
 
@@ -126,9 +145,10 @@ choice the stage doc leaves genuinely open. Reviewed 2026-09-04, at the stage 4 
 
 **Open, and a matter of taste rather than fact**
 
-- **`q` quotes and `Esc` quits.** Defensible — `q` pairs with `r` for reply — but `q` is the
-  strongest muscle memory in any terminal application, and getting a quote composer instead of an
-  exit will read as a bug every time it happens. Worth settling now rather than after a week of use.
+- ~~**`q` quotes and `Esc` quits.**~~ **Settled 2026-09-04, after dogfooding: `q` quits.** It was
+  answered first by keeping the pairing and adding a `Space q` for the exit; a week of the muscle
+  memory reversed it, exactly as the second sentence of this bullet predicted. The pairing was not
+  lost — every write moved behind the prefix, so `Space q` quotes next to `Space r`.
 
 ## Work
 
@@ -153,8 +173,15 @@ choice the stage doc leaves genuinely open. Reviewed 2026-09-04, at the stage 4 
       ends up parsing a help page.
 - [ ] **File watcher in core** (`notify`), debounced ~200 ms, emitting change events that trigger a
       `sync()` and a redraw. Put it in `jot-core`, not the TUI — stage 6 needs the same thing.
-- [ ] Terminal markdown styling: headings, bold, italics, inline code, fenced blocks, lists, links.
+- [x] Terminal markdown styling: headings, bold, italics, inline code, fenced blocks, lists, links.
       Nothing more.
+
+      **Changed 2026-09-04, at the user's direction.** Borrowed rather than built: the reader pipes
+      the note's markdown to `bat`, falling back to `batcat`, then `cat`, then an unstyled wrap.
+      Over **stdin**, never as a path — a surface may not open a vault file, and the note comes
+      from `jot-core` either way. The highlighter is a trait whose default is the unstyled one, so
+      no test depends on what is on `$PATH`. See `crates/jot-tui/src/preview.rs` and the deviation
+      in `docs/runs/stage5/log.md`.
 - [ ] Async loading so a large vault never blocks the first paint; render a skeleton and fill in.
 - [ ] Undo toast for trash — a five-second window that calls `restore`. Cheap, and it is the single
       biggest confidence gain for destructive keys.
