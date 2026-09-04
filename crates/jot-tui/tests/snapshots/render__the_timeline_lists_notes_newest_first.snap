@@ -1,0 +1,16 @@
+---
+source: crates/jot-tui/tests/render.rs
+expression: render(&app)
+---
+┌ timeline — thread roots ─────────────────────────────────────────────┐
+│  third                                                             [age]│
+│  second thought                                                    [age]│
+│  first thought                                                     [age]│
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+ 1/3  ?  help    Tab  next view    Space q  quit

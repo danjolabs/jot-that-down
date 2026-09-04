@@ -1,0 +1,30 @@
+---
+source: crates/jot-tui/tests/render.rs
+expression: "render_at(&app, 72, 26)"
+---
+┌ timeline — thread roots ─────────────────────────────────────────────┐
+│  a note    ┌ keys — any key to close ───────────────────┐          [age]│
+│            │  j         move down                       │            │
+│            │  k         move up                         │            │
+│            │  g         first row                       │            │
+│            │  G         last row                        │            │
+│            │  Enter     open the thread                 │            │
+│            │  u         up to the parent                │            │
+│            │  Tab       timeline → files → search → tras│            │
+│            │  n         new note                        │            │
+│            │  r         reply to the focused note       │            │
+│            │  q         quote the focused note          │            │
+│            │  e         edit in $EDITOR                 │            │
+│            │  s         cycle sort (files)              │            │
+│            │  f         flat / roots only (timeline)    │            │
+│            │  x         move to the trash               │            │
+│            │  U         undo the last trash             │            │
+│            │  /         search                          │            │
+│            │  y         copy the short id               │            │
+│            │  ?         this help                       │            │
+│            │  Esc       back, then quit                 │            │
+│            │  Space q   quit                            │            │
+│            │                                            │            │
+│            │                                            │            │
+└────────────└────────────────────────────────────────────┘────────────┘
+ 1/1  ?  help    Tab  next view    Space q  quit

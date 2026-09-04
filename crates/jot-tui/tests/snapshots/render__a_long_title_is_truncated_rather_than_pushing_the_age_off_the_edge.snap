@@ -1,0 +1,16 @@
+---
+source: crates/jot-tui/tests/render.rs
+expression: frame
+---
+┌ timeline — thread roots ─────────────────────────────────────────────┐
+│  a title long enough that it cannot possibly fit i…                [age]│
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+ 1/1  ?  help    Tab  next view    Space q  quit
