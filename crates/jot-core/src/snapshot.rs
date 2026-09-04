@@ -618,6 +618,21 @@ impl Snapshot {
         map
     }
 
+    /// How many notes quote each note, under the same filter a listing uses.
+    ///
+    /// Built once per listing rather than asked per row, for the reason [`Snapshot::children_of`]
+    /// is: [`Snapshot::quoted_by`] scans every record, so calling it inside a row loop is the
+    /// whole vault squared. This is one pass, and it is the inverse index the loop actually wants.
+    fn quoted_of(&self, include: impl Fn(&Record) -> bool) -> BTreeMap<NoteId, usize> {
+        let mut map: BTreeMap<NoteId, usize> = BTreeMap::new();
+        for record in self.records.values().filter(|r| include(r)) {
+            if let Some(quoted) = record.meta.quote {
+                *map.entry(quoted).or_default() += 1;
+            }
+        }
+        map
+    }
+
     /// The thread `id` sits in: its ancestors, and the subtree beneath it.
     ///
     /// Trashed notes are **included**. Trash never cascades, so a trashed note in the middle of a
@@ -664,7 +679,15 @@ impl Snapshot {
     // -------------------------------------------------------------------------------- listings
 
     /// Build the row for one record, with its counts and resolved parent.
-    fn row(&self, record: &Record, children_of: &BTreeMap<NoteId, Vec<NoteMeta>>) -> Row {
+    ///
+    /// Both maps come from the caller because both are properties of the *listing*: a row's reply
+    /// count means "replies this listing would show you", and so does its quote count.
+    fn row(
+        &self,
+        record: &Record,
+        children_of: &BTreeMap<NoteId, Vec<NoteMeta>>,
+        quoted_of: &BTreeMap<NoteId, usize>,
+    ) -> Row {
         let replies = children_of
             .get(&record.meta.id)
             .map_or(0, |replies| replies.len());
@@ -675,6 +698,7 @@ impl Snapshot {
             state: record.state,
             replies,
             descendants,
+            quoted: quoted_of.get(&record.meta.id).copied().unwrap_or(0),
             edited_at: record.edited_at,
         }
     }
@@ -688,6 +712,7 @@ impl Snapshot {
     #[must_use]
     pub fn timeline(&self, query: &TimelineQuery) -> Page<Row> {
         let children_of = self.children_of(|r| r.state == State::Active);
+        let quoted_of = self.quoted_of(|r| r.state == State::Active);
         let mut items = Vec::new();
         let mut next = None;
 
@@ -709,7 +734,7 @@ impl Snapshot {
                 next = items.last().map(|row: &Row| row.note.id);
                 break;
             }
-            items.push(self.row(record, &children_of));
+            items.push(self.row(record, &children_of, &quoted_of));
         }
         Page { items, next }
     }
@@ -751,11 +776,12 @@ impl Snapshot {
     #[must_use]
     pub fn files(&self, sort: FileSort) -> Vec<Row> {
         let children_of = self.children_of(|r| r.state == State::Active);
+        let quoted_of = self.quoted_of(|r| r.state == State::Active);
         let mut rows: Vec<Row> = self
             .records
             .values()
             .filter(|r| r.state == State::Active)
-            .map(|record| self.row(record, &children_of))
+            .map(|record| self.row(record, &children_of, &quoted_of))
             .collect();
 
         match sort {
@@ -791,11 +817,12 @@ impl Snapshot {
     #[must_use]
     pub fn trashed(&self) -> Vec<Row> {
         let children_of = self.children_of(|_| true);
+        let quoted_of = self.quoted_of(|_| true);
         let mut rows: Vec<Row> = self
             .records
             .values()
             .filter(|r| r.state == State::Trashed)
-            .map(|record| self.row(record, &children_of))
+            .map(|record| self.row(record, &children_of, &quoted_of))
             .collect();
         // The trashed file's mtime is when it was moved, which is the useful order here.
         rows.sort_by(|a, b| {
@@ -811,6 +838,7 @@ impl Snapshot {
     pub fn search(&self, query: &SearchQuery) -> Vec<Row> {
         let needle = query.text.trim().to_lowercase();
         let children_of = self.children_of(|_| true);
+        let quoted_of = self.quoted_of(|_| true);
         let window = TimelineQuery {
             since: query.since,
             until: query.until,
@@ -829,7 +857,7 @@ impl Snapshot {
                         .as_ref()
                         .is_some_and(|title| title.to_lowercase().contains(&needle))
             })
-            .map(|record| self.row(record, &children_of))
+            .map(|record| self.row(record, &children_of, &quoted_of))
             .collect()
     }
 
@@ -1761,5 +1789,46 @@ mod tests {
         let tree = snap.thread(nid(A)).unwrap().tree;
         assert_eq!(tree.len(), 2, "only a and its reply c");
         assert!(tree.children.iter().all(|child| child.id() != nid(B)));
+    }
+
+    #[test]
+    fn a_row_counts_the_notes_that_quote_it() {
+        // `b` and `c` both quote `a`; `d` quotes nothing and is quoted by nothing.
+        let (_tmp, ws) = vault(
+            vec![note(A), note(B).quote(A), note(C).quote(A), note(D)],
+            &[],
+        );
+        let snap = scan(&ws);
+        let quoted = |rows: &[Row], id| {
+            rows.iter()
+                .find(|row| row.note.id == id)
+                .unwrap_or_else(|| panic!("row for {id} missing"))
+                .quoted
+        };
+
+        let rows = snap.files(FileSort::Created);
+        assert_eq!(quoted(&rows, nid(A)), 2, "two notes point at a");
+        assert_eq!(quoted(&rows, nid(B)), 0, "quoting is not being quoted");
+        assert_eq!(quoted(&rows, nid(D)), 0);
+
+        // Same number by the same route the surface would take.
+        assert_eq!(snap.quoted_by(nid(A)).len(), 2);
+    }
+
+    #[test]
+    fn the_quote_count_follows_the_listing_rather_than_the_vault() {
+        // `replies` already means "replies this listing would show you". The quote count has to
+        // mean the same thing, or a timeline would advertise a pointer from a note it is hiding.
+        let (_tmp, ws) = vault(vec![note(A), note(B).quote(A)], &[B]);
+        let snap = scan(&ws);
+
+        let timeline = snap.timeline(&TimelineQuery::new().flat()).items;
+        let row = timeline.iter().find(|r| r.note.id == nid(A)).unwrap();
+        assert_eq!(row.quoted, 0, "the only quoter is in the trash");
+
+        // The trash listing counts every state, so there it is.
+        let trashed = snap.trashed();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(snap.quoted_by(nid(A)).len(), 1, "the note itself is intact");
     }
 }

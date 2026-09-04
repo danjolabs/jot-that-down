@@ -4,7 +4,7 @@ members = ["crates/*"]
 default-members = ["crates/jot-core", "crates/jot-tui", "crates/jot-cli"]
 
 [workspace.package]
-version = "0.0.5-d"
+version = "0.0.5-e"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/danjolabs/jot-that-down"

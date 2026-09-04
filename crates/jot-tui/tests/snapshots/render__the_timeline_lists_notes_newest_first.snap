@@ -3,9 +3,9 @@ source: crates/jot-tui/tests/render.rs
 expression: render(&mut app)
 ---
 ┌ timeline — thread roots ─────────────────────────────────────────────┐
-│  id-----------  third           [age]                                   │
-│  id-----------  second thought  [age]                                   │
-│  id-----------  first thought   [age]                                   │
+│  id-----------  third           [age]                                │
+│  id-----------  second thought  [age]                                │
+│  id-----------  first thought   [age]                                │
 │                                                                      │
 │                                                                      │
 │                                                                      │

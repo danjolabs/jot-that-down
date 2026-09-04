@@ -359,6 +359,13 @@ pub struct Row {
     pub replies: usize,
     /// Everything beneath this note, at any depth.
     pub descendants: usize,
+    /// How many notes quote this one.
+    ///
+    /// The inverse of `note.quote`, and deliberately a count rather than a list: a listing wants
+    /// to say "something points here", and anything more than that is a reason to open the note.
+    /// Counted under the same filter as [`Row::replies`], so it means "quotes this listing would
+    /// show you" — a trashed quoter is absent from the timeline's count and present in the trash's.
+    pub quoted: usize,
     /// Filesystem mtime, which is what `edited_at` means from stage 1b onward.
     pub edited_at: Option<DateTime<Utc>>,
 }
@@ -600,6 +607,7 @@ mod tests {
             parent: Some(Ref::Deleted(nid(A))),
             replies: 0,
             descendants: 0,
+            quoted: 0,
             edited_at: None,
         };
         assert!(row.is_root(), "an orphan must not be invisible");
@@ -613,6 +621,7 @@ mod tests {
             parent: Some(Ref::Trashed(meta(A))),
             replies: 0,
             descendants: 0,
+            quoted: 0,
             edited_at: None,
         };
         assert!(!row.is_root());

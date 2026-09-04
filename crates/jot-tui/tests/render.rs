@@ -60,7 +60,7 @@ const WIDE: (u16, u16) = (110, 12);
 /// machine running the suite happens to have `bat`.
 fn render_at(app: &mut App, width: u16, height: u16) -> String {
     let frame = render_raw_at(app, width, height);
-    mask_ids(frame, app)
+    normalise(frame, app)
 }
 
 /// The frame exactly as painted, ids and all.
@@ -89,7 +89,7 @@ fn render_raw_at(app: &mut App, width: u16, height: u16) -> String {
         .join("\n")
 }
 
-/// Replace every id cell in a frame with a fixed-width token, keeping the frame's width.
+/// Replace everything in a frame that a clock or a random id decides, keeping the frame's width.
 ///
 /// An abbreviation is random and randomly *wide*: the first eight hex characters of a UUIDv7 are
 /// the top 32 bits of a millisecond timestamp, so notes a test creates in a burst share them and
@@ -105,7 +105,7 @@ fn render_raw_at(app: &mut App, width: u16, height: u16) -> String {
 /// a column still fails the snapshot.
 ///
 /// The assertions that measure real widths use [`render_raw_at`] instead, for the same reason.
-fn mask_ids(frame: String, app: &App) -> String {
+fn normalise(frame: String, app: &App) -> String {
     // Full ids first: the reader's title bar carries one, and an abbreviation is a *prefix* of it,
     // so masking the short form first would eat the front of the long one and leave a tail behind.
     // A UUID is always 36 characters, so this substitution is width-preserving on its own.
@@ -139,6 +139,7 @@ fn mask_ids(frame: String, app: &App) -> String {
                     out = out.replace(&id[..len], &stub(len));
                 }
             }
+            out = mask_ages(&out);
             // Give back what the mask took, so the border stays where it was painted.
             let fill = before.saturating_sub(out.width());
             match out.pop() {
@@ -156,6 +157,41 @@ fn mask_ids(frame: String, app: &App) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// Replace every relative age in a line with a fixed-width token.
+///
+/// The ages are the other thing in a frame that nothing can pin. A note's `created_at` is decoded
+/// from a UUIDv7 minted at test time while [`clock`] is fixed, so the *text* moves with the hour —
+/// and, worse, so does its *width*: `4h` is two columns and `ahead` is five. That is a bomb on a
+/// timer, and it went off. These snapshots were recorded in the morning and began failing at noon,
+/// when real time passed the fixed clock and every age flipped from `4h` to `ahead`, shifting three
+/// columns of padding on every row of every frame.
+///
+/// Substituting a fixed-width token defuses it. The grammar is the whole of `ui::relative`'s
+/// output — `now`, `ahead`, or a count and a unit — matched on whole space-separated tokens, so a
+/// title that happens to contain one of those words is left alone.
+fn mask_ages(line: &str) -> String {
+    line.split(' ')
+        .map(|token| if is_age(token) { AGE_MASK } else { token })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether a token is something `ui::relative` could have produced.
+fn is_age(token: &str) -> bool {
+    if token == "now" || token == "ahead" {
+        return true;
+    }
+    let Some(unit) = token.chars().last() else {
+        return false;
+    };
+    "mhdw".contains(unit)
+        && token.len() > 1
+        && token[..token.len() - 1].chars().all(|c| c.is_ascii_digit())
+}
+
+/// What an age is masked to. Five columns, the widest `ui::relative` can produce.
+const AGE_MASK: &str = "[age]";
 
 /// The token an id cell is masked to: thirteen columns of id and two of gap, which is the column
 /// the list paints in every vault that does not capture twice in one millisecond.
@@ -179,19 +215,15 @@ fn replace_cell(line: &str, id: &str) -> String {
     format!("{}{MASK}{}", &line[..at], &rest[padding..])
 }
 
-/// Snapshot a frame with the age normalised. Ids are already masked by [`render_at`].
+/// Snapshot a frame. Ids and ages are already normalised by [`render_at`].
 ///
-/// A note's `created_at` is decoded from its UUIDv7, which is minted at *test* time, while the
-/// clock above is fixed — so the rendered age is a function of when the suite happens to run and
-/// would otherwise make every snapshot flaky by the hour. The column's presence and alignment are
-/// what these snapshots are for; its exact value is covered by `ui`'s own unit tests.
+/// This used to carry an `insta` filter for the age, which was not enough: a filter substitutes
+/// text and leaves the *width* of what it replaced already baked into the surrounding padding.
+/// [`mask_ages`] does it before the frame is measured, which is the only place it can be done
+/// without lying about the layout.
 macro_rules! assert_frame {
     ($frame:expr) => {
-        insta::with_settings!({filters => vec![
-            (r"\b(?:now|ahead|\d+[mhdw])\b", "[age]"),
-        ]}, {
-            insta::assert_snapshot!($frame);
-        });
+        insta::assert_snapshot!($frame);
     };
 }
 

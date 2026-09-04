@@ -723,6 +723,7 @@ mod tests {
             parent: None,
             replies: 0,
             descendants: 0,
+            quoted: 0,
             edited_at: None,
         }
     }

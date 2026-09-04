@@ -3,8 +3,8 @@ source: crates/jot-tui/tests/render.rs
 expression: render(&mut app)
 ---
 ┌ search: alpha▏───────────────────────────────────────────────────────┐
-│  id-----------  alphabet  [age]                                         │
-│  id-----------  alpha     [age]                                         │
+│  id-----------  alphabet  [age]                                      │
+│  id-----------  alpha     [age]                                      │
 │                                                                      │
 │                                                                      │
 │                                                                      │
