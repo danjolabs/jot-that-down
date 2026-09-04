@@ -10,18 +10,24 @@
 //!
 //! Timeline, files, search and trash all answer with `Vec<Row>`, and `Row` already carries the
 //! reply counts and resolved parent a list needs. So they are one selection model with four
-//! sources rather than four views, and `Tab` cycles the source. Thread detail is the one view
+//! sources rather than four views. `Tab` cycles three of them; search is reached by `/`, because
+//! it is the one that takes the keyboard — see [`ViewKind::next`]. Thread detail is the one view
 //! shaped differently, and it is the one that gets its own state.
 
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, Utc};
 use jot_core::note::NoteId;
 use jot_core::query::{Draft, Edit, FileSort, Row, SearchQuery, State, TimelineQuery};
 use jot_core::workspace::Workspace;
+use ratatui::text::Line;
 
 use crate::key::{Action, Keymap, Mode};
+use crate::preview::{Highlighter, Plain};
 
 /// Which list is on screen.
 ///
-/// `Tab` cycles in this order, which is the order `stage5.md`'s key table names.
+/// `Tab` cycles Timeline → Files → Trash. **Search is not in the cycle**; see [`ViewKind::next`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ViewKind {
     /// Reverse-chronological notes: roots only, or flat.
@@ -37,13 +43,21 @@ pub enum ViewKind {
 
 impl ViewKind {
     /// The next view in the `Tab` cycle.
+    ///
+    /// **Search is reached by `/` and left by `Tab` or `Esc`, but is never cycled *into*.** It used
+    /// to sit between files and trash, and that made `Tab` feel broken: search is the one view that
+    /// takes the keyboard, so cycling into it silently turned every subsequent key into text and
+    /// the next `Tab` did nothing at all. A destination you can only leave is worse than one more
+    /// keystroke to reach — and `/` is the keystroke everyone already reaches for.
+    ///
+    /// `Tab` *out of* search still works, which is what stops it from being a trap: it lands on the
+    /// timeline, the same place `Esc` goes.
     #[must_use]
     pub fn next(self) -> Self {
         match self {
             ViewKind::Timeline => ViewKind::Files,
-            ViewKind::Files => ViewKind::Search,
-            ViewKind::Search => ViewKind::Trash,
-            ViewKind::Trash => ViewKind::Timeline,
+            ViewKind::Files => ViewKind::Trash,
+            ViewKind::Trash | ViewKind::Search => ViewKind::Timeline,
         }
     }
 }
@@ -78,19 +92,28 @@ impl Toast {
     }
 }
 
-/// Shortest id abbreviation `y` will copy.
+/// Shortest id abbreviation the list will print: the whole millisecond timestamp.
 ///
-/// Matches the CLI's `MIN_ID_WIDTH`, so an id copied out of the browser is one you can paste
-/// straight into `jot show` — the two surfaces disagreeing about how short is short enough would
-/// make the clipboard a trap.
-const MIN_SHORT_ID: usize = 8;
+/// Thirteen characters of the hyphenated form — `01a06b65-d51d` — is exactly the UUIDv7's leading
+/// 48 bits, which is where the timestamp ends and randomness begins (see [`jot_core::shortid`]).
+/// Deliberately five wider than the CLI's floor of eight, and the reason is the column rather than
+/// the id: a `jot ls` row is printed once and scrolls away, while this one sits in a list under a
+/// moving cursor, where a width that changes with the vault's contents makes the titles beside it
+/// jump. Flooring at the timestamp boundary makes it a *fixed* column in every vault that does not
+/// capture twice in one millisecond.
+///
+/// It stays a genuine prefix and stays unique — [`Workspace::abbreviations`] grows it past the
+/// floor when it has to — so an id read off the browser still goes straight into `jot show`. And
+/// it is a *longer* prefix than the CLI prints, never a shorter one, so the two surfaces cannot
+/// disagree about a note.
+const MIN_SHORT_ID: usize = 13;
 
 /// Something the run loop must do that [`App`] cannot.
 ///
-/// `App` holds no terminal and spawns no processes — that is what makes the whole interaction
-/// model testable by pressing keys at it. The two things that genuinely need the terminal are the
-/// `$EDITOR` handoff, which has to give the screen back before another program draws on it, and
-/// the clipboard, which is an escape sequence. So `App` *asks*, and [`crate::run`] answers.
+/// `App` holds no terminal and spawns no processes of its own — that is what makes the whole
+/// interaction model testable by pressing keys at it. The thing that genuinely needs the terminal
+/// is the `$EDITOR` handoff, which has to give the screen back before another program draws on it.
+/// So `App` *asks*, and [`crate::run`] answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
     /// Open the editor on a new note and create it from what comes back.
@@ -102,8 +125,6 @@ pub enum Pending {
     },
     /// Open the editor on an existing note and save what comes back.
     EditNote(NoteId),
-    /// Put this text on the system clipboard.
-    Copy(String),
 }
 
 /// The whole of the TUI's state.
@@ -128,6 +149,23 @@ pub struct App {
     toast: Option<Toast>,
     /// What the run loop still has to do for us. See [`Pending`].
     pending: Option<Pending>,
+    /// Shortest unique id prefix per note, for the list's id column and for `y`.
+    ///
+    /// Cached rather than asked per row: an abbreviation is a property of the whole vault, so
+    /// computing it inside the row loop would rebuild the same table once per visible note. It is
+    /// refreshed by [`App::reload`], which is every point at which the set of notes can have
+    /// changed.
+    abbrev: BTreeMap<NoteId, String>,
+    /// How the reader panel turns markdown into styled lines. See [`crate::preview`].
+    highlighter: Box<dyn Highlighter>,
+    /// The focused note's body, rendered. Empty when nothing is focused or there is no panel.
+    preview: Vec<Line<'static>>,
+    /// What [`App::preview`] currently holds: which note, at what width, at what edit time.
+    ///
+    /// The edit time is in the key because it is the only thing that says the *file* changed. Key
+    /// on the id alone and an external edit leaves stale text on screen; re-render on every reload
+    /// instead and typing in the search box spawns a highlighter per keystroke.
+    preview_key: Option<(NoteId, u16, Option<DateTime<Utc>>)>,
     /// The last note `x` trashed, while undo is still on offer.
     ///
     /// `stage5.md` asks for a five-second undo window. This is the same offer without a clock:
@@ -159,11 +197,25 @@ impl App {
             help: false,
             toast: None,
             pending: None,
+            abbrev: BTreeMap::new(),
+            // Deliberately the dependency-free one. `run` swaps in [`crate::preview::Bat`]; a
+            // test that never asked for a subprocess never gets one.
+            highlighter: Box::new(Plain),
+            preview: Vec::new(),
+            preview_key: None,
             undo: None,
             quit: false,
         };
         app.reload();
         app
+    }
+
+    /// Use `highlighter` for the reader panel instead of the plain default.
+    #[must_use]
+    pub fn with_highlighter(mut self, highlighter: Box<dyn Highlighter>) -> Self {
+        self.highlighter = highlighter;
+        self.preview_key = None;
+        self
     }
 
     /// Bring the vault view up to date, then reload the current list.
@@ -216,6 +268,51 @@ impl App {
             .and_then(|id| self.rows.iter().position(|row| row.note.id == id))
             .unwrap_or(0);
         self.clamp_selection();
+
+        // Rebuilt here rather than per row: see [`App::abbrev`].
+        self.abbrev = self.ws.abbreviations(MIN_SHORT_ID);
+    }
+
+    /// Bring the reader panel up to date for the focused note at `width` text columns.
+    ///
+    /// `None` is a frame too narrow to carry a panel at all. Called by the run loop before each
+    /// draw, because the width is a property of the terminal and [`crate::ui`] is pure — it may
+    /// read the rendered lines but may not go and make them.
+    ///
+    /// Cheap on the overwhelmingly common call, which is the one where nothing has changed: the
+    /// key comparison is all that runs, and the highlighter is only asked when the answer would
+    /// actually differ.
+    pub fn prepare_preview(&mut self, width: Option<u16>) {
+        let Some(width) = width.filter(|w| *w > 0) else {
+            self.preview.clear();
+            self.preview_key = None;
+            return;
+        };
+
+        let Some(row) = self.rows.get(self.selected) else {
+            self.preview.clear();
+            self.preview_key = None;
+            return;
+        };
+
+        let key = (row.note.id, width, row.edited_at);
+        if self.preview_key.as_ref() == Some(&key) {
+            return;
+        }
+
+        // `get` re-reads the file; `meta` would not. That is the point — the panel is showing the
+        // note, and the index carries everything about a note except the one thing being read.
+        let markdown = match self.ws.get(key.0) {
+            Ok(Some(note)) => source(&note),
+            // A row whose file is gone between the index and this read is a real state, not a
+            // crash: say so in the panel rather than painting the last note's body under this
+            // note's title.
+            Ok(None) => "*the file for this note is no longer there*".to_string(),
+            Err(err) => format!("*cannot read this note: {err}*"),
+        };
+
+        self.preview = self.highlighter.render(&markdown, width);
+        self.preview_key = Some(key);
     }
 
     /// Feed one action in and let the state settle.
@@ -306,7 +403,6 @@ impl App {
             },
             Action::Trash => self.trash_focused(),
             Action::Undo => self.undo_trash(),
-            Action::CopyId => self.copy_focused_id(),
             Action::UpToParent => self.up_to_parent(),
 
             // Thread detail is the next wave. Saying so beats a key that looks broken.
@@ -384,25 +480,6 @@ impl App {
                 self.toast = Some(Toast::error(format!("cannot undo: {err}")));
             }
         }
-    }
-
-    /// Ask the run loop to put the focused note's short id on the clipboard.
-    fn copy_focused_id(&mut self) {
-        let Some(id) = self.focused_id() else {
-            self.nothing_focused("copy");
-            return;
-        };
-        // The abbreviation table is built against the whole vault, so a short id copied here is
-        // one `jot show` will still resolve unambiguously.
-        let short = self
-            .ws
-            .abbreviations(MIN_SHORT_ID)
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| id.to_string());
-
-        self.toast = Some(Toast::info(format!("copied {short}")));
-        self.pending = Some(Pending::Copy(short));
     }
 
     /// Move the selection to the focused note's parent, if it is in this list.
@@ -491,6 +568,37 @@ impl App {
     #[must_use]
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    /// A note's id as the list and `jot ls` both print it: the shortest prefix unique in this
+    /// vault, floored at eight.
+    ///
+    /// An id the table does not know falls back to the full UUID, for the same reason the CLI's
+    /// does — there is nothing to be unique *against* for a note the vault does not hold, and a
+    /// truncation nobody can resolve is worse than a long one they can.
+    #[must_use]
+    pub fn short_id(&self, id: NoteId) -> String {
+        self.abbrev
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    /// The reader panel's lines, as [`App::prepare_preview`] last rendered them.
+    #[must_use]
+    pub fn preview(&self) -> &[Line<'static>] {
+        &self.preview
+    }
+
+    /// Which note [`App::preview`] is showing, which is not always the focused one.
+    ///
+    /// The run loop defers the render while keystrokes are still queued, so a held `j` leaves the
+    /// panel a note behind until the burst settles. The reader labels itself from *this* rather
+    /// than from the selection, so what the panel says and what the panel shows are never two
+    /// different notes.
+    #[must_use]
+    pub fn preview_id(&self) -> Option<NoteId> {
+        self.preview_key.map(|(id, _, _)| id)
     }
 
     /// Which list is on screen.
@@ -651,6 +759,32 @@ fn next_sort(sort: FileSort) -> FileSort {
     }
 }
 
+/// The markdown the reader panel is asked to render for one note.
+///
+/// The title is promoted to an `# ` heading rather than left in the frontmatter it lives in.
+/// Frontmatter is machine state — `id`, `reply_to`, whatever schema keys a vault declares — and
+/// showing it would spend the top of the panel on the one part of the file nobody reads. Promoting
+/// the title instead gives a highlighter something to style and makes the panel look like the note
+/// the user thinks they wrote.
+///
+/// A note with no title is legal (stage 4 made the body the optional half, and a title-only note
+/// the other), so both halves are optional here and either may be empty.
+fn source(note: &jot_core::note::Note) -> String {
+    let title = note
+        .frontmatter
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let body = note.body.trim();
+
+    match (title, body.is_empty()) {
+        (Some(title), true) => format!("# {title}\n"),
+        (Some(title), false) => format!("# {title}\n\n{body}\n"),
+        (None, _) => format!("{body}\n"),
+    }
+}
+
 /// How a sort order is named in the status line.
 #[must_use]
 pub fn sort_name(sort: FileSort) -> &'static str {
@@ -681,6 +815,84 @@ mod tests {
         (tmp, app)
     }
 
+    /// A counter a test keeps a handle on while `App` owns the highlighter that increments it.
+    type Calls = std::sync::Arc<std::sync::atomic::AtomicUsize>;
+
+    /// Counts how many times it was asked to render, so a test can prove the cache holds.
+    struct Counting(Calls);
+
+    impl Highlighter for Counting {
+        fn render(&self, markdown: &str, _width: u16) -> Vec<Line<'static>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            vec![Line::from(markdown.to_string())]
+        }
+    }
+
+    /// Install a counting highlighter and hand back the counter.
+    fn counting(app: &mut App) -> Calls {
+        let calls = Calls::default();
+        app.highlighter = Box::new(Counting(std::sync::Arc::clone(&calls)));
+        calls
+    }
+
+    /// How many renders have been asked for.
+    fn calls(counter: &Calls) -> usize {
+        counter.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn the_reader_renders_the_focused_note_and_promotes_its_title() {
+        let (_tmp, mut app) = vault(&["a note"]);
+        app.prepare_preview(Some(40));
+
+        let text: String = app.preview().iter().map(ToString::to_string).collect();
+        assert!(text.contains("# a note"), "{text:?}");
+        assert!(
+            text.contains("body"),
+            "the body is the point of the panel: {text:?}"
+        );
+        assert_eq!(app.preview_id(), app.focused().map(|row| row.note.id));
+    }
+
+    #[test]
+    fn the_reader_is_rendered_once_per_note_rather_than_once_per_frame() {
+        // The run loop calls this before every draw, ten times a second. Each render may be a
+        // process launch, so anything but a cache here is a `bat` per frame forever.
+        let (_tmp, mut app) = vault(&["one", "two"]);
+        let counter = counting(&mut app);
+
+        for _ in 0..5 {
+            app.prepare_preview(Some(40));
+        }
+        assert_eq!(calls(&counter), 1, "five frames, one render");
+
+        app.dispatch(Action::MoveDown);
+        app.prepare_preview(Some(40));
+        assert_eq!(calls(&counter), 2, "a new selection is a new render");
+
+        app.prepare_preview(Some(30));
+        assert_eq!(calls(&counter), 3, "and so is a resize, which rewraps");
+    }
+
+    #[test]
+    fn a_frame_too_narrow_for_a_panel_renders_nothing_at_all() {
+        let (_tmp, mut app) = vault(&["a note"]);
+        let counter = counting(&mut app);
+
+        app.prepare_preview(None);
+        assert!(app.preview().is_empty());
+        assert_eq!(app.preview_id(), None);
+        assert_eq!(calls(&counter), 0, "no panel, no process launch");
+    }
+
+    #[test]
+    fn an_empty_list_leaves_the_reader_with_nothing_to_show() {
+        let (_tmp, mut app) = vault(&[]);
+        app.prepare_preview(Some(40));
+        assert!(app.preview().is_empty());
+        assert_eq!(app.preview_id(), None);
+    }
+
     #[test]
     fn the_timeline_is_the_opening_view() {
         let (_tmp, app) = vault(&["one", "two"]);
@@ -689,31 +901,46 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_the_four_views_and_returns() {
+    fn tab_cycles_the_three_list_views_and_returns() {
         let (_tmp, mut app) = vault(&["one"]);
-        for expected in [
-            ViewKind::Files,
-            ViewKind::Search,
-            ViewKind::Trash,
-            ViewKind::Timeline,
-        ] {
+        for expected in [ViewKind::Files, ViewKind::Trash, ViewKind::Timeline] {
             app.dispatch(Action::NextView);
             assert_eq!(app.view(), expected);
         }
     }
 
     #[test]
-    fn tab_into_search_puts_the_keyboard_into_input_mode() {
+    fn tab_never_lands_on_search() {
+        // Search takes the keyboard, so cycling into it turned every following key into text and
+        // left `Tab` doing nothing — the cycle appeared to stop dead. It is reached by `/` now.
         let (_tmp, mut app) = vault(&["one"]);
-        app.dispatch(Action::NextView); // files
-        app.dispatch(Action::NextView); // search
+        for _ in 0..12 {
+            app.dispatch(Action::NextView);
+            assert_ne!(app.view(), ViewKind::Search);
+            assert_eq!(
+                app.mode(),
+                Mode::Normal,
+                "no view in the cycle may take the keyboard"
+            );
+        }
+    }
+
+    #[test]
+    fn slash_opens_search_and_tab_leaves_it() {
+        let (_tmp, mut app) = vault(&["one"]);
+
+        app.dispatch(Action::Search);
+        assert_eq!(app.view(), ViewKind::Search);
         assert_eq!(
             app.mode(),
             Mode::Input,
             "search filters as you type, so arriving there must mean typing"
         );
 
-        app.dispatch(Action::NextView); // trash
+        // The thing that stops search being a trap: `Tab` gets out, even mid-query.
+        app.dispatch(Action::Insert('o'));
+        app.dispatch(Action::NextView);
+        assert_eq!(app.view(), ViewKind::Timeline, "Tab leaves search");
         assert_eq!(app.mode(), Mode::Normal, "leaving search leaves input mode");
     }
 
@@ -890,7 +1117,7 @@ mod tests {
                 let edit = composer.edit(app.workspace(), id).unwrap();
                 app.apply_edit(id, edit);
             }
-            Some(Pending::Copy(_)) | None => {}
+            None => {}
         }
     }
 
@@ -920,7 +1147,7 @@ mod tests {
         app.dispatch(Action::Trash);
 
         // Tab round to the trash.
-        for _ in 0..3 {
+        for _ in 0..2 {
             app.dispatch(Action::NextView);
         }
         assert_eq!(app.view(), ViewKind::Trash);
@@ -1048,26 +1275,6 @@ mod tests {
     }
 
     #[test]
-    fn y_asks_for_a_short_id_that_the_cli_would_also_accept() {
-        let (_tmp, mut app) = vault(&["a note"]);
-        let id = app.focused().unwrap().note.id;
-
-        app.dispatch(Action::CopyId);
-        let Some(Pending::Copy(short)) = app.take_pending_peek() else {
-            panic!("`y` must ask the run loop to copy something");
-        };
-
-        assert!(
-            short.len() >= MIN_SHORT_ID,
-            "`{short}` is shorter than the CLI's floor, so pasting it would be a trap"
-        );
-        assert!(
-            id.to_string().starts_with(&short),
-            "`{short}` must be a prefix of the real id"
-        );
-    }
-
-    #[test]
     fn the_lifecycle_keys_say_something_when_nothing_is_focused() {
         let (_tmp, mut app) = vault(&[]);
         for action in [
@@ -1075,7 +1282,6 @@ mod tests {
             Action::Quote,
             Action::Edit,
             Action::Trash,
-            Action::CopyId,
             Action::UpToParent,
         ] {
             app.dispatch(action);

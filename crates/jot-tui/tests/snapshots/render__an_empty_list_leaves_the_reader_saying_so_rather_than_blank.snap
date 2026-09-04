@@ -1,0 +1,16 @@
+---
+source: crates/jot-tui/tests/render.rs
+expression: frame
+---
+┌ timeline — thread roots ─────────────────┐┌ reader ────────────────────────────────────────────────────────┐
+│                                          ││                                                                │
+│  Nothing here yet. Press n to write the f││  Nothing selected.                                             │
+│                                          ││                                                                │
+│                                          ││                                                                │
+│                                          ││                                                                │
+│                                          ││                                                                │
+│                                          ││                                                                │
+│                                          ││                                                                │
+│                                          ││                                                                │
+└──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
+  Space  n new  e edit  x trash  ·  Tab view  f flat  / search  ·  ? help  q quit

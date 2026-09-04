@@ -5,10 +5,16 @@
 //! undocumented is then unrepresentable rather than merely discouraged — which is one of this
 //! stage's acceptance criteria.
 //!
-//! # The prefix
+//! # The prefix guards the writes
 //!
 //! `Space` is a tmux-style prefix: pressed alone it arms, and the next key completes a binding.
-//! Today the only one is `Space q` to quit; the scheme gets filled in after this stage.
+//! **Every key that changes the vault sits behind it** — `Space n`, `Space r`, `Space q`,
+//! `Space e`, `Space x` — and nothing else does.
+//!
+//! That is a dogfooding decision, taken after using it. A browser is a thing you read in, and a
+//! reading surface where a single mistyped `x` moves a note to the trash spends its whole
+//! interaction budget on making you careful. Two keystrokes is the right price for a write in a
+//! window whose main job is scrolling; undo stays for when it is not.
 //!
 //! **The prefix is inert while text is being entered.** In [`Mode::Input`] — the inline composer,
 //! search-as-you-type — `Space` is a literal space and nothing else, because a prefix that ate
@@ -16,10 +22,13 @@
 //! [`Keymap::resolve`] takes the mode for exactly this reason, and
 //! `space_is_a_literal_space_while_typing` pins it.
 //!
-//! # Why `q` still quotes
+//! # `q` quits
 //!
-//! `q` pairs with `r` for reply, and that symmetry is worth keeping. The exit reflex is served by
-//! `Space q` instead, which is why the prefix exists at all this early.
+//! Reversed from this stage's first answer, which had `q` quote and `Space q` quit. The pairing of
+//! `q` with `r` was real and it lost to something more real: `q` is the strongest muscle memory in
+//! any terminal application, and getting a quote composer instead of an exit reads as a bug every
+//! single time. With the writes behind the prefix there is somewhere better for quoting to live —
+//! `Space q`, next to its `Space r` — so the pairing survives the move intact.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -38,7 +47,7 @@ pub enum Action {
     Open,
     /// Move to the focused note's parent.
     UpToParent,
-    /// Cycle timeline → files → search → trash.
+    /// Cycle timeline → files → trash. Also the way out of a text field.
     NextView,
     /// Compose a new root note.
     New,
@@ -58,8 +67,6 @@ pub enum Action {
     Undo,
     /// Open search.
     Search,
-    /// Copy the focused note's short id.
-    CopyId,
     /// Show the help overlay.
     Help,
     /// Back out one level; at the top level, quit.
@@ -102,6 +109,9 @@ pub enum Resolved {
 /// The prefix key. `Space`, per the stage 5 decision.
 pub const PREFIX: KeyCode = KeyCode::Char(' ');
 
+/// How the prefix is written in the key table, including its trailing space.
+pub const PREFIX_LABEL: &str = "Space ";
+
 /// Where a binding applies, so the footer offers keys that will actually do something.
 ///
 /// Deliberately not `ViewKind`: that lives in [`crate::app`], which already depends on this
@@ -117,6 +127,19 @@ pub enum Scope {
     Files,
     /// The trash only.
     Trash,
+}
+
+/// Which run of the footer a binding belongs to.
+///
+/// The bar used to be one undifferentiated stream of pairs, which reads as a wall: nothing tells
+/// the eye that `x` and `Tab` are different kinds of thing. Two groups, separated by a dot, do —
+/// the keys that change the vault, then the keys that move you around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    /// Writes to the vault: compose, edit, trash.
+    Write,
+    /// Everything else: switching views, searching, leaving.
+    View,
 }
 
 /// One documented binding.
@@ -136,6 +159,18 @@ pub struct Binding {
     pub short: &'static str,
     /// Which views the key does anything in.
     pub scope: Scope,
+    /// Which run of the footer it sits in. See [`Group`].
+    pub group: Group,
+    /// Whether it does nothing without a row under the cursor.
+    ///
+    /// `r` and `q` are the two that need one and are not otherwise obvious; they leave the footer
+    /// when the list is empty, because a key bar's whole value is that everything on it works.
+    pub needs_row: bool,
+    /// Whether it destroys something, which the footer colours differently.
+    ///
+    /// `x` in the same cyan as `n` says the two are the same kind of thing. They are not, and the
+    /// bar is the last place to see the key before pressing it.
+    pub destructive: bool,
     /// The action it produces.
     pub action: Action,
 }
@@ -173,16 +208,13 @@ impl Keymap {
 
         if self.armed {
             self.armed = false;
-            return match key.code {
-                KeyCode::Char('q') if plain => Resolved::Act(Action::Quit),
-                // Space twice is how you type a literal space *into a field* — but in Normal mode
-                // there is no field, so re-arming is the least surprising answer to a double tap.
-                PREFIX if plain => {
-                    self.armed = true;
-                    Resolved::Armed
-                }
-                _ => Resolved::Unbound,
-            };
+            // Space twice is how you type a literal space *into a field* — but in Normal mode
+            // there is no field, so re-arming is the least surprising answer to a double tap.
+            if key.code == PREFIX && plain {
+                self.armed = true;
+                return Resolved::Armed;
+            }
+            return resolve_prefixed(key, plain);
         }
 
         match mode {
@@ -212,15 +244,26 @@ impl Keymap {
         &BINDINGS
     }
 
-    /// The bindings the status-line footer should offer for `scope`, in table order.
+    /// The bindings the status-line footer should offer, grouped, for `scope`.
     ///
-    /// Filtered two ways: a binding with an empty `short` stays out of the footer (the twin of a
-    /// pair), and a scoped binding appears only in its own view. Offering `s` on the timeline or
-    /// `U` outside the trash would advertise keys that do nothing, which is worse than a shorter
-    /// footer — the whole value of a key bar is that everything on it works.
-    pub fn footer(scope: Scope) -> impl Iterator<Item = &'static Binding> {
-        BINDINGS.iter().filter(move |b| {
-            !b.short.is_empty() && !is_pinned(b) && (b.scope == Scope::Always || b.scope == scope)
+    /// Yields the [`Group::Write`] run first and the [`Group::View`] run after it, whatever order
+    /// the table lists them in — `?` reads best movement-first and the bar reads best write-first,
+    /// and neither should have to lose to the other.
+    ///
+    /// Filtered three ways: a binding with an empty `short` stays out of the footer, a scoped
+    /// binding appears only in its own view, and a `needs_row` binding only while something is
+    /// focused. Offering `s` on the timeline, `U` outside the trash, or `r` over an empty list
+    /// would advertise keys that do nothing, which is worse than a shorter footer — the whole
+    /// value of a key bar is that everything on it works.
+    pub fn footer(scope: Scope, focused: bool) -> impl Iterator<Item = &'static Binding> {
+        [Group::Write, Group::View].into_iter().flat_map(move |g| {
+            BINDINGS.iter().filter(move |b| {
+                b.group == g
+                    && !b.short.is_empty()
+                    && !is_pinned(b)
+                    && (b.scope == Scope::Always || b.scope == scope)
+                    && (focused || !b.needs_row)
+            })
         })
     }
 
@@ -239,42 +282,60 @@ impl Keymap {
 ///
 /// A `static` rather than an inline `&[..]` because the rows are `const fn` calls, which are
 /// const-evaluable but block rvalue static promotion — the array needs a name to live in.
-static BINDINGS: [Binding; 20] = {
+static BINDINGS: [Binding; 19] = {
     use Action as A;
     // One row per *action*, not per key. Pairing "j / k" on one line reads more compactly, but it
     // leaves `MoveUp` and `Bottom` named by no row — and then `?` documents half of what the keymap
     // does while looking complete. `every_normal_mode_binding_is_documented` caught exactly that,
     // which is the whole reason it sweeps both directions.
+    //
+    // The order here is `?`'s order, which is movement first. The footer reorders into its two
+    // groups; see `Keymap::footer`.
+    //
+    // Every `Space `-prefixed row is a write, and every write is a `Space `-prefixed row. The
+    // footer prints the prefix once at the head of that run rather than five times.
+    //
+    // An empty `short` means "documented, but not in the key bar". The footer is not documentation
+    // — `?` is — so it carries the keys you cannot guess and the ones that change the vault, and
+    // nothing else. `j` and `k` are the first thing anyone tries in a TUI and `j` was sitting in
+    // the slot that survives every width, which is the worst use of the most protected space on
+    // the bar. `Enter` currently opens nothing — thread detail is not built — and the reader panel
+    // now answers "what is this one?" without opening anything at all. `u` fires only when the
+    // parent happens to be in the current list. `Esc` is a reflex, not a discovery.
     [
-        b("j", "move down", "move", Scope::Always, A::MoveDown),
+        b("j", "move down", "", Scope::Always, A::MoveDown),
         b("k", "move up", "", Scope::Always, A::MoveUp),
         b("g", "first row", "", Scope::Always, A::Top),
         b("G", "last row", "", Scope::Always, A::Bottom),
-        b("Enter", "open the thread", "open", Scope::Always, A::Open),
-        b("u", "up to the parent", "up", Scope::Always, A::UpToParent),
+        b("Enter", "open the thread", "", Scope::Always, A::Open),
+        b("u", "up to the parent", "", Scope::Always, A::UpToParent),
         b(
             "Tab",
-            "timeline \u{2192} files \u{2192} search \u{2192} trash",
+            "timeline \u{2192} files \u{2192} trash",
             "view",
             Scope::Always,
             A::NextView,
         ),
-        b("n", "new note", "new", Scope::Always, A::New),
+        b("Space n", "new note", "new", Scope::Always, A::New).writes(),
         b(
-            "r",
+            "Space r",
             "reply to the focused note",
             "reply",
             Scope::Always,
             A::Reply,
-        ),
+        )
+        .writes()
+        .needs_row(),
         b(
-            "q",
+            "Space q",
             "quote the focused note",
             "quote",
             Scope::Always,
             A::Quote,
-        ),
-        b("e", "edit in $EDITOR", "edit", Scope::Always, A::Edit),
+        )
+        .writes()
+        .needs_row(),
+        b("Space e", "edit in $EDITOR", "edit", Scope::Always, A::Edit).writes(),
         b("s", "cycle sort", "sort", Scope::Files, A::CycleSort),
         b(
             "f",
@@ -283,13 +344,27 @@ static BINDINGS: [Binding; 20] = {
             Scope::Timeline,
             A::ToggleFlat,
         ),
-        b("x", "move to the trash", "trash", Scope::Always, A::Trash),
-        b("U", "undo the last trash", "undo", Scope::Trash, A::Undo),
+        b(
+            "Space x",
+            "move to the trash",
+            "trash",
+            Scope::Always,
+            A::Trash,
+        )
+        .writes()
+        .destroys(),
+        b(
+            "Space U",
+            "undo the last trash",
+            "undo",
+            Scope::Trash,
+            A::Undo,
+        )
+        .writes(),
         b("/", "search", "search", Scope::Always, A::Search),
-        b("y", "copy the short id", "yank", Scope::Always, A::CopyId),
         b("?", "this help", "help", Scope::Always, A::Help),
-        b("Esc", "back, then quit", "back", Scope::Always, A::Back),
-        b("Space q", "quit", "quit", Scope::Always, A::Quit),
+        b("Esc", "back, then quit", "", Scope::Always, A::Back),
+        b("q", "quit", "quit", Scope::Always, A::Quit),
     ]
 };
 
@@ -298,7 +373,10 @@ fn is_pinned(b: &Binding) -> bool {
     matches!(b.action, Action::Help | Action::Quit)
 }
 
-/// Terse constructor for the table above, which is 20 rows and unreadable spelled out in full.
+/// Terse constructor for the table above, which is unreadable spelled out in full.
+///
+/// Defaults to the [`Group::View`] run, needing no row and destroying nothing; the three
+/// modifiers below say otherwise, so a row only mentions what is unusual about it.
 const fn b(
     keys: &'static str,
     description: &'static str,
@@ -311,7 +389,45 @@ const fn b(
         description,
         short,
         scope,
+        group: Group::View,
+        needs_row: false,
+        destructive: false,
         action,
+    }
+}
+
+impl Binding {
+    /// Whether the binding is completed by the `Space` prefix.
+    #[must_use]
+    pub fn is_prefixed(&self) -> bool {
+        self.keys.starts_with(PREFIX_LABEL)
+    }
+
+    /// How the key is written in the footer: the suffix alone for a prefixed binding.
+    ///
+    /// The bar prints `Space` once at the head of the write run, so spelling it out on each hint
+    /// would be five repetitions of the same word in a line that drops labels to fit.
+    #[must_use]
+    pub fn footer_key(&self) -> &'static str {
+        self.keys.strip_prefix(PREFIX_LABEL).unwrap_or(self.keys)
+    }
+
+    /// Put this binding in the footer's write run.
+    const fn writes(mut self) -> Binding {
+        self.group = Group::Write;
+        self
+    }
+
+    /// Hide this binding from the footer while nothing is focused.
+    const fn needs_row(mut self) -> Binding {
+        self.needs_row = true;
+        self
+    }
+
+    /// Mark this binding as destroying something, which the footer colours.
+    const fn destroys(mut self) -> Binding {
+        self.destructive = true;
+        self
     }
 }
 
@@ -331,18 +447,39 @@ fn resolve_normal(key: KeyEvent, plain: bool) -> Resolved {
         KeyCode::Enter => A::Open,
         KeyCode::Char('u') => A::UpToParent,
         KeyCode::Tab => A::NextView,
+        KeyCode::Char('s') => A::CycleSort,
+        KeyCode::Char('f') => A::ToggleFlat,
+        KeyCode::Char('q') => A::Quit,
+        KeyCode::Char('/') => A::Search,
+        KeyCode::Char('?') => A::Help,
+        KeyCode::Esc => A::Back,
+        _ => return Resolved::Unbound,
+    };
+    Resolved::Act(action)
+}
+
+/// Bindings that complete the `Space` prefix: everything that writes to the vault.
+///
+/// The list is short on purpose. A prefix whose second key could be anything is a mode, and a mode
+/// you cannot see is how a keystroke goes missing.
+fn resolve_prefixed(key: KeyEvent, plain: bool) -> Resolved {
+    use Action as A;
+
+    if !plain {
+        return Resolved::Unbound;
+    }
+
+    let action = match key.code {
         KeyCode::Char('n') => A::New,
         KeyCode::Char('r') => A::Reply,
         KeyCode::Char('q') => A::Quote,
         KeyCode::Char('e') => A::Edit,
-        KeyCode::Char('s') => A::CycleSort,
-        KeyCode::Char('f') => A::ToggleFlat,
         KeyCode::Char('x') => A::Trash,
+        // Undo is behind the prefix like everything else, rather than exempted for being a
+        // recovery key. It has no timer — the offer stands until the next change to the vault —
+        // so there is no race to lose by spending a second keystroke on it, and one absolute rule
+        // is worth more than one convenient exception.
         KeyCode::Char('U') => A::Undo,
-        KeyCode::Char('/') => A::Search,
-        KeyCode::Char('y') => A::CopyId,
-        KeyCode::Char('?') => A::Help,
-        KeyCode::Esc => A::Back,
         _ => return Resolved::Unbound,
     };
     Resolved::Act(action)
@@ -351,8 +488,14 @@ fn resolve_normal(key: KeyEvent, plain: bool) -> Resolved {
 /// Bindings that apply while typing.
 ///
 /// Deliberately tiny. A text field is not a place to discover that `q` did something.
+///
+/// `Tab` is the one navigation key that survives here, and it has to: search takes the keyboard,
+/// so without it `Tab` would stop working the moment you searched — which is exactly how the old
+/// cycle felt, and the reason search left it. `Tab` is not a printable character, so letting it
+/// through costs the composer nothing.
 fn resolve_input(key: KeyEvent, plain: bool) -> Resolved {
     match key.code {
+        KeyCode::Tab => Resolved::Act(Action::NextView),
         // The prefix does not exist here: this is the literal space bar.
         KeyCode::Char(c) if plain => Resolved::Act(Action::Insert(c)),
         KeyCode::Backspace => Resolved::Act(Action::Backspace),
@@ -375,23 +518,70 @@ mod tests {
     }
 
     #[test]
-    fn q_quotes_and_space_q_quits() {
+    fn q_quits_and_space_q_quotes() {
         let mut km = Keymap::new();
 
-        // The decision this stage took: `q` keeps its pairing with `r`, and the exit reflex is
-        // served by the prefix instead.
+        // Reversed from this stage's first answer. `q` is the strongest muscle memory in any
+        // terminal application, and a quote composer instead of an exit reads as a bug every time.
         assert_eq!(
             km.resolve(press('q'), Mode::Normal),
-            Resolved::Act(Action::Quote)
+            Resolved::Act(Action::Quit)
         );
 
         assert_eq!(km.resolve(press(' '), Mode::Normal), Resolved::Armed);
         assert!(km.is_armed());
         assert_eq!(
             km.resolve(press('q'), Mode::Normal),
-            Resolved::Act(Action::Quit)
+            Resolved::Act(Action::Quote),
+            "the pairing with `Space r` survives the move"
         );
         assert!(!km.is_armed(), "the prefix disarms once it has been used");
+    }
+
+    #[test]
+    fn every_write_is_behind_the_prefix_and_nothing_else_is() {
+        // The safety property, stated both ways. A browser is a thing you read in, and one stray
+        // `x` must not be able to trash the note under the cursor.
+        for (c, expected) in [
+            ('n', Action::New),
+            ('r', Action::Reply),
+            ('q', Action::Quote),
+            ('e', Action::Edit),
+            ('x', Action::Trash),
+        ] {
+            let mut km = Keymap::new();
+            assert_eq!(km.resolve(press(' '), Mode::Normal), Resolved::Armed);
+            assert_eq!(km.resolve(press(c), Mode::Normal), Resolved::Act(expected));
+
+            // And the bare key does not write.
+            let mut km = Keymap::new();
+            assert_ne!(
+                km.resolve(press(c), Mode::Normal),
+                Resolved::Act(expected),
+                "a bare `{c}` still writes to the vault"
+            );
+        }
+
+        // Nothing behind the prefix is anything but a write.
+        for binding in Keymap::bindings() {
+            assert_eq!(
+                binding.is_prefixed(),
+                binding.group == Group::Write,
+                "`{}` disagrees with itself about being a write",
+                binding.keys
+            );
+        }
+    }
+
+    #[test]
+    fn tab_gets_out_of_a_text_field() {
+        // The one navigation key that survives Input mode. Without it `Tab` stopped working the
+        // moment you searched, which is what made the old cycle feel broken.
+        let mut km = Keymap::new();
+        assert_eq!(
+            km.resolve(press_code(KeyCode::Tab), Mode::Input),
+            Resolved::Act(Action::NextView)
+        );
     }
 
     #[test]
@@ -441,7 +631,7 @@ mod tests {
         assert!(km.is_armed());
         assert_eq!(
             km.resolve(press('q'), Mode::Normal),
-            Resolved::Act(Action::Quit)
+            Resolved::Act(Action::Quote)
         );
     }
 
@@ -456,7 +646,7 @@ mod tests {
         assert_eq!(
             km.resolve(ctrl_q, Mode::Normal),
             Resolved::Unbound,
-            "Ctrl-q must not complete the prefix into a quit"
+            "Ctrl-q must not complete the prefix into a quote"
         );
         assert!(!km.is_armed());
     }
@@ -514,8 +704,8 @@ mod tests {
         assert!(!km.is_armed());
         assert_eq!(
             km.resolve(press('q'), Mode::Normal),
-            Resolved::Act(Action::Quote),
-            "after disarming, q is a quote again"
+            Resolved::Act(Action::Quit),
+            "after disarming, q is a quit again"
         );
     }
 
@@ -528,11 +718,12 @@ mod tests {
         for binding in Keymap::bindings() {
             let mut km = Keymap::new();
 
-            // Every entry names a single key, except the prefixed one.
+            // Every entry names a single key, except the prefixed ones.
             let resolved = match binding.keys {
-                "Space q" => {
+                keys if keys.starts_with(PREFIX_LABEL) => {
                     assert_eq!(km.resolve(press(' '), Mode::Normal), Resolved::Armed);
-                    km.resolve(press('q'), Mode::Normal)
+                    let suffix = binding.footer_key().chars().next().expect("a suffix key");
+                    km.resolve(press(suffix), Mode::Normal)
                 }
                 "Enter" => km.resolve(press_code(KeyCode::Enter), Mode::Normal),
                 "Tab" => km.resolve(press_code(KeyCode::Tab), Mode::Normal),
@@ -553,23 +744,28 @@ mod tests {
         }
     }
 
+    /// Every key the footer would offer in `scope`, with something focused.
+    fn footer(scope: Scope) -> Vec<&'static str> {
+        Keymap::footer(scope, true).map(|b| b.keys).collect()
+    }
+
     #[test]
     fn the_footer_offers_only_keys_that_work_in_the_current_view() {
-        let timeline: Vec<&str> = Keymap::footer(Scope::Timeline).map(|b| b.keys).collect();
-        let files: Vec<&str> = Keymap::footer(Scope::Files).map(|b| b.keys).collect();
-        let trash: Vec<&str> = Keymap::footer(Scope::Trash).map(|b| b.keys).collect();
+        let timeline = footer(Scope::Timeline);
+        let files = footer(Scope::Files);
+        let trash = footer(Scope::Trash);
 
         assert!(timeline.contains(&"f"), "flat is a timeline key");
         assert!(
             !timeline.contains(&"s"),
             "sort does nothing on the timeline"
         );
-        assert!(!timeline.contains(&"U"), "undo belongs to the trash");
+        assert!(!timeline.contains(&"Space U"), "undo belongs to the trash");
 
         assert!(files.contains(&"s"));
         assert!(!files.contains(&"f"));
 
-        assert!(trash.contains(&"U"));
+        assert!(trash.contains(&"Space U"));
         assert!(!trash.contains(&"s"));
 
         // The always-on keys are on all three, or the footer would be view trivia rather than a
@@ -582,8 +778,85 @@ mod tests {
     }
 
     #[test]
+    fn the_footer_carries_the_writes_and_the_keys_you_cannot_guess() {
+        let bar = footer(Scope::Timeline);
+
+        // The three that change the vault, plus the ones nothing else advertises.
+        for keys in ["Space n", "Space e", "Space x", "Tab", "/"] {
+            assert!(bar.contains(&keys), "`{keys}` must be on the bar: {bar:?}");
+        }
+        // `?` and `q` are pinned rather than in the main run.
+        let pinned: Vec<&str> = Keymap::footer_pinned().map(|b| b.keys).collect();
+        assert_eq!(pinned, ["?", "q"]);
+    }
+
+    #[test]
+    fn the_footer_is_not_documentation() {
+        // The bar is for keys you cannot guess and keys that change the vault. `j`/`k` are the
+        // first thing anyone tries in a TUI, `Enter` opens a thread view that is not built, `u`
+        // fires only when the parent is in the current list, and `Esc` is a reflex. All four stay
+        // in `?`; none of them earns a slot on a bar that drops hints when the terminal narrows.
+        let bar = footer(Scope::Timeline);
+        for keys in ["j", "k", "Enter", "u", "Esc"] {
+            assert!(!bar.contains(&keys), "`{keys}` is back on the bar: {bar:?}");
+            assert!(
+                BINDINGS.iter().any(|b| b.keys == keys),
+                "`{keys}` must still be documented in `?`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_footer_runs_the_writes_first_and_keeps_each_group_whole() {
+        // The eye needs the two runs contiguous for the separator between them to mean anything.
+        let groups: Vec<Group> = Keymap::footer(Scope::Timeline, true)
+            .map(|b| b.group)
+            .collect();
+        let mut seen = Vec::new();
+        for g in groups {
+            if seen.last() != Some(&g) {
+                assert!(!seen.contains(&g), "group {g:?} appears twice: {seen:?}");
+                seen.push(g);
+            }
+        }
+        assert_eq!(seen, [Group::Write, Group::View]);
+    }
+
+    #[test]
+    fn keys_that_need_a_row_leave_the_bar_when_there_is_none() {
+        let empty: Vec<&str> = Keymap::footer(Scope::Timeline, false)
+            .map(|b| b.keys)
+            .collect();
+
+        for keys in ["Space r", "Space q"] {
+            assert!(
+                !empty.contains(&keys),
+                "`{keys}` does nothing over an empty list: {empty:?}"
+            );
+        }
+        assert!(
+            empty.contains(&"Space n"),
+            "a new note needs no row, and is the one thing to do with an empty vault: {empty:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_destructive_key_is_marked_destructive() {
+        let marked: Vec<&str> = BINDINGS
+            .iter()
+            .filter(|b| b.destructive)
+            .map(|b| b.keys)
+            .collect();
+        assert_eq!(
+            marked,
+            ["Space x"],
+            "the accent stops meaning anything the moment it is on more than what destroys"
+        );
+    }
+
+    #[test]
     fn every_footer_entry_names_a_real_binding_with_a_label() {
-        for binding in Keymap::footer(Scope::Timeline) {
+        for binding in Keymap::footer(Scope::Timeline, true) {
             assert!(
                 !binding.short.is_empty(),
                 "`{}` reached the footer with no label",
@@ -611,10 +884,6 @@ mod tests {
                 "`{twin}` should not be in the footer"
             );
         }
-
-        let footer: Vec<&str> = Keymap::footer(Scope::Always).map(|b| b.keys).collect();
-        assert!(footer.contains(&"j"));
-        assert!(!footer.contains(&"k"));
     }
 
     /// The other direction: every action the keymap can produce in Normal mode is documented.

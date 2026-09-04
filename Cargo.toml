@@ -4,13 +4,12 @@ members = ["crates/*"]
 default-members = ["crates/jot-core", "crates/jot-tui", "crates/jot-cli"]
 
 [workspace.package]
-version = "0.0.5-c"
+version = "0.0.5-d"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/danjolabs/jot-that-down"
 
 [workspace.dependencies]
-base64 = "0.22"
 blake3 = "1.8"
 chrono = { version = "0.4.45", default-features = false, features = [
     "clock",
@@ -32,6 +31,9 @@ uuid = { version = "1.26", features = ["serde", "v4", "v7"] }
 yaml_serde = "0.10.7"
 
 # Surfaces only. None of these may reach `jot-core`
+# `bat` speaks ANSI, ratatui speaks spans. This is the translator, and it is the reason the reader
+# can borrow a syntax highlighter instead of growing one.
+ansi-to-tui = "8.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"

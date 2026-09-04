@@ -1,0 +1,16 @@
+---
+source: crates/jot-tui/tests/render.rs
+expression: frame
+---
+┌ timeline — thread roots ─────────────────┐┌ id---------------------------------- ──────────────────────────┐
+│  id-----------  the note in focus  [age]    ││# the note in focus                                             │
+│  id-----------  older              [age]    ││                                                                │
+│                                          ││the body of the focused note                                    │
+│                                          ││                                                                │
+│                                          ││                                                                │
+│                                          ││                                                                │
+│                                          ││                                                                │
+│                                          ││                                                                │
+│                                          ││                                                                │
+└──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
+ 1/2  Space  n new  r reply  q quote  e edit  x trash  ·  Tab view  f flat  / search  ·  ? help  q quit

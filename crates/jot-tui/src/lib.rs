@@ -13,6 +13,7 @@
 pub mod app;
 pub mod compose;
 pub mod key;
+pub mod preview;
 pub mod run;
 pub mod ui;
 

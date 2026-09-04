@@ -15,8 +15,8 @@ path = "src/lib.rs"
 [dependencies]
 jot-core = { path = "../jot-core" }
 
+ansi-to-tui = { workspace = true }
 anyhow = { workspace = true }
-base64 = { workspace = true }
 chrono = { workspace = true }
 ratatui = { workspace = true }
 unicode-width = { workspace = true }

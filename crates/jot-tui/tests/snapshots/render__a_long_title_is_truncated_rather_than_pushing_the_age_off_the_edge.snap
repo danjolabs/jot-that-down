@@ -1,9 +1,9 @@
 ---
 source: crates/jot-tui/tests/render.rs
-expression: frame
+expression: render(&mut app)
 ---
 ┌ timeline — thread roots ─────────────────────────────────────────────┐
-│  a title long enough that it cannot possibly fit i…                [age]│
+│  id-----------  a title long enough that it cannot possibly…  [age]     │
 │                                                                      │
 │                                                                      │
 │                                                                      │
@@ -13,4 +13,4 @@ expression: frame
 │                                                                      │
 │                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
- 1/1  j move  Enter open  u up  Tab view  n new  ? help  Space q quit
+ 1/1  Space  n  r  q  e  x  ·  Tab  f  /  ·  ?  q

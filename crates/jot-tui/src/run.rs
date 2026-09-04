@@ -36,6 +36,7 @@ use ratatui::crossterm::{ExecutableCommand, cursor};
 use crate::app::{App, Pending};
 use crate::compose::Composer;
 use crate::key::Resolved;
+use crate::preview::Bat;
 use crate::ui;
 
 /// How long the loop blocks on input before waking to check the watcher.
@@ -94,7 +95,10 @@ fn event_loop(
     // on the first frame rather than as a refusal to open.
     let watch = Watcher::new(ws.root());
 
-    let mut app = App::new(ws);
+    // The real terminal is the one place a highlighter may be shelled out to, so this is where
+    // `Bat` gets installed. `App::new` alone stays subprocess-free, which is what keeps the
+    // interaction tests from depending on what happens to be on `$PATH`.
+    let mut app = App::new(ws).with_highlighter(Box::new(Bat));
 
     // First paint, before the sync. See the module docs.
     terminal.draw(|frame| ui::draw(frame, &app, Utc::now()))?;
@@ -106,6 +110,19 @@ fn event_loop(
     let watch = watch.ok();
 
     loop {
+        // Before the draw, not during it: painting the reader means rendering markdown, rendering
+        // markdown may mean spawning `bat`, and `ui` is pure. The width comes from the same
+        // `split_main` the draw is about to use, so the text is wrapped for the panel it lands in.
+        //
+        // Skipped while input is still queued. A held `j` arrives as a burst of keystrokes, and
+        // highlighting a note nobody will look at costs a process launch per frame — which is
+        // exactly the stutter this stage promises a 10k vault will not have. The panel catches up
+        // on the first frame after the burst, and labels itself from what it is showing meanwhile.
+        if !event::poll(Duration::ZERO)? {
+            let size = terminal.size()?;
+            app.prepare_preview(ui::reader_text_width(size.width, size.height));
+        }
+
         terminal.draw(|frame| ui::draw(frame, &app, Utc::now()))?;
 
         if event::poll(TICK)? {
@@ -147,18 +164,6 @@ fn serve(
     pending: Pending,
 ) -> Result<()> {
     match pending {
-        Pending::Copy(text) => {
-            // OSC 52, rather than a clipboard crate. It is one escape sequence, it needs no
-            // dependency and no X11/Wayland/pbcopy branch, and — the reason that actually decides
-            // it — it works over ssh, where a clipboard library would put the text on the
-            // *server's* clipboard, which is nobody's.
-            //
-            // Not every terminal honours it. A terminal that ignores it is indistinguishable from
-            // one that copied, which is why the toast says "copied" before we get here rather than
-            // claiming success afterwards.
-            copy_to_clipboard(&text)?;
-        }
-
         Pending::Compose { reply_to, quote } => {
             let outcome = with_terminal_released(terminal, || {
                 composer.compose(app.workspace(), reply_to, quote)
@@ -201,18 +206,6 @@ fn with_terminal_released<T>(
     io::stdout().execute(cursor::Hide)?;
     terminal.clear()?;
     Ok(outcome)
-}
-
-/// Put `text` on the terminal's clipboard with OSC 52.
-fn copy_to_clipboard(text: &str) -> Result<()> {
-    use base64::Engine as _;
-    use std::io::Write as _;
-
-    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
-    let mut out = io::stdout();
-    write!(out, "\x1b]52;c;{encoded}\x07")?;
-    out.flush()?;
-    Ok(())
 }
 
 /// Apply whatever the watcher has to say, coalescing anything that queued up.
