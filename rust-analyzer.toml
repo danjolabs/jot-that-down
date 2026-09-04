@@ -1,0 +1,19 @@
+# rust-analyzer's own config, discovered automatically at the workspace root.
+#
+# Without this, `findReferences` under-reports and does it silently.
+#
+# `crates/jot-acceptance` declares its `jot-core` dependency as `optional`, and its four test
+# files are `#![cfg(feature = "stage1b")]` / `"stage4"`. That is deliberate — it keeps
+# `cargo clippy --workspace --all-targets` clean while a stage's suite is red. But with default
+# features rust-analyzer compiles the whole crate to nothing, so the acceptance suite is
+# invisible to every LSP query: `FrontmatterSchema` answers 81 references across 8 files, while
+# the same symbol is written 98 times across 12 — the four missing files are all under
+# `crates/jot-acceptance/`.
+#
+# That is the worst shape a wrong answer can take here. `AGENTS.md` tells implementers to find
+# references with the language server before a rename, and the references it cannot see are in
+# the one crate they are forbidden to fix.
+#
+# `jot-core` and `jot-cli` declare no features, so "all" changes nothing but the acceptance crate.
+[cargo]
+features = "all"
