@@ -1081,21 +1081,47 @@ fn bare_jot_does_not_open_the_browser() {
         }));
 }
 
-/// Both spellings reach the same place, and both refuse the same way without a terminal.
+/// `jot tui` asks for the browser explicitly, so a redirected stdout is refused rather than
+/// quietly downgraded to help — which is how a script ends up parsing a help page.
 ///
-/// The test harness gives the child a pipe, so this exercises the refusal rather than the browser
-/// — which is the half that can be checked without a pty.
+/// The harness gives the child a pipe, so this exercises the refusal rather than the browser,
+/// which is the half reachable without a pty.
 #[test]
-fn tui_is_reachable_as_both_a_subcommand_and_a_flag() {
+fn tui_without_a_terminal_is_refused_rather_than_downgraded() {
     let vault = Vault::new();
-    for args in [vec!["tui"], vec!["--tui"]] {
-        vault
-            .cmd()
-            .args(&args)
-            .assert()
-            .failure()
-            .stderr(predicates::str::contains("needs a terminal"));
-    }
+    vault
+        .cmd()
+        .arg("tui")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("needs a terminal"));
+}
+
+/// The globals are `global = true`, which is why `tui` needs no `--tui` twin: the option reads
+/// naturally after the subcommand, and that is the whole reason the flag was dropped.
+#[test]
+fn tui_takes_the_global_options_after_the_subcommand() {
+    let vault = Vault::new();
+    vault
+        .cmd()
+        .args(["tui", "--workspace"])
+        .arg(vault.path())
+        .assert()
+        .failure()
+        // Reached the TUI arm, which only happens once the workspace resolved.
+        .stderr(predicates::str::contains("needs a terminal"));
+}
+
+/// There is one spelling. A `--tui` flag existed briefly and was removed.
+#[test]
+fn there_is_no_tui_flag() {
+    let vault = Vault::new();
+    vault
+        .cmd()
+        .arg("--tui")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unexpected argument"));
 }
 
 /// The registry's current workspace, as JSON.

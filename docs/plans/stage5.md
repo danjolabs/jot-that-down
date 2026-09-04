@@ -1,6 +1,6 @@
 # Stage 5 — TUI
 
-**Goal.** The reading surface. `jot` with no arguments opens a full-screen browser over the vault.
+**Goal.** The reading surface. `jot tui` opens a full-screen browser over the vault.
 
 **Why now.** The CLI proved capture; it is bad at *browsing*. Reading a thread with branches, scanning
 a week of notes, or hunting for a half-remembered title are all things a scrolling terminal command
@@ -134,14 +134,19 @@ choice the stage doc leaves genuinely open. Reviewed 2026-09-04, at the stage 4 
 
 - [ ] `crates/jot-tui` as a library: `App` state, an event loop over `crossterm`, and a `View` trait
       so views stay separable.
-- [ ] `jot tui` and `jot --tui` launch it. A bare `jot` keeps printing help.
+- [ ] `jot tui` launches it. A bare `jot` keeps printing help, and there is no `--tui` flag.
 
       **Changed 2026-09-04, at the user's direction.** This line used to read "`jot` with no
       arguments launches it", and that shipped briefly. `jot` is a CLI first: typing the program's
       name should tell you what it does, not capture your terminal, and the browser is somewhere
-      you go on purpose. Two spellings because a flag composes with the global options —
-      `jot --workspace ~/notes --tui` needs no thought about where the subcommand goes — while the
-      subcommand is what shell completion and `jot help` will show.
+      you go on purpose.
+
+      A `--tui` flag shipped alongside the subcommand for one commit and was removed the same day.
+      The argument for it was that a flag composes with the global options; the argument against is
+      that those options are already `global = true`, so `jot tui --workspace ~/notes` reads the way
+      you would want without one. The flag bought no reach and cost a second spelling to keep in
+      step — with completions, with `jot help`, and with every future thought about where the
+      browser is entered from.
 
       `jot tui` with stdout redirected is refused with a message rather than silently downgraded to
       help: it asked for the browser explicitly, and quietly doing something else is how a script

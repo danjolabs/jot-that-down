@@ -110,15 +110,6 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    // A flag *as well as* a subcommand because a flag composes with the global options —
-    // `jot --workspace ~/notes --tui` needs no thought about where the subcommand goes — while the
-    // subcommand is what shell completion and `jot help` surface. Kept as a `//` comment rather
-    // than a doc comment: clap renders doc comments into `--help`, and a paragraph of rationale
-    // there is noise for the person who only wanted to know what the flag does.
-    /// Open the full-screen browser, like the `tui` subcommand.
-    #[arg(long)]
-    tui: bool,
-
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -380,10 +371,11 @@ fn run() -> Result<(), Failure> {
     // stage-3 behaviour and prints help, which is also the only thing a script could have wanted.
     // `jot tui` asked explicitly, and is refused explicitly below rather than silently downgraded.
     // `jot` is a CLI first. A bare invocation prints help, as it has since stage 3 — the browser
-    // is somewhere you go on purpose, via `jot tui` or `jot --tui`, not somewhere you land by
-    // typing the program's name.
-    let flag = if cli.tui { Some(&Command::Tui) } else { None };
-    let Some(command) = cli.command.as_ref().or(flag) else {
+    // is somewhere you go on purpose, via `jot tui`, not somewhere you land by typing the
+    // program's name. There is deliberately no `--tui` twin: the global options are `global =
+    // true`, so `jot tui --workspace ~/notes` already reads the way you would want it to, and a
+    // second spelling would be a second thing to keep in step for no reach it does not have.
+    let Some(command) = cli.command.as_ref() else {
         Cli::command().print_help().map_err(anyhow::Error::from)?;
         return Ok(());
     };
