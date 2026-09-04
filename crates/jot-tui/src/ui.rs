@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, ViewKind, sort_name};
-use crate::key::{Keymap, Mode};
+use crate::key::{Keymap, Mode, Scope};
 
 /// Paint the whole frame.
 pub fn draw(frame: &mut Frame, app: &App, now: DateTime<Utc>) {
@@ -174,19 +174,72 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             dim(),
         ))
     } else {
-        let count = app.rows().len();
-        let position = if count == 0 {
-            String::new()
-        } else {
-            format!("{}/{count}  ", app.selected() + 1)
-        };
-        Line::from(Span::styled(
-            format!(" {position}?  help    Tab  next view    Space q  quit"),
-            dim(),
-        ))
+        return draw_key_bar(frame, area, app);
     };
 
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// The standing footer: position, then as many key hints as the width allows.
+///
+/// Built from [`Keymap::footer`] rather than a hand-written string, so a key cannot appear here
+/// without existing, and `?` and the footer cannot drift apart. Hints are dropped from the right
+/// when they do not fit, which means the most useful ones have to come first — the table's order
+/// is therefore load-bearing, not cosmetic.
+fn draw_key_bar(frame: &mut Frame, area: Rect, app: &App) {
+    let scope = match app.view() {
+        ViewKind::Timeline => Scope::Timeline,
+        ViewKind::Files => Scope::Files,
+        ViewKind::Trash => Scope::Trash,
+        // Search has no keys of its own; typing is the interaction.
+        ViewKind::Search => Scope::Always,
+    };
+
+    let count = app.rows().len();
+    let position = if count == 0 {
+        String::new()
+    } else {
+        format!("{}/{count}", app.selected() + 1)
+    };
+
+    let mut spans = Vec::new();
+    let mut used = 1 + position.width();
+    if !position.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            position.clone(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    // "  key label" — two spaces of separation, one between the key and its label.
+    let hint_width = |b: &crate::key::Binding| 2 + b.keys.width() + 1 + b.short.width();
+    let push = |spans: &mut Vec<Span<'static>>, b: &crate::key::Binding| {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(b.keys, Style::default().fg(Color::Cyan)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(b.short, dim()));
+    };
+
+    // Reserve the pinned tail before spending anything on the middle, so `?` and `Space q` are
+    // there at every width rather than being the first casualties of a narrow terminal.
+    let pinned: Vec<_> = Keymap::footer_pinned().collect();
+    let tail_width: usize = pinned.iter().map(|b| hint_width(b)).sum();
+    let budget = (area.width as usize).saturating_sub(tail_width);
+
+    for binding in Keymap::footer(scope) {
+        let width = hint_width(binding);
+        if used + width > budget {
+            break;
+        }
+        used += width;
+        push(&mut spans, binding);
+    }
+    for binding in pinned {
+        push(&mut spans, binding);
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// The `?` overlay, rendered from the same table the event loop dispatches on.

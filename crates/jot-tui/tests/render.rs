@@ -16,6 +16,7 @@ use jot_tui::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use tempfile::TempDir;
+use unicode_width::UnicodeWidthStr;
 
 /// The size every snapshot renders at. Wide enough for a title and the meta column, short enough
 /// that a snapshot stays readable in a diff.
@@ -140,6 +141,45 @@ fn a_cjk_title_does_not_break_the_frame() {
     // the cell and corrupt the right-hand border, which is invisible in an ASCII-only test.
     let (_tmp, app) = vault(&["안녕하세요 반갑습니다 이것은 아주 긴 제목입니다 그리고 더 깁니다"]);
     assert_frame!(render(&app));
+}
+
+#[test]
+fn the_key_bar_is_wider_on_a_wider_terminal_and_never_overflows() {
+    let (_tmp, app) = vault(&["a note"]);
+
+    let narrow = render_at(&app, 40, 8);
+    let wide = render_at(&app, 120, 8);
+
+    let bar = |frame: &str| frame.lines().last().unwrap().to_string();
+    let (narrow_bar, wide_bar) = (bar(&narrow), bar(&wide));
+
+    assert!(
+        wide_bar.width() > narrow_bar.width(),
+        "a wider terminal should offer more keys:\n40: {narrow_bar}\n120: {wide_bar}"
+    );
+    assert!(
+        narrow_bar.width() <= 40,
+        "the key bar must drop hints rather than overflow: {narrow_bar}"
+    );
+    // Dropping happens from the right, so the first hint survives every width.
+    assert!(
+        narrow_bar.contains(" j "),
+        "`j` is first and must always fit"
+    );
+}
+
+#[test]
+fn the_key_bar_follows_the_view() {
+    let (_tmp, mut app) = vault(&["a note"]);
+
+    let timeline = render_at(&app, 120, 8);
+    assert!(timeline.contains(" f "), "flat is offered on the timeline");
+    assert!(!timeline.contains(" s "), "sort is not");
+
+    app.dispatch(Action::NextView); // files
+    let files = render_at(&app, 120, 8);
+    assert!(files.contains(" s "), "sort is offered in the files view");
+    assert!(!files.contains(" f "), "flat is not");
 }
 
 #[test]

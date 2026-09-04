@@ -15,8 +15,8 @@ expression: "render_at(&app, 72, 26)"
 │            │  r         reply to the focused note       │            │
 │            │  q         quote the focused note          │            │
 │            │  e         edit in $EDITOR                 │            │
-│            │  s         cycle sort (files)              │            │
-│            │  f         flat / roots only (timeline)    │            │
+│            │  s         cycle sort                      │            │
+│            │  f         flat / roots only               │            │
 │            │  x         move to the trash               │            │
 │            │  U         undo the last trash             │            │
 │            │  /         search                          │            │
@@ -27,4 +27,4 @@ expression: "render_at(&app, 72, 26)"
 │            │                                            │            │
 │            │                                            │            │
 └────────────└────────────────────────────────────────────┘────────────┘
- 1/1  ?  help    Tab  next view    Space q  quit
+ 1/1  j move  Enter open  u up  Tab view  n new  ? help  Space q quit

@@ -110,6 +110,15 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    // A flag *as well as* a subcommand because a flag composes with the global options —
+    // `jot --workspace ~/notes --tui` needs no thought about where the subcommand goes — while the
+    // subcommand is what shell completion and `jot help` surface. Kept as a `//` comment rather
+    // than a doc comment: clap renders doc comments into `--help`, and a paragraph of rationale
+    // there is noise for the person who only wanted to know what the flag does.
+    /// Open the full-screen browser, like the `tui` subcommand.
+    #[arg(long)]
+    tui: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -146,7 +155,7 @@ enum Command {
     /// Inspect the vault index.
     #[command(subcommand)]
     Index(IndexCommand),
-    /// Browse the vault full-screen. The default when `jot` runs with no arguments.
+    /// Browse the vault full-screen.
     Tui,
     /// Print a shell completion script.
     Completions {
@@ -370,12 +379,14 @@ fn run() -> Result<(), Failure> {
     // codes in a pipe rather than a user interface. A bare `jot` in that situation keeps its
     // stage-3 behaviour and prints help, which is also the only thing a script could have wanted.
     // `jot tui` asked explicitly, and is refused explicitly below rather than silently downgraded.
-    if cli.command.is_none() && !std::io::stdout().is_terminal() {
+    // `jot` is a CLI first. A bare invocation prints help, as it has since stage 3 — the browser
+    // is somewhere you go on purpose, via `jot tui` or `jot --tui`, not somewhere you land by
+    // typing the program's name.
+    let flag = if cli.tui { Some(&Command::Tui) } else { None };
+    let Some(command) = cli.command.as_ref().or(flag) else {
         Cli::command().print_help().map_err(anyhow::Error::from)?;
         return Ok(());
-    }
-    let default = Command::Tui;
-    let command = cli.command.as_ref().unwrap_or(&default);
+    };
 
     match command {
         // These two do not need — and must not require — an existing workspace.

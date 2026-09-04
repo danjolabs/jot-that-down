@@ -134,7 +134,18 @@ choice the stage doc leaves genuinely open. Reviewed 2026-09-04, at the stage 4 
 
 - [ ] `crates/jot-tui` as a library: `App` state, an event loop over `crossterm`, and a `View` trait
       so views stay separable.
-- [ ] `jot` with no arguments launches it; `jot tui` is the explicit form.
+- [ ] `jot tui` and `jot --tui` launch it. A bare `jot` keeps printing help.
+
+      **Changed 2026-09-04, at the user's direction.** This line used to read "`jot` with no
+      arguments launches it", and that shipped briefly. `jot` is a CLI first: typing the program's
+      name should tell you what it does, not capture your terminal, and the browser is somewhere
+      you go on purpose. Two spellings because a flag composes with the global options —
+      `jot --workspace ~/notes --tui` needs no thought about where the subcommand goes — while the
+      subcommand is what shell completion and `jot help` will show.
+
+      `jot tui` with stdout redirected is refused with a message rather than silently downgraded to
+      help: it asked for the browser explicitly, and quietly doing something else is how a script
+      ends up parsing a help page.
 - [ ] **File watcher in core** (`notify`), debounced ~200 ms, emitting change events that trigger a
       `sync()` and a redraw. Put it in `jot-core`, not the TUI — stage 6 needs the same thing.
 - [ ] Terminal markdown styling: headings, bold, italics, inline code, fenced blocks, lists, links.

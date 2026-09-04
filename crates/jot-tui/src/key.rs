@@ -102,15 +102,40 @@ pub enum Resolved {
 /// The prefix key. `Space`, per the stage 5 decision.
 pub const PREFIX: KeyCode = KeyCode::Char(' ');
 
+/// Where a binding applies, so the footer offers keys that will actually do something.
+///
+/// Deliberately not `ViewKind`: that lives in [`crate::app`], which already depends on this
+/// module, and the footer is the only thing that needs the correspondence. `ui` maps one onto the
+/// other in a single `match`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Every view.
+    Always,
+    /// The timeline only — `f` is meaningless in a file list.
+    Timeline,
+    /// The files view only, where `s` cycles the sort.
+    Files,
+    /// The trash only.
+    Trash,
+}
+
 /// One documented binding.
 ///
-/// [`Keymap::bindings`] is what `?` renders, so a binding is documented by existing.
+/// [`Keymap::bindings`] is what `?` renders *and* what the status-line footer is built from, so a
+/// binding is documented by existing and cannot drift out of either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Binding {
     /// How the key is written in help, e.g. `"j"`, `"Space q"`, `"Enter"`.
     pub keys: &'static str,
-    /// What it does, in the imperative.
+    /// What it does, in the imperative. Shown in `?`.
     pub description: &'static str,
+    /// A compact label for the status-line footer, or `""` to keep it out of the footer.
+    ///
+    /// Empty for the twin of a pair — `k` next to `j`, `G` next to `g` — because a footer reading
+    /// "j move down  k move up" spends two slots saying one thing. `?` still lists both.
+    pub short: &'static str,
+    /// Which views the key does anything in.
+    pub scope: Scope,
     /// The action it produces.
     pub action: Action,
 }
@@ -184,113 +209,109 @@ impl Keymap {
     /// two agree.
     #[must_use]
     pub fn bindings() -> &'static [Binding] {
-        use Action as A;
-        // One row per *action*, not per key. Pairing "j / k" on one line reads more compactly, but
-        // it leaves `MoveUp` and `Bottom` named by no row — and then `?` is documenting half of
-        // what the keymap does while looking complete. `every_normal_mode_binding_is_documented`
-        // caught exactly that, which is the whole reason it sweeps both directions.
-        &[
-            Binding {
-                keys: "j",
-                description: "move down",
-                action: A::MoveDown,
-            },
-            Binding {
-                keys: "k",
-                description: "move up",
-                action: A::MoveUp,
-            },
-            Binding {
-                keys: "g",
-                description: "first row",
-                action: A::Top,
-            },
-            Binding {
-                keys: "G",
-                description: "last row",
-                action: A::Bottom,
-            },
-            Binding {
-                keys: "Enter",
-                description: "open the thread",
-                action: A::Open,
-            },
-            Binding {
-                keys: "u",
-                description: "up to the parent",
-                action: A::UpToParent,
-            },
-            Binding {
-                keys: "Tab",
-                description: "timeline → files → search → trash",
-                action: A::NextView,
-            },
-            Binding {
-                keys: "n",
-                description: "new note",
-                action: A::New,
-            },
-            Binding {
-                keys: "r",
-                description: "reply to the focused note",
-                action: A::Reply,
-            },
-            Binding {
-                keys: "q",
-                description: "quote the focused note",
-                action: A::Quote,
-            },
-            Binding {
-                keys: "e",
-                description: "edit in $EDITOR",
-                action: A::Edit,
-            },
-            Binding {
-                keys: "s",
-                description: "cycle sort (files)",
-                action: A::CycleSort,
-            },
-            Binding {
-                keys: "f",
-                description: "flat / roots only (timeline)",
-                action: A::ToggleFlat,
-            },
-            Binding {
-                keys: "x",
-                description: "move to the trash",
-                action: A::Trash,
-            },
-            Binding {
-                keys: "U",
-                description: "undo the last trash",
-                action: A::Undo,
-            },
-            Binding {
-                keys: "/",
-                description: "search",
-                action: A::Search,
-            },
-            Binding {
-                keys: "y",
-                description: "copy the short id",
-                action: A::CopyId,
-            },
-            Binding {
-                keys: "?",
-                description: "this help",
-                action: A::Help,
-            },
-            Binding {
-                keys: "Esc",
-                description: "back, then quit",
-                action: A::Back,
-            },
-            Binding {
-                keys: "Space q",
-                description: "quit",
-                action: A::Quit,
-            },
-        ]
+        &BINDINGS
+    }
+
+    /// The bindings the status-line footer should offer for `scope`, in table order.
+    ///
+    /// Filtered two ways: a binding with an empty `short` stays out of the footer (the twin of a
+    /// pair), and a scoped binding appears only in its own view. Offering `s` on the timeline or
+    /// `U` outside the trash would advertise keys that do nothing, which is worse than a shorter
+    /// footer — the whole value of a key bar is that everything on it works.
+    pub fn footer(scope: Scope) -> impl Iterator<Item = &'static Binding> {
+        BINDINGS.iter().filter(move |b| {
+            !b.short.is_empty() && !is_pinned(b) && (b.scope == Scope::Always || b.scope == scope)
+        })
+    }
+
+    /// The bindings pinned to the right-hand end of the footer, whatever the width.
+    ///
+    /// Help and quit. The footer drops hints from the right when the terminal is narrow, and these
+    /// two are exactly the ones that must survive it: `?` is how you find every other key, and
+    /// `Space q` is how you leave. Losing them first — which is what plain table order does, since
+    /// they sit at the end — is the one failure a key bar cannot afford.
+    pub fn footer_pinned() -> impl Iterator<Item = &'static Binding> {
+        BINDINGS.iter().filter(|b| is_pinned(b))
+    }
+}
+
+/// Every binding, in the order `?` lists them.
+///
+/// A `static` rather than an inline `&[..]` because the rows are `const fn` calls, which are
+/// const-evaluable but block rvalue static promotion — the array needs a name to live in.
+static BINDINGS: [Binding; 20] = {
+    use Action as A;
+    // One row per *action*, not per key. Pairing "j / k" on one line reads more compactly, but it
+    // leaves `MoveUp` and `Bottom` named by no row — and then `?` documents half of what the keymap
+    // does while looking complete. `every_normal_mode_binding_is_documented` caught exactly that,
+    // which is the whole reason it sweeps both directions.
+    [
+        b("j", "move down", "move", Scope::Always, A::MoveDown),
+        b("k", "move up", "", Scope::Always, A::MoveUp),
+        b("g", "first row", "", Scope::Always, A::Top),
+        b("G", "last row", "", Scope::Always, A::Bottom),
+        b("Enter", "open the thread", "open", Scope::Always, A::Open),
+        b("u", "up to the parent", "up", Scope::Always, A::UpToParent),
+        b(
+            "Tab",
+            "timeline \u{2192} files \u{2192} search \u{2192} trash",
+            "view",
+            Scope::Always,
+            A::NextView,
+        ),
+        b("n", "new note", "new", Scope::Always, A::New),
+        b(
+            "r",
+            "reply to the focused note",
+            "reply",
+            Scope::Always,
+            A::Reply,
+        ),
+        b(
+            "q",
+            "quote the focused note",
+            "quote",
+            Scope::Always,
+            A::Quote,
+        ),
+        b("e", "edit in $EDITOR", "edit", Scope::Always, A::Edit),
+        b("s", "cycle sort", "sort", Scope::Files, A::CycleSort),
+        b(
+            "f",
+            "flat / roots only",
+            "flat",
+            Scope::Timeline,
+            A::ToggleFlat,
+        ),
+        b("x", "move to the trash", "trash", Scope::Always, A::Trash),
+        b("U", "undo the last trash", "undo", Scope::Trash, A::Undo),
+        b("/", "search", "search", Scope::Always, A::Search),
+        b("y", "copy the short id", "yank", Scope::Always, A::CopyId),
+        b("?", "this help", "help", Scope::Always, A::Help),
+        b("Esc", "back, then quit", "back", Scope::Always, A::Back),
+        b("Space q", "quit", "quit", Scope::Always, A::Quit),
+    ]
+};
+
+/// Whether a binding is pinned to the end of the footer. See [`Keymap::footer_pinned`].
+fn is_pinned(b: &Binding) -> bool {
+    matches!(b.action, Action::Help | Action::Quit)
+}
+
+/// Terse constructor for the table above, which is 20 rows and unreadable spelled out in full.
+const fn b(
+    keys: &'static str,
+    description: &'static str,
+    short: &'static str,
+    scope: Scope,
+    action: Action,
+) -> Binding {
+    Binding {
+        keys,
+        description,
+        short,
+        scope,
+        action,
     }
 }
 
@@ -530,6 +551,70 @@ mod tests {
                 binding.description
             );
         }
+    }
+
+    #[test]
+    fn the_footer_offers_only_keys_that_work_in_the_current_view() {
+        let timeline: Vec<&str> = Keymap::footer(Scope::Timeline).map(|b| b.keys).collect();
+        let files: Vec<&str> = Keymap::footer(Scope::Files).map(|b| b.keys).collect();
+        let trash: Vec<&str> = Keymap::footer(Scope::Trash).map(|b| b.keys).collect();
+
+        assert!(timeline.contains(&"f"), "flat is a timeline key");
+        assert!(
+            !timeline.contains(&"s"),
+            "sort does nothing on the timeline"
+        );
+        assert!(!timeline.contains(&"U"), "undo belongs to the trash");
+
+        assert!(files.contains(&"s"));
+        assert!(!files.contains(&"f"));
+
+        assert!(trash.contains(&"U"));
+        assert!(!trash.contains(&"s"));
+
+        // The always-on keys are on all three, or the footer would be view trivia rather than a
+        // key bar.
+        for keys in &timeline {
+            if *keys != "f" {
+                assert!(files.contains(keys), "`{keys}` vanished in the files view");
+            }
+        }
+    }
+
+    #[test]
+    fn every_footer_entry_names_a_real_binding_with_a_label() {
+        for binding in Keymap::footer(Scope::Timeline) {
+            assert!(
+                !binding.short.is_empty(),
+                "`{}` reached the footer with no label",
+                binding.keys
+            );
+            assert!(
+                BINDINGS.iter().any(|b| b.keys == binding.keys),
+                "`{}` is in the footer but not in the table `?` renders",
+                binding.keys
+            );
+        }
+    }
+
+    #[test]
+    fn a_paired_key_is_documented_but_kept_out_of_the_footer() {
+        // `k` and `G` are the twins of `j` and `g`. Both must appear in `?`, and neither should
+        // spend a footer slot repeating what its partner already says.
+        for twin in ["k", "G"] {
+            let binding = BINDINGS
+                .iter()
+                .find(|b| b.keys == twin)
+                .unwrap_or_else(|| panic!("`{twin}` must still be documented"));
+            assert!(
+                binding.short.is_empty(),
+                "`{twin}` should not be in the footer"
+            );
+        }
+
+        let footer: Vec<&str> = Keymap::footer(Scope::Always).map(|b| b.keys).collect();
+        assert!(footer.contains(&"j"));
+        assert!(!footer.contains(&"k"));
     }
 
     /// The other direction: every action the keymap can produce in Normal mode is documented.

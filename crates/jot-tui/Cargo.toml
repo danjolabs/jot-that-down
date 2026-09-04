@@ -22,4 +22,5 @@ unicode-width = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
+unicode-width = { workspace = true }
 tempfile = { workspace = true }

@@ -1063,6 +1063,41 @@ fn bare_jot_prints_help_rather_than_failing() {
         .stdout(predicates::str::contains("Usage:"));
 }
 
+/// `jot` is a CLI first: the browser is somewhere you go on purpose.
+///
+/// Stage 5 briefly made a bare `jot` open the TUI. Reverted — typing the program's name should
+/// tell you what it does, not capture your terminal.
+#[test]
+fn bare_jot_does_not_open_the_browser() {
+    let vault = Vault::new();
+    vault
+        .cmd()
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Usage:"))
+        // The alternate-screen switch. If this ever appears, a bare `jot` has taken the terminal.
+        .stdout(predicates::function::function(|out: &str| {
+            !out.contains("\u{1b}[?1049h")
+        }));
+}
+
+/// Both spellings reach the same place, and both refuse the same way without a terminal.
+///
+/// The test harness gives the child a pipe, so this exercises the refusal rather than the browser
+/// — which is the half that can be checked without a pty.
+#[test]
+fn tui_is_reachable_as_both_a_subcommand_and_a_flag() {
+    let vault = Vault::new();
+    for args in [vec!["tui"], vec!["--tui"]] {
+        vault
+            .cmd()
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("needs a terminal"));
+    }
+}
+
 /// The registry's current workspace, as JSON.
 fn current(vault: &Vault) -> Value {
     vault
