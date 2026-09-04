@@ -39,7 +39,13 @@ A split view: list on the left, reader on the right.
 - Sort orders, cycled with `s`: created ↓, created ↑, edited ↓, title A–Z. Each is a different way of
   finding the thing you cannot name.
 - The reader shows the focused note with its quoted note embedded one level, and its parent's state.
-- This is the view that also serves `plain` workspaces in stage 7 — build it type-agnostic.
+- **Build it thread-agnostic.** This used to read "also serves `plain` workspaces in stage 7"; the
+  `plain` type was deleted in the pre-stage-4 refactor, but the requirement it stood for is still
+  live and now has a sharper statement. A workspace whose schema declares no `relation:*` entry
+  **is** what `plain` meant, and it is a legal workspace: `Row::parent` is `None` for every row,
+  `replies` and `descendants` are `0`, and `thread` is a single note. The files-and-reader view must
+  read well in that vault — no empty "replies" gutter, no thread affordance that can never fire —
+  because it is the only view such a workspace has.
 
 ### Thread detail
 
@@ -81,6 +87,48 @@ Branching is what distinguishes this from a linear reader — make forks visible
 
 Composing inside the TUI: a small inline editor for short notes, `e` to escalate to `$EDITOR` for
 anything longer. Do not build a text editor — shelling out is correct here and costs a day, not a month.
+
+## Decisions to take before planning
+
+This document was written before the pre-stage-4 refactor and before stage 4. Nothing below
+contradicts a locked decision in `overview.md`; each is either a fact this stage now inherits or a
+choice the stage doc leaves genuinely open. Reviewed 2026-09-04, at the stage 4 → 5 gate.
+
+**What stage 4 changed under this stage's feet**
+
+- **The watcher must not watch the index.** `.jot/index.db`, `-wal` and `-shm` now live inside the
+  tree this stage watches, so a naive recursive watch feeds `sync()` → write → event → `sync()`
+  forever. The watch must cover the workspace root **and** `.jot/.trash/` — trash state is derived
+  from location, so a hand-move into the trash is exactly the event this stage promises to catch —
+  while excluding `index.db*`. This is the first thing to get right, not a polish item.
+- **`Workspace` is no longer `Clone`**, from stage 4's decision 5: it owns a `rusqlite::Connection`,
+  which is `Send` but **not** `Sync`. "Async loading so a large vault never blocks the first paint",
+  plus a watcher thread, therefore needs a deliberate choice. **Recommended: the `Workspace` lives on
+  one thread and the watcher owns only a channel sender**, so change events arrive as messages and
+  nothing shares the connection. `Arc<Mutex<Workspace>>` also compiles and is the option to reach for
+  only if the channel shape proves awkward. Decide before wave 1; it shapes `App`.
+- **The 200 ms first-paint criterion is already missed by a cold open.** Measured at 10k synthetic
+  notes, release: cold open **689 ms**, warm `sync()` **73 ms**, `timeline(50)` **1.8 ms** (Linux
+  6.18.48, 2026-09-04). So the skeleton-then-fill item below is load-bearing rather than polish: the
+  first frame has to paint *before* the opening sync completes. Either build it that way or restate
+  the criterion — but do not leave it reading as though a cold open could meet it.
+
+**Where this document and `jot-core` disagree**
+
+- **`FileSort` has three variants; this document asks for four.** Core is `Created`, `Edited`,
+  `Title`; the `s` cycle above wants created ↓, created ↑, edited ↓, title A–Z. Add `CreatedAsc` to
+  `jot-core::query::FileSort` in the wave that owns core, or drop ascending from the cycle. It is a
+  core change either way, so it must not be discovered mid-TUI.
+- **A title is enough.** The body became the optional half after this document was written. The
+  inline composer must accept a title-only note, and the acceptance list should say so.
+- **`ratatui`, `crossterm`, `notify` and `insta` are in no manifest yet.** Per stage 1's lesson that
+  is one lone task owning the workspace manifests, blocking everything else in the stage.
+
+**Open, and a matter of taste rather than fact**
+
+- **`q` quotes and `Esc` quits.** Defensible — `q` pairs with `r` for reply — but `q` is the
+  strongest muscle memory in any terminal application, and getting a quote composer instead of an
+  exit will read as a bug every time it happens. Worth settling now rather than after a week of use.
 
 ## Work
 

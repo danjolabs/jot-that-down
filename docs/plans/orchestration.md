@@ -398,7 +398,7 @@ where an agent marks a stage complete on the strength of the checks it happened 
 | 4 | **One week of real capture.** The stage is not done when tests pass; it is done when a week of your actual notes has gone through it without loss. |
 | 5 | Rendering in Windows Terminal; scroll feel at 10k notes; whether `$EDITOR` handoff is pleasant rather than merely functional. |
 | 6 | Global hotkey behavior under real OS conditions; deep-link registration; whether capture *feels* under three seconds. |
-| 7 | The scope check in `stage7.md` — whether `plain` workspaces are something you'll use or symmetry for its own sake. That is a judgment about your own habits, and no agent should make it. |
+| 7 | The scope check in `stage7.md` — whether **rename detection** is worth its cost, or whether noticing `<uuid>.md` became `<uuid>_a_slug.md` is a nicety to drop. That is a judgment about your own habits, and no agent should make it. (This row used to ask whether `plain` workspaces were symmetry for its own sake. `plain` was deleted in the pre-stage-4 refactor and `stage7.md` records that the type system answered that question, so the row named a checkpoint that no longer exists; rename detection is what is actually left needing a human call.) |
 
 Stage 5's terminal work is partly reachable: drive the TUI through a pty and snapshot the ratatui
 buffer, which covers layout and state transitions. What it cannot cover is whether it feels good.
