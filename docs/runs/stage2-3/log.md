@@ -68,7 +68,7 @@ and have it write stage 2 and 3 acceptance suites retroactively before building 
 them.
 
 > **Outcome, recorded after the fact:** this recommendation was considered and **declined** — see
-> `runs/post-stage3/log.md` §8 — to keep the iteration cycle short while dogfooding was still moving
+> `docs/runs/post-stage3/log.md` §8 — to keep the iteration cycle short while dogfooding was still moving
 > the design. The deferral is deliberate and its cost is written up there. It remains due before
 > stage 4 for the reason given above.
 

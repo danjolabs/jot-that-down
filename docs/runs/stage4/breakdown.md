@@ -39,7 +39,7 @@ the same seam, with the acceptance suite already written. **Deviation, recorded,
 
 | Wave | Work | Files owned |
 | --- | --- | --- |
-| A (parallel, throughout) | verifier: phase A acceptance tests | `crates/jot-acceptance/`, `runs/stage4/phase-a.md` |
+| A (parallel, throughout) | verifier: phase A acceptance tests | `crates/jot-acceptance/`, `docs/runs/stage4/phase-a.md` |
 | 1 | deps; migrations keyed on `user_version`; open pragmas; schema | `Cargo.toml`, `crates/jot-core/Cargo.toml`, `crates/jot-core/src/index/{mod,migrate}.rs`, `index/schema.sql`, `error.rs` |
 | 2 | `raw` JSON projection; row read/write; hydration | `frontmatter.rs`, `index/row.rs` |
 | 3 | scanner: change detection, deletion pass, duplicate ids | `index/scan.rs`, `snapshot.rs` |

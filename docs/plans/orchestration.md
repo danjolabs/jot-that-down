@@ -106,7 +106,7 @@ tools: Read, Grep, Glob, Bash, Write
 ```
 
 Reads `docs/plans/stages/stage<N>.md`, `overview.md`, and the current repo state. Emits
-`docs/plans/runs/stage<N>/breakdown.md`: a task DAG, an explicit **file ownership set** per task,
+`docs/runs/stage<N>/breakdown.md`: a task DAG, an explicit **file ownership set** per task,
 which tasks are parallel-safe, and a recommended model per task with a one-line reason. Writes no
 production code.
 
@@ -177,7 +177,7 @@ tools: Read, Grep, Glob, Edit, Write
 ---
 ```
 
-Writes `runs/stage<N>/log.md` and applies plan-doc corrections that Fable has already approved —
+Writes `docs/runs/stage<N>/log.md` and applies plan-doc corrections that Fable has already approved —
 `overview.md`'s definition of done, item 4. It applies decisions; it does not make them.
 
 ## Model routing
@@ -250,7 +250,7 @@ Skipping the mutation check is the tempting shortcut and the one that lets a vac
 ```text
   ┌─ 0. gate in ── previous stage tagged, tree clean, branch stage/<N>-<slug>
   │
-  ├─ 1. plan ───── stage-planner (opus) → runs/stage<N>/breakdown.md
+  ├─ 1. plan ───── stage-planner (opus) → docs/runs/stage<N>/breakdown.md
   │                 Fable reviews; surfaces the wave plan to the user
   │
   ├─ 2. phase A ── verifier (opus) writes acceptance tests, red
@@ -320,7 +320,7 @@ more than the parallelism saves, and Fable's attention becomes the bottleneck ra
 ## Context hygiene
 
 - Subagents' tool output stays out of Fable's context — that is the point of dispatching. Fable reads
-  **artifacts** in `runs/stage<N>/`, never transcripts.
+  **artifacts** in `docs/runs/stage<N>/`, never transcripts.
 - Each agent receives its stage doc, the locked-decisions table, its task, and its ownership set.
   It does not receive the design conversation. `docs/conversation/initial.md` is history; the plan docs are
   the specification, and if something in the conversation matters it belongs in a plan doc.
@@ -332,7 +332,7 @@ more than the parallelism saves, and Fable's attention becomes the bottleneck ra
 ## Artifacts
 
 ```text
-docs/plans/runs/stage<N>/
+docs/runs/stage<N>/
   breakdown.md      # planner: task DAG, ownership, model routing
   dispatch.md       # who got what, which model, which wave
   verification.md   # phase B: per-criterion verdict, quoted output, mutation results
@@ -354,7 +354,7 @@ anchoring it to the Claude Code session that produced it. `.claude/settings.loca
 **One `Assisted-by:` per commit, and it records the orchestrator.** Subagents do not commit — they
 hand work back and Fable lands it — so the trailer describes the tool and configuration of whoever
 actually created the commit object. Which agent did the underlying work is
-`runs/stage<N>/dispatch.md`'s job, and it does that job better than a trailer can.
+`docs/runs/stage<N>/dispatch.md`'s job, and it does that job better than a trailer can.
 
 This is not merely a tidiness rule. An agent can report its own model and effort with certainty; it
 can only ever *guess* another agent's. A per-agent trailer therefore invites exactly the confident
@@ -401,7 +401,7 @@ and the trailer machine-readable, at the cost of `claude-opus-5` reading less ni
 Worth it — a trailer nobody can parse is a comment.
 
 **The subagent role is deliberately absent.** `implementer` versus `verifier` is recorded in
-`runs/stage<N>/dispatch.md`, which is authoritative anyway; putting it in the trailer would compete
+`docs/runs/stage<N>/dispatch.md`, which is authoritative anyway; putting it in the trailer would compete
 with the `tool` field for the same slot. If you later want it visible in `git log`, add it as its own
 trailer (`Assisted-role: verifier`) rather than crowding this one.
 
@@ -419,7 +419,7 @@ The single-trailer rule narrows what is being claimed rather than fixing this. T
 reports only itself, which is the one configuration it actually knows — but nothing stops it
 misreporting that either, and no hook can catch it.
 
-So: `runs/stage<N>/dispatch.md` is authoritative for **who did the work**, because Fable writes it at
+So: `docs/runs/stage<N>/dispatch.md` is authoritative for **who did the work**, because Fable writes it at
 dispatch time from what it actually passed to the `Agent` call. The trailer answers a narrower
 question — **who committed** — and the two are deliberately different facts. A commit whose trailer
 says `claude-opus-5` may contain work from three sonnet implementers; that is not a contradiction,

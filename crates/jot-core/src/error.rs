@@ -45,7 +45,7 @@
 //! - Failures originating in a third-party parser (YAML, TOML) carry the parser's own diagnostic as
 //!   a `message: String` rather than as a `#[source]` of that crate's error type. That keeps the
 //!   frozen enum from pinning the public API to a specific YAML or TOML crate, and those
-//!   diagnostics already carry line and column — see `docs/plans/runs/stage1/yaml-crate.md`.
+//!   diagnostics already carry line and column — see `docs/runs/stage1/yaml-crate.md`.
 
 use std::path::{Path, PathBuf};
 

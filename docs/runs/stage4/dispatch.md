@@ -19,7 +19,7 @@ implementation existed, in a crate the implementer did not edit. Rule 2 held, an
 
 | Wave | Who | Model | Work |
 | --- | --- | --- | --- |
-| A | `verifier` (subagent, `a489008`) | opus | phase A: `crates/jot-acceptance/` stage-4 suite, `runs/stage4/phase-a.md` |
+| A | `verifier` (subagent, `a489008`) | opus | phase A: `crates/jot-acceptance/` stage-4 suite, `docs/runs/stage4/phase-a.md` |
 | 1–4 | orchestrator, inline | opus (fable-5.1, xhigh) | deps, migrations, schema, row layer, scanner, workspace wiring, perf |
 | B | `verifier` (same agent, resumed) | opus | phase B: per-criterion verdict, probes, mutation spot-check |
 

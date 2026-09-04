@@ -73,7 +73,7 @@ called out again under Deviations.
 - **Three of four agent worktrees were cut from the repo's initial commit rather than the branch
   HEAD**, and each of those agents had to reset before it could see `stage/1-vault-foundations`'s
   actual state. This is not independently documented in any run artifact — it is recorded here on the
-  orchestrator's account, since no artifact in `runs/stage1/` captures it. Worth fixing in tooling
+  orchestrator's account, since no artifact in `docs/runs/stage1/` captures it. Worth fixing in tooling
   before stage 4: a worktree cut from the wrong ref is a silent way to lose a wave's prerequisites.
 - **The wave 2/3 API contract (`dispatch.md`'s error-variant renames and module shapes) was referenced
   in three implementer briefs before it was committed to the repo.** The content was settled and
@@ -214,7 +214,7 @@ collecting here since this is where the stage's numbers live:
   accepted survivors (M16 equivalent mutant, M39 `fsync` untestable by construction, M44 low-stakes
   gap needing a seam that doesn't exist).
 - `yaml_serde` 0.10.7 / `chrono` 0.4.45 / `toml` 1.1, decided 2026-08-30, evidence in
-  `runs/stage1/yaml-crate.md`.
+  `docs/runs/stage1/yaml-crate.md`.
 - Windows rename verification: `std::fs::rename` confirmed to map to `MoveFileExW` with
   `MOVEFILE_REPLACE_EXISTING` on Windows 11 (build 26200) / `1.97.1-x86_64-pc-windows-msvc`,
   2026-08-30 — see Plan-doc corrections.
@@ -290,6 +290,6 @@ U8's 'flipped to blocking at seal.'" No edit was needed or made.
   gone) and replaces it with a creation-time slug option. This is stale in the same way the write-backs
   above were, but it was not on the list of ratified corrections for this seal, so it is left as-is
   and flagged here.
-- `runs/stage1/dispatch.md`'s dispatch log has no entries for waves 3, 4, or any of the three fix
+- `docs/runs/stage1/dispatch.md`'s dispatch log has no entries for waves 3, 4, or any of the three fix
   rounds — see Deviations and the Waves table above. Worth closing before stage 4's dispatch log is
   written, so this role isn't reconstructing model attribution from a routing table again next time.

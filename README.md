@@ -182,14 +182,14 @@ gain a minor release.
 | `chrono` | Times. `default-features = false` because the crate's default pulls in more than dates. |
 | `directories` | The OS config directory, for the workspace registry. |
 | `indexmap` | Insertion-ordered maps. Frontmatter key order is part of the file, so a `HashMap` would silently reorder someone's note. |
-| `markdown` | markdown-rs, chosen in [`docs/plans/runs/stage1b/markdown-crate.md`](docs/plans/runs/stage1b/markdown-crate.md): an AST parser and never a renderer, so a note's body stays a slice of the original bytes. Stage 3 needs it for `[[uuid]]` extraction anyway. |
+| `markdown` | markdown-rs, chosen in [`docs/runs/stage1b/markdown-crate.md`](docs/runs/stage1b/markdown-crate.md): an AST parser and never a renderer, so a note's body stays a slice of the original bytes. Stage 3 needs it for `[[uuid]]` extraction anyway. |
 | `rusqlite` | The index. `bundled` compiles SQLite from vendored C rather than linking a system one, so every platform builds the same version and a machine without `libsqlite3` is not a special case. |
 | `serde`, `serde_json`, `toml`, `yaml_serde` | The four formats a vault touches. `serde_json`'s `preserve_order` keeps `notes.raw` in the key order the file writes, which is what `Record::undeclared` is ordered by. |
 | `thiserror` | The error taxonomy in `jot-core`. `anyhow` is for the binaries; the two never swap. |
 | `uuid` | `v4` for workspace ids, `v7` for note ids. The asymmetry is argued in `workspace::Manifest::id`: only a *note* has its creation time and its ordering read back out of its identity, and v7's timestamp prefix is what makes a short id long. |
 
 The YAML, TOML and time choices were settled together in
-[`docs/plans/runs/stage1/yaml-crate.md`](docs/plans/runs/stage1/yaml-crate.md) — read it before
+[`docs/runs/stage1/yaml-crate.md`](docs/runs/stage1/yaml-crate.md) — read it before
 changing any of them.
 
 **Two of the groupings in `Cargo.toml` are rules, not tidiness.**
@@ -209,7 +209,7 @@ ones. `jot-core` uses it for the index's `raw` column — a JSON projection of t
 | --- | --- |
 | [`docs/plans/overview.md`](docs/plans/overview.md) | Locked decisions, architecture, the core API. **Read first.** |
 | [`docs/plans/stages/stage<N>.md`](docs/plans/stages) | One file per stage, self-contained. |
-| [`docs/plans/runs/`](docs/plans/runs) | What each run actually did, what it found, what it cost. |
+| [`docs/runs/`](docs/runs) | What each run actually did, what it found, what it cost. |
 | [`docs/cli-json.md`](docs/cli-json.md) | The `--json` contract and exit codes. |
 
 ## License

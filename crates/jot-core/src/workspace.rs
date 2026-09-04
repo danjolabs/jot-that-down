@@ -21,7 +21,7 @@
 //!
 //! # Rulings this module implements
 //!
-//! Three of `docs/plans/runs/stage1/dispatch.md`'s adjudications land here verbatim, and none of
+//! Three of `docs/runs/stage1/dispatch.md`'s adjudications land here verbatim, and none of
 //! them is re-decided in code:
 //!
 //! * **§U3 — `init` on an existing workspace.** The stage doc calls `init` "idempotent" and then

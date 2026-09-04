@@ -4,8 +4,8 @@
 hand-rolled `split_fences` in `frontmatter.rs`.
 
 This is the record `stage1b.md`'s open question asked for — "Where the markdown-crate decision is
-recorded" — resolved toward opening `runs/stage1b/` early rather than appending to `yaml-crate.md`.
-`runs/stage1/` is a sealed audit trail and this is a stage-1b decision.
+recorded" — resolved toward opening `docs/runs/stage1b/` early rather than appending to `yaml-crate.md`.
+`docs/runs/stage1/` is a sealed audit trail and this is a stage-1b decision.
 
 ## The rule that makes it safe
 

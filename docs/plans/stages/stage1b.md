@@ -1,7 +1,7 @@
 # Stage 1b — Declared frontmatter schema
 
 > **Implemented 2026-08-31** on `stage/1b-declared-frontmatter-schema`. The run is in
-> [`runs/stage1b/`](../runs/stage1b/log.md): what was ratified, where the implementation deviated from
+> [`docs/runs/stage1b/`](../../runs/stage1b/log.md): what was ratified, where the implementation deviated from
 > this document and why, the per-criterion verdict, and an eleven-mutation spot-check. Two sections
 > below carry inline corrections marked **Corrected at implementation**; the Open questions section
 > records what was settled.
@@ -119,7 +119,7 @@ doc[end..]       the body, byte-for-byte
 and **before its line terminator**, so `doc[end..]` would begin with that newline and every note's
 body would gain a leading blank line — fatally so for `01a03d56…`, whose body starts on the very
 next line. The block is extended over the terminator, and the adjustment is pinned by a test that
-asserts the crate's raw span alongside it. See `runs/stage1b/markdown-crate.md`.
+asserts the crate's raw span alongside it. See `docs/runs/stage1b/markdown-crate.md`.
 
 The body is a slice of the original text and never passes through a markdown emitter, so "plain
 markdown, untouched" is structural rather than earned — the same shape of guarantee byte-replay used
@@ -305,11 +305,11 @@ instead of containing it.
   untitled top-level note; neither is an error. This is the one place stage 1b *reverses* a stage-1
   behaviour rather than deleting it — `---\n---\n` used to be `FrontmatterNotAMapping`, because an
   empty block had no `id`.
-- ~~**Where the markdown-crate decision is recorded.**~~ **Settled: `runs/stage1b/` was opened
-  early.** [`runs/stage1b/markdown-crate.md`](../runs/stage1b/markdown-crate.md) carries the decision,
+- ~~**Where the markdown-crate decision is recorded.**~~ **Settled: `docs/runs/stage1b/` was opened
+  early.** [`docs/runs/stage1b/markdown-crate.md`](../../runs/stage1b/markdown-crate.md) carries the decision,
   the verification table, the weight (`markdown v1.0.0` plus `unicode-id`), and the two behaviours
   this document got slightly wrong. `Cargo.toml` points at it.
 - ~~**Whether the crate swap lands before 1b.**~~ **Settled: inside 1b, one diff.** The mitigation
   for losing the attribution a separate commit would have given: the crate was verified empirically,
   against every case the old `split_fences` tests covered, *before* any implementation code was
-  written. That pass is `runs/stage1b/markdown-crate.md`.
+  written. That pass is `docs/runs/stage1b/markdown-crate.md`.

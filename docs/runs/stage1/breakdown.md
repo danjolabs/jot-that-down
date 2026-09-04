@@ -57,7 +57,7 @@ skeleton.
 
 | Task | Owns | Model | Why this model |
 | --- | --- | --- | --- |
-| T2.1 Dependency landing, YAML crate choice, timestamp representation choice, crate error taxonomy | `Cargo.toml`, `Cargo.lock`, `crates/jot-core/Cargo.toml`, `crates/jot-core/src/error.rs`, `docs/plans/stages/stage1.md`, `docs/plans/runs/stage1/yaml-crate.md` | opus | The YAML crate and the timestamp type decide whether byte-identical round-trip is even achievable; failure here is silent data mangling discovered in stage 7. |
+| T2.1 Dependency landing, YAML crate choice, timestamp representation choice, crate error taxonomy | `Cargo.toml`, `Cargo.lock`, `crates/jot-core/Cargo.toml`, `crates/jot-core/src/error.rs`, `docs/plans/stages/stage1.md`, `docs/runs/stage1/yaml-crate.md` | opus | The YAML crate and the timestamp type decide whether byte-identical round-trip is even achievable; failure here is silent data mangling discovered in stage 7. |
 | T2.2 Phase A acceptance tests | `crates/jot-acceptance/**` (exclusive, whole crate incl. its `Cargo.toml`) | opus | Verification is never routed to sonnet; its whole value is skepticism about work that looks finished. |
 
 **Owns the dependency manifests this wave: T2.1.** T2.2 owns `crates/jot-acceptance/Cargo.toml`,

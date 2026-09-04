@@ -159,7 +159,7 @@ two characters. Nothing was taken away — both spellings work and both show in 
 
 ## 8. The stage 2 and 3 acceptance suites are deliberately deferred
 
-`runs/stage2-3/log.md` recommended dispatching a verifier to write them retroactively before stage 4
+`docs/runs/stage2-3/log.md` recommended dispatching a verifier to write them retroactively before stage 4
 builds on this domain. **That recommendation was considered and declined**, at the user's direction,
 to keep the iteration cycle short. It is a decision rather than an oversight, and it is recorded here
 so that a later reader does not mistake it for one.

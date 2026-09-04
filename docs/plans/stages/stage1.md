@@ -5,7 +5,7 @@
 > §U1, and the byte-identical round-trip gate below. Stage 1b moves identity to the filename only,
 > replaces the two-path serializer with one schema-driven render path, and replaces the round-trip
 > gate with a stronger set of criteria. The content below is left as-is — it is the record of what
-> stage 1 actually built and what phase B's verdicts in `runs/stage1/verification.md` are about —
+> stage 1 actually built and what phase B's verdicts in `docs/runs/stage1/verification.md` are about —
 > but the "Note format", "Frontmatter", and the round-trip acceptance criterion are no longer current.
 > Read `stage1b.md` for what replaced them.
 
@@ -53,7 +53,7 @@ filename = "uuid"      # "uuid" | "uuid_slug" — deferred decision, see overvie
 `id` is what makes the directory self-identifying: registering a workspace is pointing at a folder,
 and moving the folder loses nothing.
 
-**v4, not v7** — changed post stage 3, see `runs/post-stage3/log.md`. This originally said UUIDv7,
+**v4, not v7** — changed post stage 3, see `docs/runs/post-stage3/log.md`. This originally said UUIDv7,
 by inheritance from note ids rather than by argument: the self-identifying property this paragraph
 describes holds for any UUID version. A **note** id must be v7, because `created_at` is decoded from
 it and id order is creation order. A workspace id is asked for neither, and v7 actively cost two
@@ -116,7 +116,7 @@ Three rules worth stating outright, because each one is a decision:
       `yaml` GitHub org), with `chrono` 0.4.45 for timestamps and `toml` 1.1 for `workspace.toml`.
       Full evidence and the one caveat — no serde-lineage emitter can be told to quote a scalar, so
       the canonical path must emit timestamps as explicitly double-quoted strings itself — in
-      [`runs/stage1/yaml-crate.md`](../runs/stage1/yaml-crate.md).
+      [`docs/runs/stage1/yaml-crate.md`](../../runs/stage1/yaml-crate.md).
 - [ ] Parse: split on the leading `---` fence, deserialize, keep the body as the exact remaining bytes.
 - [ ] Serialize: known keys in a fixed order, then unknown keys in their original order.
 - [ ] **Round-trip test as the gate**: parse → serialize of an unmodified note is byte-identical.

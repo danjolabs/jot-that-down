@@ -1,7 +1,7 @@
 # Pre-stage-4 refactor — typed frontmatter schema
 
 **Status.** Implemented on `refactor-pre-stage4`, from `237d8fb`. The run is in
-[`runs/pre-stage4/log.md`](../runs/pre-stage4/log.md): what deviated from this document and why, the
+[`docs/runs/pre-stage4/log.md`](../../runs/pre-stage4/log.md): what deviated from this document and why, the
 acceptance-suite appeal and every edit made under it, and the two things this refactor found that the
 plan did not anticipate.
 
@@ -230,7 +230,7 @@ What this buys, beyond one less key:
   becomes a property of the design.
 - **`reply_to` becomes the single authority** for thread shape. The `tree(root_id)` vs `thread()`
   divergence that stalled stage 4 cannot happen, because there is only one answer.
-- **A whole class of bug goes with it** — the `runs/stage2-3/log.md` finding #2 fallback, where a
+- **A whole class of bug goes with it** — the `docs/runs/stage2-3/log.md` finding #2 fallback, where a
   hand-edited parent missing its own `relation:root` left `create` nothing to copy.
 
 Existing notes are **not migrated**. A `relation:root` key in a file written before this change
@@ -282,7 +282,7 @@ Policy:
 - The note in the cycle **becomes its own root**, so it appears in the timeline as a top-level note.
   It stays visible, because something that needs fixing has to be findable.
 
-This closes the item left open in `runs/post-stage3/log.md`: `Error::ReplyCycle` currently fires only
+This closes the item left open in `docs/runs/post-stage3/log.md`: `Error::ReplyCycle` currently fires only
 in `open_note`, and the read path silently renders a truncated tree.
 
 ## Work
@@ -363,10 +363,10 @@ in `open_note`, and the read path silently renders a truncated tree.
 ## Risks
 
 - **The acceptance suite is verifier-owned and blocking.** This is the largest single risk, and it is
-  procedural rather than technical. `runs/post-stage3/log.md` §4 records the last time an implementer
+  procedural rather than technical. `docs/runs/post-stage3/log.md` §4 records the last time an implementer
   edited that suite, and it was a granted appeal, not a precedent.
 - **Rule 2 has not held for two stages.** Stages 2 and 3 were written and judged by one author, and
-  their acceptance suites were deliberately deferred (`runs/post-stage3/log.md` §8) with "revisit
+  their acceptance suites were deliberately deferred (`docs/runs/post-stage3/log.md` §8) with "revisit
   before stage 4" attached. This refactor rewrites the frontmatter layer *underneath* that
   unverified domain code. Whatever is decided, decide it deliberately.
 - **`FrontmatterSchema` is 54 references across 8 files.** Changing its shape is the mechanical bulk

@@ -74,7 +74,7 @@ tree rather than by trusting the log.
 Nothing in the implementation. Two process findings, both about the audit trail rather than the code:
 
 - **This gate was skipped at seal, and nothing noticed.** The stage loop has three gates and the
-  seal happened on two. `runs/stage1/` has no `review.md` either, so this is a pattern rather than
+  seal happened on two. `docs/runs/stage1/` has no `review.md` either, so this is a pattern rather than
   an oversight in stage 4 — the artifact list in `orchestration.md` names the file, but nothing
   fails when it is absent. Either the gate is real and something should check for the artifact, or
   it is aspirational and `orchestration.md` should stop listing it as one of three.
