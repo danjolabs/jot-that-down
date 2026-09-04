@@ -896,7 +896,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jot-acceptance"
-version = "0.0.5-a"
+version = "0.0.5-b"
 dependencies = [
  "jot-core",
  "tempfile",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "jot-cli"
-version = "0.0.5-a"
+version = "0.0.5-b"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "jot-core"
-version = "0.0.5-a"
+version = "0.0.5-b"
 dependencies = [
  "blake3",
  "chrono",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "jot-tui"
-version = "0.0.5-a"
+version = "0.0.5-b"
 dependencies = [
  "anyhow",
  "base64",

@@ -46,17 +46,6 @@ impl ViewKind {
             ViewKind::Trash => ViewKind::Timeline,
         }
     }
-
-    /// The name shown in the view's header.
-    #[must_use]
-    pub fn title(self) -> &'static str {
-        match self {
-            ViewKind::Timeline => "timeline",
-            ViewKind::Files => "files",
-            ViewKind::Search => "search",
-            ViewKind::Trash => "trash",
-        }
-    }
 }
 
 /// A transient message in the status line.
