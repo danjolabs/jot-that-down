@@ -1,15 +1,57 @@
 # Orchestration
 
-How Fable drives `stage1.md`–`stage7.md`, and how each stage is proved done rather than declared done.
+How a stage gets executed and proved done rather than declared done.
 
 Read `overview.md` first — its locked decisions, conventions, and core API surface are the contract
-every agent in this document works against.
+this document works against.
+
+## Two modes, and how to choose
+
+Stages 1–4 ran **dispatched**: a planner, implementers in waves, an integrator, a verifier. Stage 5
+ran **inline**: one agent planning and implementing in conversation with you, committing in small
+waves. Both are supported. Neither is the default — the choice is made per stage, out loud, and
+recorded in that stage's run log.
+
+| | Dispatched | Inline |
+| --- | --- | --- |
+| Who writes code | implementer subagents | the agent you are talking to |
+| Parallelism | up to three implementers | none |
+| Your involvement | at the gates | continuous |
+| Cost per unit of work | higher — each agent re-derives context from cold | lower |
+| Audit trail | breakdown, dispatch, verification, log | the commit history, and a log at seal |
+| Rule 1 (below) | held | **not held** |
+| Rule 2 (below) | held | held only if a verifier is used |
+
+**Choose dispatched** when the work splits cleanly into parallel pieces with disjoint file
+ownership, when getting it wrong is expensive and invisible, or when you want the independent
+verification that is the whole point of the structure. Stage 4's index was exactly this: three
+tasks, one foundation, and a bug that only an agent who had not written the implementation would
+have found.
+
+**Choose inline** when the work is one connected thing that resists being cut into disjoint pieces,
+when you want to steer it as it happens, or when the feedback loop matters more than the audit
+trail. Stage 5's TUI was this: keymap, state, and rendering are one design, and three of the
+decisions in it changed *because you saw the result and said so*. A dispatched wave would have
+taken those corrections a round trip each.
+
+The honest summary: **dispatched buys verification, inline buys iteration speed.** A stage whose
+failure would be silent wants the first. A stage whose value you can see on screen wants the second.
+
+**Hybrid is a real third option and was stage 4's actual shape** — orchestrator implementing inline,
+verifier subagent for phases A and B. It gives up rule 1 and keeps rule 2, which is the trade worth
+making when the implementation is small enough to hold in one head but the criteria are worth an
+adversary. Prefer it to full inline whenever the stage has acceptance criteria that can be written
+before the code.
+
+Whichever is chosen, **the three gates do not change.** They are what "done" means, and they are
+described once, below, for both modes.
 
 ## The two rules
 
-Everything below follows from two rules. If a situation is ambiguous, resolve it by these.
+Everything in dispatched mode follows from two rules. If a situation is ambiguous, resolve it by
+these.
 
-1. **The orchestrator never writes code.** Fable plans, dispatches, adjudicates, and seals. The moment
+1. **The orchestrator never writes code.** It plans, dispatches, adjudicates, and seals. The moment
    it patches something itself, that change has no independent verifier — the one thing this whole
    structure exists to guarantee.
 2. **Whoever implements does not judge.** Acceptance tests are written by a different agent than the
@@ -19,9 +61,38 @@ Everything below follows from two rules. If a situation is ambiguous, resolve it
 Rule 2 is aimed at the dominant failure mode of agent-run projects: the implementer quietly weakens
 the test until the suite passes, and every downstream stage builds on a lie.
 
+### What inline mode gives up, stated plainly
+
+Rule 1 is gone by construction: the agent writing the code is the one deciding whether it is right.
+Rule 2 is gone too unless a verifier is dispatched separately. That is a real loss and should not be
+papered over — stage 4's schema-fingerprint bug was found by a verifier who had not written the
+implementation, and an inline stage would have shipped it.
+
+What partially replaces it, and what does not:
+
+- **You are in the loop continuously.** Three of stage 5's decisions were corrections you made after
+  seeing the result. That is a form of independent judgment the dispatched flow gets only at gates —
+  but it is judgment about *what was asked for*, not about whether the code is quietly wrong.
+- **Tests written before the implementation still work inline.** Writing the assertion first is a
+  discipline, not an agent boundary. It is weaker — the same head writes both — but it is not
+  nothing, and it is free.
+- **The mechanical gate is unchanged and is mode-independent.** Exit codes do not care who typed.
+- **Nothing replaces the mutation spot-check.** If a stage's correctness is not visible on screen,
+  inline mode has no answer for it, and that is the signal to dispatch a verifier even if
+  everything else stays inline.
+
+**The rule for choosing, in one line:** if you cannot tell by looking whether it works, do not run it
+inline without a verifier.
+
 ## Roles
 
 Five agent definitions in `.claude/agents/`. Fewer types, sharper boundaries.
+
+**These are dispatched-mode roles.** Inline mode collapses planner, implementer, integrator and
+scribe into the one agent in the conversation; only the verifier is worth dispatching separately,
+and the hybrid shape above is exactly that. The role descriptions still matter inline — they name
+the *jobs* that have to happen, and an inline agent that skips the integrator's job has skipped
+running the gate, not saved a step.
 
 ### `stage-planner` — opus
 
@@ -34,7 +105,7 @@ tools: Read, Grep, Glob, Bash, Write
 ---
 ```
 
-Reads `docs/plans/stage<N>.md`, `overview.md`, and the current repo state. Emits
+Reads `docs/plans/stages/stage<N>.md`, `overview.md`, and the current repo state. Emits
 `docs/plans/runs/stage<N>/breakdown.md`: a task DAG, an explicit **file ownership set** per task,
 which tasks are parallel-safe, and a recommended model per task with a one-line reason. Writes no
 production code.
@@ -200,7 +271,11 @@ Skipping the mutation check is the tempting shortcut and the one that lets a vac
 
 ### The three gates
 
-All three must pass. They fail differently on purpose, which is why there are three.
+All three must pass, **in both modes**. They are what "done" means; the mode only changes who runs
+them. Inline, the orchestrator runs the mechanical gate itself and `/code-review` still applies —
+what it cannot supply on its own is phase B, which is the one gate that needs an adversary.
+
+They fail differently on purpose, which is why there are three.
 
 | Gate | Who | Judgment involved | Catches |
 | --- | --- | --- | --- |

@@ -7,7 +7,7 @@
 //!
 //! # The two forms
 //!
-//! Using `docs/plans/stage2.md`'s worked example — edges `A→B`, `B→C`, `C→E`, `C→D`, `A→F`:
+//! Using `docs/plans/stages/stage2.md`'s worked example — edges `A→B`, `B→C`, `C→E`, `C→D`, `A→F`:
 //!
 //! ```text
 //!   B - C - E          paths     (A,B,C,D), (A,B,C,E), (A,F)

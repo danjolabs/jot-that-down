@@ -208,7 +208,7 @@ injection.
   that key — the directory the file sits in **is** the state — so the criterion named a field that
   no longer exists. What replaces it is stronger and is tested: a trash-and-restore round trip
   leaves the file byte-identical, because nothing about trashing is written into it at all.)*
-- `jot list --json | jq` round-trips; the schema is documented in [`docs/cli-json.md`](../cli-json.md).
+- `jot list --json | jq` round-trips; the schema is documented in [`docs/cli-json.md`](../../cli-json.md).
 - Every command works from a subdirectory of the workspace.
 - One full week of real capture with no data loss and no manual index repair. **Open** — this is the
   dogfooding criterion and it can only be closed by time.

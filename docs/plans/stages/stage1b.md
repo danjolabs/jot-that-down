@@ -1,7 +1,7 @@
 # Stage 1b — Declared frontmatter schema
 
 > **Implemented 2026-08-31** on `stage/1b-declared-frontmatter-schema`. The run is in
-> [`runs/stage1b/`](runs/stage1b/log.md): what was ratified, where the implementation deviated from
+> [`runs/stage1b/`](../runs/stage1b/log.md): what was ratified, where the implementation deviated from
 > this document and why, the per-criterion verdict, and an eleven-mutation spot-check. Two sections
 > below carry inline corrections marked **Corrected at implementation**; the Open questions section
 > records what was settled.
@@ -306,7 +306,7 @@ instead of containing it.
   behaviour rather than deleting it — `---\n---\n` used to be `FrontmatterNotAMapping`, because an
   empty block had no `id`.
 - ~~**Where the markdown-crate decision is recorded.**~~ **Settled: `runs/stage1b/` was opened
-  early.** [`runs/stage1b/markdown-crate.md`](runs/stage1b/markdown-crate.md) carries the decision,
+  early.** [`runs/stage1b/markdown-crate.md`](../runs/stage1b/markdown-crate.md) carries the decision,
   the verification table, the weight (`markdown v1.0.0` plus `unicode-id`), and the two behaviours
   this document got slightly wrong. `Cargo.toml` points at it.
 - ~~**Whether the crate swap lands before 1b.**~~ **Settled: inside 1b, one diff.** The mitigation

@@ -10,7 +10,7 @@ implicit here gets reimplemented three times, slightly differently.
 **Not in this stage.** Anything a person can type at. Still library-only.
 
 > **Built, and built before stage 4.** Everything below is implemented in `jot-core` against
-> `snapshot::Snapshot` rather than SQLite — see [overview.md](overview.md), "Build order changed".
+> `snapshot::Snapshot` rather than SQLite — see [overview.md](../overview.md), "Build order changed".
 > No rule in this document was weakened to make that work; the index was only ever the *fast* way to
 > get the note set, and a scan is the slow way to get the same one. Two findings from the build are
 > recorded at the foot of this file.

@@ -16,7 +16,7 @@ running it, and is this stage's one genuinely **UNVERIFIED** item (`verification
 reading only"). `fsync` durability is separately untestable by construction (M39) and is named here
 rather than left to look covered.
 
-`docs/plans/stage1b.md`, committed the same day as seal, supersedes part of what shipped: identity
+`docs/plans/stages/stage1b.md`, committed the same day as seal, supersedes part of what shipped: identity
 moves from filename-and-frontmatter to filename-only, and the two-path (preserve/canonicalize)
 serializer is replaced by one schema-driven render path. None of that is implemented yet — stage 1b
 is a plan doc, not code — and everything above describes what stage 1 actually built and shipped.

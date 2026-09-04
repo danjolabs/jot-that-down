@@ -859,7 +859,7 @@ impl Workspace {
     /// different things — which made the index's *representation* part of the API. Stage 4 puts
     /// SQLite here, and there is no `&Snapshot` to hand back once it does; the four methods below
     /// are what the surfaces actually needed, and each of them is answerable by a query. See
-    /// `docs/plans/stage4.md`, "the swap is invisible".
+    /// `docs/plans/stages/stage4.md`, "the swap is invisible".
     #[cfg(test)]
     fn snapshot(&self) -> &Snapshot {
         &self.snapshot
@@ -3425,7 +3425,7 @@ mod lifecycle_tests {
         //
         // Ambiguity is handled correctly: it lists candidates and never guesses. But a surface
         // that prints `short()` and then accepts it back will hand people an id that does not
-        // resolve, which is a stage 3 problem and is written up in `docs/plans/stage3.md`.
+        // resolve, which is a stage 3 problem and is written up in `docs/plans/stages/stage3.md`.
         let (_tmp, mut ws) = workspace();
         let first = ws.create(Draft::new("one")).unwrap();
         let second = ws.create(Draft::new("two")).unwrap();

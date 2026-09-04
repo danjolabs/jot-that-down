@@ -1,7 +1,7 @@
 # Pre-stage-4 refactor — typed frontmatter schema
 
 **Status.** Implemented on `refactor-pre-stage4`, from `237d8fb`. The run is in
-[`runs/pre-stage4/log.md`](runs/pre-stage4/log.md): what deviated from this document and why, the
+[`runs/pre-stage4/log.md`](../runs/pre-stage4/log.md): what deviated from this document and why, the
 acceptance-suite appeal and every edit made under it, and the two things this refactor found that the
 plan did not anticipate.
 

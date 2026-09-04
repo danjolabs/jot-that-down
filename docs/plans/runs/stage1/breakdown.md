@@ -57,7 +57,7 @@ skeleton.
 
 | Task | Owns | Model | Why this model |
 | --- | --- | --- | --- |
-| T2.1 Dependency landing, YAML crate choice, timestamp representation choice, crate error taxonomy | `Cargo.toml`, `Cargo.lock`, `crates/jot-core/Cargo.toml`, `crates/jot-core/src/error.rs`, `docs/plans/stage1.md`, `docs/plans/runs/stage1/yaml-crate.md` | opus | The YAML crate and the timestamp type decide whether byte-identical round-trip is even achievable; failure here is silent data mangling discovered in stage 7. |
+| T2.1 Dependency landing, YAML crate choice, timestamp representation choice, crate error taxonomy | `Cargo.toml`, `Cargo.lock`, `crates/jot-core/Cargo.toml`, `crates/jot-core/src/error.rs`, `docs/plans/stages/stage1.md`, `docs/plans/runs/stage1/yaml-crate.md` | opus | The YAML crate and the timestamp type decide whether byte-identical round-trip is even achievable; failure here is silent data mangling discovered in stage 7. |
 | T2.2 Phase A acceptance tests | `crates/jot-acceptance/**` (exclusive, whole crate incl. its `Cargo.toml`) | opus | Verification is never routed to sonnet; its whole value is skepticism about work that looks finished. |
 
 **Owns the dependency manifests this wave: T2.1.** T2.2 owns `crates/jot-acceptance/Cargo.toml`,
@@ -74,7 +74,7 @@ emitters (`saphyr` / `yaml-rust2` lineage) are different bets, and the round-tri
 reachable through a serde `Serializer` at all — that is the finding the spike exists to produce. The
 same task decides how `created_at` / `edited_at` are represented in memory (see §U2) and lands that
 decision in the same record. The one-line choice plus the date is appended to the "Pick a maintained
-YAML crate" bullet in `docs/plans/stage1.md`, as that file asks. The full stage-1 dependency set is
+YAML crate" bullet in `docs/plans/stages/stage1.md`, as that file asks. The full stage-1 dependency set is
 landed in root `[workspace.dependencies]` and referenced from `crates/jot-core/Cargo.toml` via
 `workspace = true`: `uuid` (features `v7`, `serde`), `serde` (feature `derive`), the chosen YAML
 crate, `toml` (or `toml_edit`, T2.1's call, for `workspace.toml`), `thiserror`, `directories`, the
@@ -254,7 +254,7 @@ The negative list. This is the part worth more than the task list.
   worktree because its YAML spike is exploratory and gets discarded; T2.2 because it runs suites that
   are meant to be red. T1.1 and T4.1 run in place — each is alone in its wave and merge work is pure
   overhead.
-- **`docs/plans/stage1.md` is owned by T2.1 for the duration of stage 1.** The scribe must not touch
+- **`docs/plans/stages/stage1.md` is owned by T2.1 for the duration of stage 1.** The scribe must not touch
   it during the waves. The stage doc asks for the YAML choice to be recorded in itself, which puts an
   implementer in a plan doc — an intentional exception to "the scribe applies plan-doc edits", worth
   Fable's explicit approval of the choice before the line lands.

@@ -1,7 +1,7 @@
 # Stage 7 — What is left of the frontmatter schema
 
 **Status.** Mostly subsumed. This stage had two headline features and both are settled: user-declared
-typed frontmatter **landed early**, in `docs/plans/pre-stage4-refactor.md`, and `plain` workspaces are
+typed frontmatter **landed early**, in `docs/plans/stages/pre-stage4-refactor.md`, and `plain` workspaces are
 **deleted**. What remains is the tail of the type system — enums, defaults — plus rename detection,
 which never belonged to either feature and is the only genuinely hard thing here.
 

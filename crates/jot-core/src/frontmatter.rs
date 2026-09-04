@@ -1196,7 +1196,7 @@ fn relation(
 
 /// The whole frontmatter block as a JSON object, keyed by the **key as written**.
 ///
-/// This is `notes.raw` from `docs/plans/stage4.md`, and it lives here because this is the module
+/// This is `notes.raw` from `docs/plans/stages/stage4.md`, and it lives here because this is the module
 /// that knows what a frontmatter block is — not because [`Frontmatter`] holds it. It deliberately
 /// **does not**: in memory an unknown key keeps its exact source text, which is what makes a write
 /// splice it back byte-for-byte. The index gets a queryable projection instead, and a YAML→JSON

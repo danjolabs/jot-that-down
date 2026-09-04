@@ -208,7 +208,7 @@ ones. `jot-core` uses it for the index's `raw` column — a JSON projection of t
 | | |
 | --- | --- |
 | [`docs/plans/overview.md`](docs/plans/overview.md) | Locked decisions, architecture, the core API. **Read first.** |
-| [`docs/plans/stage<N>.md`](docs/plans) | One file per stage, self-contained. |
+| [`docs/plans/stages/stage<N>.md`](docs/plans/stages) | One file per stage, self-contained. |
 | [`docs/plans/runs/`](docs/plans/runs) | What each run actually did, what it found, what it cost. |
 | [`docs/cli-json.md`](docs/cli-json.md) | The `--json` contract and exit codes. |
 
