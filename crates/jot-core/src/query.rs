@@ -328,6 +328,13 @@ pub enum FileSort {
     /// Newest first, by the id's UUIDv7 timestamp.
     #[default]
     Created,
+    /// Oldest first, by the id's UUIDv7 timestamp.
+    ///
+    /// The one order that reads a vault forwards. Added for stage 5's files view, whose sort cycle
+    /// is four long: the other three all answer "what did I touch lately", and this one answers
+    /// "how did this start", which is a different question and the reason it earns a variant
+    /// rather than a `reverse()` at the call site.
+    CreatedAsc,
     /// Most recently written first, by filesystem mtime.
     Edited,
     /// Alphabetical by title; untitled notes sort last.

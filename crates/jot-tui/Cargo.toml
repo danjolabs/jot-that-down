@@ -1,0 +1,25 @@
+[package]
+name = "jot-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The terminal reading surface over jot-core. A library: `jot-cli` owns the binary."
+
+[lib]
+name = "jot_tui"
+path = "src/lib.rs"
+
+# A library with no `main`, deliberately. It cannot open a workspace of its own — `jot-cli` hands
+# it one — which is what keeps the seam enforceable at the crate boundary rather than by discipline.
+[dependencies]
+jot-core = { path = "../jot-core" }
+
+anyhow = { workspace = true }
+chrono = { workspace = true }
+ratatui = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+tempfile = { workspace = true }

@@ -761,6 +761,9 @@ impl Snapshot {
         match sort {
             // Newest first. Already in id order, so this is one reverse.
             FileSort::Created => rows.reverse(),
+            // Oldest first, which is the order `records` is already in: `BTreeMap` iterates by
+            // key, the key is the id, and a UUIDv7 sorts by creation time. Nothing to do.
+            FileSort::CreatedAsc => {}
             FileSort::Edited => rows.sort_by(|a, b| {
                 b.edited_at
                     .cmp(&a.edited_at)
@@ -1557,6 +1560,30 @@ mod tests {
             vec!["deep", "fork", "reply", "root"]
         );
         assert_eq!(snap.files(FileSort::Edited).len(), 4);
+    }
+
+    #[test]
+    fn created_ascending_is_created_descending_reversed() {
+        let (_tmp, ws) = vault(chain(), &[]);
+        let snap = scan(&ws);
+
+        let ids = |sort| {
+            snap.files(sort)
+                .iter()
+                .map(|r| r.note.id)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            ids(FileSort::CreatedAsc),
+            vec![nid(A), nid(B), nid(C), nid(D)]
+        );
+
+        // Stated as a relationship rather than only as a literal, so the two orders cannot drift
+        // apart if the fixture grows a note.
+        let mut descending = ids(FileSort::Created);
+        descending.reverse();
+        assert_eq!(ids(FileSort::CreatedAsc), descending);
     }
 
     #[test]

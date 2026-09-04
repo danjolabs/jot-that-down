@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-default-members = ["crates/jot-core", "crates/jot-cli"]
+default-members = ["crates/jot-core", "crates/jot-tui", "crates/jot-cli"]
 
 [workspace.package]
 version = "0.0.4-a"
@@ -19,6 +19,9 @@ chrono = { version = "0.4.45", default-features = false, features = [
 directories = "6.0.0"
 indexmap = { version = "2.14", features = ["serde"] }
 markdown = "1.0.0"
+# The watcher lives in core, not in the TUI: stage 6 needs the same change events, and a surface
+# that grew its own would be domain logic on the wrong side of the seam.
+notify = "8.0"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
@@ -31,8 +34,17 @@ yaml_serde = "0.10.7"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"
+# `crossterm` is deliberately absent: ratatui re-exports the exact version it was built against as
+# `ratatui::crossterm`, and a second direct pin is how a terminal app ends up linking two
+# incompatible `KeyEvent` types that differ only in a private field.
+ratatui = "0.30"
+# Terminal cell width for CJK and emoji. ratatui measures its own spans, but the reader wraps
+# markdown before ratatui sees it, and wrapping on `char` count draws a broken frame in any vault
+# with a non-Latin title.
+unicode-width = "0.2"
 
 # Dev only.
 assert_cmd = "2.0"
+insta = "1.48"
 predicates = "3.1"
 tempfile = "3.27"

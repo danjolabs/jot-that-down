@@ -17,4 +17,5 @@ pub mod registry;
 pub mod shortid;
 pub mod snapshot;
 pub mod thread;
+pub mod watch;
 pub mod workspace;
