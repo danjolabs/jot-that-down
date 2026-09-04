@@ -15,9 +15,23 @@ The two views named in `docs/conversation/initial.md`, plus the three supporting
 
 ### Timeline
 
-- Roots only by default, newest first, each showing title-or-first-line, relative time, reply and
-  branch counts.
-- `f` toggles flat — every note, newest first — for "what did I write today".
+- **Every note by default**, newest first, each showing title-or-first-line, relative time, reply
+  and branch counts. **Changed 2026-09-04, at the user's direction.** Roots-only was flood control,
+  and that does not survive a vault one person writes: threads here are short, and the reader panel
+  answers "what is this one" without opening anything. What roots-only was hiding — that a note is
+  a reply, and to what — is the thing worth seeing.
+- `f` toggles roots-only — thread heads, newest first — for "what am I in the middle of".
+- **A two-slot marker leads every row.** Slot one is where the note sits or what is wrong with
+  where it sits: `⌫` trashed, `⚠` parent not where it should be (red purged, yellow trashed), `↳` a
+  reply, `⚑` a thread head, blank for a note on its own. Slot two is `❯` when the note quotes
+  another. Both slots are reserved on every row, so the id column never moves.
+
+  Every glyph is East Asian **Neutral** — one column in any locale. That is checked, not assumed:
+  `◆`, `★`, `┬`, `¶` and `"` are all Ambiguous and render two columns under a CJK locale, which in
+  a fixed-width cell is a broken frame in exactly the vault most likely to have wide titles.
+- The meta column carries what has accumulated around a note: replies, then how many notes quote
+  it, then the age. It degrades to the age alone rather than clipping — the age is the one thing on
+  a row that nothing else on screen implies.
 - Day separators.
 - Keyset pagination on UUIDv7; loads more as you scroll, never a page number.
 

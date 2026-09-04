@@ -3,9 +3,9 @@ source: crates/jot-tui/tests/render.rs
 expression: frame
 ---
 ┌ timeline — every note ───────────────────┐┌ id---------------------------------- ──────────────────────────┐
-│   id-----------  the note in focus  ahead││# the note in focus                                             │
-│   id-----------  older              ahead││                                                                │
-│                                          ││the body of the focused note                                    │
+│ ❯ id-----------  a quoter          [age] ││# a quoter                                                      │
+│↳  id-----------  a reply           [age] ││                                                                │
+│⚑  id-----------  the head  1 ▸ 1 ❞ [age] ││body                                                            │
 │                                          ││                                                                │
 │                                          ││                                                                │
 │                                          ││                                                                │
@@ -13,4 +13,4 @@ expression: frame
 │                                          ││                                                                │
 │                                          ││                                                                │
 └──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
- 1/2  Space  n new  r reply  q quote  e edit  x trash  ·  Tab view  f flat  / search  ·  ? help  q quit
+ 1/3  Space  n new  r reply  q quote  e edit  x trash  ·  Tab view  f flat  / search  ·  ? help  q quit

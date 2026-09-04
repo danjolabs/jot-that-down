@@ -2,8 +2,8 @@
 source: crates/jot-tui/tests/render.rs
 expression: render(&mut app)
 ---
-┌ timeline — thread roots ─────────────────────────────────────────────┐
-│  id-----------  a title long enough that it cannot possibly…  [age]  │
+┌ timeline — every note ───────────────────────────────────────────────┐
+│   id-----------  a title long enough that it cannot possibly…  [age] │
 │                                                                      │
 │                                                                      │
 │                                                                      │

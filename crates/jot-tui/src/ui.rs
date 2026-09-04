@@ -158,12 +158,13 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         .map(|row| app.short_id(row.note.id).width())
         .max()
         .unwrap_or(0);
-    let meta_width = app
-        .rows()
-        .iter()
-        .map(|row| meta_text(row, now).width())
-        .max()
-        .unwrap_or(0);
+    let widest = |detail| {
+        app.rows()
+            .iter()
+            .map(|row| meta_text(row, now, detail).width())
+            .max()
+            .unwrap_or(0)
+    };
 
     // The title column is sized to the *titles*, not to the space available. Filling the width
     // was what stranded the age an inch of whitespace away from the title it describes: a column
@@ -178,26 +179,33 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
 
     let id_column = if id_width == 0 { 0 } else { id_width + ID_GAP };
     let avail = inner.saturating_sub(MARKER_WIDTH + id_column);
-    // A meta column may never take more than half of what is left; a vault of nothing but
-    // Untitled forks should still show some title.
-    let meta_width = meta_width.min(avail / 2);
+
+    // Priority when it does not all fit: the age, then the title, then the counts. The age is the
+    // one part of a row that is never inferable from anything else on screen, and the counts are
+    // the one part that is — a thread's size is visible the moment you open it. So the meta column
+    // degrades to the age alone rather than being clipped, which would have taken the age and left
+    // the counts. Same shape as the key bar dropping labels before it drops keys.
+    let detail = if title_natural.min(TITLE_MAX) + META_GAP + widest(MetaDetail::Full) <= avail {
+        MetaDetail::Full
+    } else {
+        MetaDetail::AgeOnly
+    };
+    let meta_width = widest(detail);
     let title_width = title_natural
         .min(avail.saturating_sub(meta_width + META_GAP))
         .min(TITLE_MAX);
 
+    let columns = Columns {
+        id: id_width,
+        title: title_width,
+        meta: meta_width,
+        detail,
+        in_trash: app.view() == ViewKind::Trash,
+    };
     let items: Vec<ListItem> = app
         .rows()
         .iter()
-        .map(|row| {
-            ListItem::new(row_line(
-                row,
-                &app.short_id(row.note.id),
-                id_width,
-                title_width,
-                meta_width,
-                now,
-            ))
-        })
+        .map(|row| ListItem::new(row_line(row, &app.short_id(row.note.id), columns, now)))
         .collect();
 
     let list = List::new(items).block(block).highlight_style(
@@ -211,9 +219,49 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// Columns the leading state marker occupies. Every marker is one glyph plus a space, and the
-/// wide ones (`⌫`, `⚠`) still render in one column followed by a space.
-const MARKER_WIDTH: usize = 2;
+/// Columns the leading marker occupies: two glyph slots and a space.
+///
+/// Both slots are reserved on every row, including the rows that fill neither. Letting the quote
+/// glyph slide left when the relation slot is empty would put the same symbol in two different
+/// columns, and a column you have to *read* to locate is not a column.
+///
+/// Every glyph used here — `⌫`, `⚠`, `↳`, `⚑`, `❯` — is East Asian **Neutral**, so all of them are
+/// one column in any locale. That is a property that was checked rather than assumed: `◆`, `★`,
+/// `┬`, `¶` and `“` are all *Ambiguous* and render two columns wide under a CJK locale, which in a
+/// fixed-width cell is a broken frame in exactly the vault that has CJK titles in it.
+const MARKER_WIDTH: usize = 3;
+
+/// The first marker slot: where this note sits, or what is wrong with where it sits.
+///
+/// First match wins, and the order is the point — a fact about the *vault* outranks a fact about
+/// the note, because it is the one you cannot find out any other way from a list.
+///
+/// Each glyph means one thing. `⌫` is always "this note is in the trash"; `⚠` is always "this
+/// note's parent is not where it should be", with the colour saying whether that is recoverable.
+/// Sharing a glyph between the two — which is what this did before there was anything else in the
+/// column — made `⌫` ambiguous the moment a second row could carry it for a different reason.
+fn relation_marker<'a>(row: &Row, in_trash: bool) -> (&'a str, Style) {
+    let warn = Style::default().fg(Color::Yellow);
+
+    match &row.parent {
+        // Trashed-ness is the trash view's whole premise, so marking every row with it there says
+        // nothing and costs the slot that would have said something.
+        _ if row.state == State::Trashed && !in_trash => ("\u{232b}", warn),
+        // A purged parent is unrecoverable, and the note is now a root that never asked to be one.
+        Some(Ref::Deleted(_)) => ("\u{26a0}", Style::default().fg(Color::Red)),
+        // A trashed parent is the state stage 2 exists to make visible: the note is live, its
+        // parent is not, and a list that says nothing about it is lying by omission. Recoverable,
+        // hence yellow rather than red.
+        Some(Ref::Trashed(_)) => ("\u{26a0}", warn),
+        // A reply with a live parent. The glyph is what the flat timeline was missing: before it,
+        // a reply and a standalone note were the same row.
+        Some(Ref::Present(_)) => ("\u{21b3}", dim()),
+        // No parent. A head of something, or a note on its own — and the difference is worth a
+        // glyph, because one of them is a thread you have not read yet.
+        None if row.replies > 0 => ("\u{2691}", dim()),
+        None => (" ", dim()),
+    }
+}
 
 /// Columns between the id and the title. Two, matching `jot ls`, so the two surfaces read as one
 /// listing rather than as two conventions.
@@ -233,15 +281,35 @@ const META_GAP: usize = 2;
 /// simply ends and the rest of the line stays empty.
 const TITLE_MAX: usize = 44;
 
+/// The list's column widths, decided once for the whole frame.
+///
+/// Passed as one value rather than six: they are a single decision — every one of them is chosen
+/// against the others and against the frame's width — and splitting them across a parameter list
+/// invites a caller to compute one of them somewhere else.
+#[derive(Debug, Clone, Copy)]
+struct Columns {
+    /// Width of the id column, before its gap.
+    id: usize,
+    /// Width of the title column.
+    title: usize,
+    /// Width of the right-hand meta column.
+    meta: usize,
+    /// How much of the meta column there is room for.
+    detail: MetaDetail,
+    /// Whether this is the trash, where trashed-ness is the premise rather than news.
+    in_trash: bool,
+}
+
 /// One row: marker, id, title, then the counts and age.
-fn row_line<'a>(
-    row: &Row,
-    id: &str,
-    id_width: usize,
-    title_width: usize,
-    meta_width: usize,
-    now: DateTime<Utc>,
-) -> Line<'a> {
+fn row_line<'a>(row: &Row, id: &str, columns: Columns, now: DateTime<Utc>) -> Line<'a> {
+    let Columns {
+        id: id_width,
+        title: title_width,
+        meta: meta_width,
+        detail,
+        in_trash,
+    } = columns;
+
     let title = title_of(row);
     let title_style = if row.note.title.is_some() {
         Style::default()
@@ -249,16 +317,17 @@ fn row_line<'a>(
         dim()
     };
 
-    // A trashed parent is the state stage 2 exists to make visible: the note is live, its parent
-    // is not, and a list that says nothing about it is lying by omission.
-    let marker = match &row.parent {
-        Some(Ref::Trashed(_)) => "⌫ ",
-        Some(Ref::Deleted(_)) => "⚠ ",
-        _ if row.state == State::Trashed => "⌫ ",
-        _ => "  ",
+    let (relation, relation_style) = relation_marker(row, in_trash);
+    let quote = if row.note.quote.is_some() {
+        "\u{276f}"
+    } else {
+        " "
     };
 
-    let meta = meta_text(row, now);
+    // Truncated as well as padded. The column is sized to the widest row, so this can only fire
+    // when even the age does not fit — but a frame two columns narrower than the arithmetic
+    // expected paints over its own border, and that is invisible in a snapshot.
+    let meta = truncate(&meta_text(row, now, detail), meta_width);
     let title_cell = truncate(&title, title_width);
     // Right-align the meta column: pad out the title's cell, then pad out the meta's own.
     let pad = meta_width.saturating_sub(meta.width());
@@ -274,7 +343,9 @@ fn row_line<'a>(
     );
 
     Line::from(vec![
-        Span::styled(marker.to_string(), dim()),
+        Span::styled(relation, relation_style),
+        Span::styled(quote, dim()),
+        Span::raw(" "),
         Span::styled(id_cell, Style::default().fg(Color::Yellow)),
         Span::styled(title_cell, title_style),
         Span::raw(" ".repeat(gap)),
@@ -293,22 +364,45 @@ fn title_of(row: &Row) -> String {
         .unwrap_or_else(|| "Untitled".to_string())
 }
 
-/// The right-hand column: reply count, then relative age.
-fn meta_text(row: &Row, now: DateTime<Utc>) -> String {
+/// How much of the right-hand column there is room for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetaDetail {
+    /// Counts and the age.
+    Full,
+    /// The age alone, for a list too narrow to carry both.
+    AgeOnly,
+}
+
+/// The right-hand column: reply count, quote count, then relative age.
+fn meta_text(row: &Row, now: DateTime<Utc>, detail: MetaDetail) -> String {
     let age = row
         .note
         .created_at
         .map_or_else(|| "—".to_string(), |t| relative(t, now));
 
-    if row.replies == 0 {
-        age
-    } else if row.replies == row.descendants {
-        format!("{} ▸  {age}", row.replies)
-    } else {
-        // Direct replies and the whole subtree differ, which means the thread branches. Showing
-        // both is what makes a fork visible from the list rather than only after opening it.
-        format!("{}/{} ▸  {age}", row.replies, row.descendants)
+    if detail == MetaDetail::AgeOnly {
+        return age;
     }
+
+    let mut out = String::new();
+    if row.replies > 0 {
+        if row.replies == row.descendants {
+            out.push_str(&format!("{} \u{25b8} ", row.replies));
+        } else {
+            // Direct replies and the whole subtree differ, which means the thread branches.
+            // Showing both is what makes a fork visible from the list rather than only after
+            // opening it.
+            out.push_str(&format!("{}/{} \u{25b8} ", row.replies, row.descendants));
+        }
+    }
+    // How many notes point *at* this one. A count rather than a list, and here rather than in the
+    // marker, because it is the same kind of fact as the reply count and belongs beside it — the
+    // marker says what this note is, the meta says what has accumulated around it.
+    if row.quoted > 0 {
+        out.push_str(&format!("{} \u{275e} ", row.quoted));
+    }
+    out.push_str(&age);
+    out
 }
 
 /// What an empty list should say. Never just blank — an empty frame is indistinguishable from a
@@ -681,28 +775,125 @@ mod tests {
     }
 
     #[test]
+    fn the_marker_says_where_a_note_sits_in_its_thread() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+        let glyph = |row: &Row| relation_marker(row, false).0;
+
+        let mut row = fake_row(now);
+        assert_eq!(glyph(&row), " ", "a note on its own gets no glyph at all");
+
+        row.replies = 1;
+        row.descendants = 1;
+        assert_eq!(glyph(&row), "\u{2691}", "a head of something is flagged");
+
+        let mut reply = fake_row(now);
+        reply.parent = Some(Ref::Present(fake_row(now).note));
+        assert_eq!(glyph(&reply), "\u{21b3}");
+
+        // A reply that has replies of its own is still a reply: the flag is for heads, and its
+        // own subtree is already announced by the count in the meta column.
+        reply.replies = 2;
+        reply.descendants = 2;
+        assert_eq!(glyph(&reply), "\u{21b3}");
+    }
+
+    #[test]
+    fn each_marker_glyph_means_exactly_one_thing() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+        let id = fake_row(now).note.id;
+
+        let mut trashed = fake_row(now);
+        trashed.state = State::Trashed;
+        assert_eq!(
+            relation_marker(&trashed, false).0,
+            "\u{232b}",
+            "`⌫` is this note being in the trash"
+        );
+        assert_eq!(
+            relation_marker(&trashed, true).0,
+            " ",
+            "and says nothing in the view where every row is trashed"
+        );
+
+        let mut dangling = fake_row(now);
+        dangling.parent = Some(Ref::Deleted(id));
+        let mut orphaned = fake_row(now);
+        orphaned.parent = Some(Ref::Trashed(fake_row(now).note));
+        assert_eq!(
+            relation_marker(&dangling, false).0,
+            relation_marker(&orphaned, false).0,
+            "`⚠` is always the parent not being where it should be"
+        );
+        assert_ne!(
+            relation_marker(&dangling, false).1,
+            relation_marker(&orphaned, false).1,
+            "and the colour is what says whether that is recoverable"
+        );
+    }
+
+    #[test]
+    fn every_marker_glyph_is_one_column_in_every_locale() {
+        // The property that keeps a two-slot marker from breaking the frame. `◆`, `★`, `┬` and `¶`
+        // would all fail this: they are East Asian Ambiguous and render two columns under a CJK
+        // locale, which is the vault most likely to have wide titles already.
+        for glyph in [
+            "\u{232b}", "\u{26a0}", "\u{21b3}", "\u{2691}", "\u{276f}", "\u{275e}",
+        ] {
+            assert_eq!(glyph.width(), 1, "`{glyph}` is not one column");
+            assert_eq!(
+                UnicodeWidthStr::width_cjk(glyph),
+                1,
+                "`{glyph}` widens to two columns under a CJK locale"
+            );
+        }
+    }
+
+    #[test]
     fn the_meta_column_shows_a_fork_as_direct_over_total() {
         let now = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
         let mut row = fake_row(now);
 
         row.replies = 0;
         row.descendants = 0;
-        assert_eq!(meta_text(&row, now), "now", "a leaf shows only its age");
+        assert_eq!(
+            meta_text(&row, now, MetaDetail::Full),
+            "now",
+            "a leaf shows only its age"
+        );
 
         row.replies = 2;
         row.descendants = 2;
         assert_eq!(
-            meta_text(&row, now),
-            "2 ▸  now",
+            meta_text(&row, now, MetaDetail::Full),
+            "2 ▸ now",
             "a flat thread shows one count"
         );
 
         row.replies = 2;
         row.descendants = 5;
         assert_eq!(
-            meta_text(&row, now),
-            "2/5 ▸  now",
+            meta_text(&row, now, MetaDetail::Full),
+            "2/5 ▸ now",
             "a branching thread shows both, which is what makes a fork visible from the list"
+        );
+    }
+
+    #[test]
+    fn the_meta_column_counts_what_points_at_a_note() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
+        let mut row = fake_row(now);
+
+        row.quoted = 1;
+        assert_eq!(meta_text(&row, now, MetaDetail::Full), "1 ❞ now");
+
+        // Both counts, in the order the eye reads them: what grew under it, then what points at it.
+        row.replies = 2;
+        row.descendants = 2;
+        assert_eq!(meta_text(&row, now, MetaDetail::Full), "2 ▸ 1 ❞ now");
+        assert_eq!(
+            meta_text(&row, now, MetaDetail::AgeOnly),
+            "now",
+            "a narrow list keeps the age and drops the counts, never the other way round"
         );
     }
 

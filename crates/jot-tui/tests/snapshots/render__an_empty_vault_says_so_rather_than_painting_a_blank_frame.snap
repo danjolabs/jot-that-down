@@ -2,7 +2,7 @@
 source: crates/jot-tui/tests/render.rs
 expression: render(&mut app)
 ---
-┌ timeline — thread roots ─────────────────────────────────────────────┐
+┌ timeline — every note ───────────────────────────────────────────────┐
 │                                                                      │
 │  Nothing here yet. Press n to write the first note.                  │
 │                                                                      │

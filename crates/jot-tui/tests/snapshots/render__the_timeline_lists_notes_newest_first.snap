@@ -2,10 +2,10 @@
 source: crates/jot-tui/tests/render.rs
 expression: render(&mut app)
 ---
-┌ timeline — thread roots ─────────────────────────────────────────────┐
-│  id-----------  third           [age]                                │
-│  id-----------  second thought  [age]                                │
-│  id-----------  first thought   [age]                                │
+┌ timeline — every note ───────────────────────────────────────────────┐
+│   id-----------  third           [age]                               │
+│   id-----------  second thought  [age]                               │
+│   id-----------  first thought   [age]                               │
 │                                                                      │
 │                                                                      │
 │                                                                      │

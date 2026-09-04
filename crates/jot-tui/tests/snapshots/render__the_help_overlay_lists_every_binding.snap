@@ -2,8 +2,8 @@
 source: crates/jot-tui/tests/render.rs
 expression: "render_at(&mut app, 72, 26)"
 ---
-┌ timeline — thread roots ─────────────────────────────────────────────┐
-│  id----------┌ keys — any key to close ──────────────┐               │
+┌ timeline — every note ───────────────────────────────────────────────┐
+│   id---------┌ keys — any key to close ──────────────┐               │
 │              │  j         move down                  │               │
 │              │  k         move up                    │               │
 │              │  g         first row                  │               │

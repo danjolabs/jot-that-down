@@ -514,3 +514,81 @@ fn every_row_starts_its_title_in_the_same_column() {
         "titles start at {columns:?}, so the id column is not padded to one width:\n{frame}"
     );
 }
+
+#[test]
+fn the_timeline_opens_on_every_note_rather_than_thread_roots() {
+    let (_tmp, mut app) = vault(&["a root"]);
+    app.dispatch(Action::Reply);
+    // No composer here; the point is the header and the flag, not the reply.
+    let _ = app.take_pending();
+
+    let frame = render(&mut app);
+    assert!(
+        frame.contains("every note"),
+        "roots-only was flood control for a vault with more than one author:\n{frame}"
+    );
+}
+
+#[test]
+fn the_marker_distinguishes_a_reply_from_a_note_on_its_own() {
+    let (_tmp, mut app) = threaded();
+    let frame = render_at(&mut app, WIDE.0, WIDE.1);
+
+    assert!(
+        frame.contains('\u{21b3}'),
+        "a reply must not look like a standalone note — the whole reason flat was hiding:\n{frame}"
+    );
+    assert!(
+        frame.contains('\u{2691}'),
+        "and the head of the thread must say so:\n{frame}"
+    );
+    assert_frame!(frame);
+}
+
+#[test]
+fn a_quote_fills_the_second_slot_without_moving_the_first() {
+    let (_tmp, mut app) = threaded();
+    let frame = render_at(&mut app, WIDE.0, WIDE.1);
+
+    // Every row's id starts in the same column whether it carries zero, one or two glyphs. That
+    // is the whole reason both slots are reserved rather than packed.
+    // List rows only. The reader's title bar carries a masked *full* id, which starts with the
+    // same characters and would otherwise be read as a fourth column position.
+    let columns: Vec<usize> = frame
+        .lines()
+        .filter(|line| line.starts_with('\u{2502}') && line.contains(MASK.trim_end()))
+        .map(|line| line.find(MASK.trim_end()).unwrap())
+        .collect();
+    assert_eq!(columns.len(), 3, "three rows expected:\n{frame}");
+    assert!(
+        columns.windows(2).all(|w| w[0] == w[1]),
+        "ids start at {columns:?}, so a glyph is pushing its row sideways:\n{frame}"
+    );
+    assert!(
+        frame.contains('\u{276f}'),
+        "the quoting note must show it quotes:\n{frame}"
+    );
+    assert!(
+        frame.contains('\u{275e}'),
+        "and the quoted note must show something points at it:\n{frame}"
+    );
+}
+
+/// A vault holding one thread and one note that quotes its root, synced and loaded.
+///
+/// Built through the workspace rather than by hand because the marker is a function of `Row`, and
+/// `Row`'s relation fields are exactly what the index computes.
+fn threaded() -> (TempDir, App) {
+    use jot_core::query::Draft;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(tmp.path()).unwrap();
+    let root = ws.create(Draft::new("body").title("the head")).unwrap();
+    let root = root.meta().id;
+    ws.create(Draft::new("body").title("a reply").reply_to(root))
+        .unwrap();
+    ws.create(Draft::new("body").title("a quoter").quote(root))
+        .unwrap();
+    ws.sync().unwrap();
+    (tmp, App::new(ws))
+}

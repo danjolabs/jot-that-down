@@ -3,8 +3,8 @@ source: crates/jot-tui/tests/render.rs
 expression: render(&mut app)
 ---
 ┌ files — sort: oldest ────────────────────────────────────────────────┐
-│  id-----------  b note  [age]                                        │
-│  id-----------  a note  [age]                                        │
+│   id-----------  b note  [age]                                       │
+│   id-----------  a note  [age]                                       │
 │                                                                      │
 │                                                                      │
 │                                                                      │

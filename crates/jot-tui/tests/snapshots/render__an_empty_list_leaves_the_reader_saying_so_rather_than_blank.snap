@@ -2,7 +2,7 @@
 source: crates/jot-tui/tests/render.rs
 expression: frame
 ---
-┌ timeline — thread roots ─────────────────┐┌ reader ────────────────────────────────────────────────────────┐
+┌ timeline — every note ───────────────────┐┌ reader ────────────────────────────────────────────────────────┐
 │                                          ││                                                                │
 │  Nothing here yet. Press n to write the f││  Nothing selected.                                             │
 │                                          ││                                                                │

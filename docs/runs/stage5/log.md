@@ -237,6 +237,43 @@ That also paid for itself in the tests: with the width deterministic, the wide t
 came back from the one-note vault it had been reduced to. The masking now also has to cover a
 *truncated* id, since the `?` overlay lands on top of a row and leaves the front of one showing.
 
+### The timeline shows every note, and every row says what it is
+
+Roots-only was the opening view for flood control. It does not survive a vault one person writes:
+threads are short, and the reader panel already answers "what is this one" without opening
+anything. What it was hiding is the thing worth seeing — that a note is a reply, and to what. `f`
+still gets the roots-only view; it is the special one now.
+
+Flat lists need to say what each row *is*, so the marker cell grew from one glyph to two, both
+reserved on every row. Slot one is where the note sits or what is wrong with where it sits; slot
+two is whether it quotes. Reserving both rather than packing them was a deliberate choice: letting
+the quote glyph slide left when slot one is empty would put the same symbol in two columns, and a
+column you have to read to locate is not a column.
+
+Two things fell out of building it.
+
+**Each glyph now means one thing.** `⌫` used to mean both "this note is in the trash" and "this
+note's *parent* is in the trash" — harmless while it was the only glyph in the column, ambiguous
+the moment a second row could carry it for a different reason. `⌫` is now only the former, `⚠` is
+always "the parent is not where it should be", and the colour says whether that is recoverable:
+red for purged, yellow for trashed. `⌫` is also suppressed in the trash view, where marking every
+row with trashed-ness says nothing and costs the slot that would have said something.
+
+**The glyphs were chosen by measurement, not by eye.** `⌫`, `⚠`, `↳`, `⚑`, `❯` and `❞` are all East
+Asian *Neutral* — one column in every locale, checked with `width_cjk` in
+`every_marker_glyph_is_one_column_in_every_locale`. The obvious alternatives are not: `◆`, `★`,
+`┬`, `¶` and `"` are Ambiguous and render two columns under a CJK locale. In a fixed-width cell
+that is a broken frame, in exactly the vault most likely to have wide titles in it. The existing
+`⌫`/`⚠` were documented as "the wide ones … still render in one column", which turned out to be
+true for a better reason than the comment gave.
+
+The meta column gained the quote count and then had to learn to degrade: `1 ▸ 1 ❞ ahead` did not
+fit a 44-column list and was being clipped to `ahea`, which took the age — the one part of a row
+that nothing else on screen implies — and kept the counts, which are visible the moment you open
+the note. It now drops to the age alone instead, the same shape as the key bar dropping labels
+before it drops keys, and `row_line` truncates as a floor so a frame narrower than the arithmetic
+expected cannot paint over its own border.
+
 ## What the process caught, and how
 
 Worth recording because the *how* differs, and only one of these was caught by a test that existed
@@ -297,10 +334,10 @@ Mechanical, on Linux, at `d4ae9d2`:
 
 New this stage: 47 in `jot-tui`'s lib, 11 render snapshots, 8 watcher tests in `jot-core`.
 
-Re-run after the reader panel, the id column, the key-bar cut, the search-cycle change and the
-prefix guard on writes, same machine: 600 in
+Re-run after the reader panel, the id column, the key-bar cut, the search-cycle change, the prefix
+guard on writes and the relation markers, same machine: 609 in
 `cargo test --workspace`, `fmt` and `clippy` clean, stage1b 120 and stage4 67 unchanged. `jot-tui`
-is now 65 lib tests and 19 render tests, and the render snapshots were re-recorded as each of those
+is now 69 lib tests and 22 render tests, and the render snapshots were re-recorded as each of those
 landed.
 
 **One pre-existing flake, seen twice in about thirty runs and not reproduced in 25 targeted ones:**

@@ -136,7 +136,7 @@ pub struct App {
     /// Rows of the current view, recomputed by [`App::reload`].
     rows: Vec<Row>,
     selected: usize,
-    /// Timeline: every note rather than roots only.
+    /// Timeline: every note rather than roots only. Defaults to every note; see [`App::new`].
     flat: bool,
     /// Files: the sort order `s` cycles.
     sort: FileSort,
@@ -189,7 +189,12 @@ impl App {
             view: ViewKind::default(),
             rows: Vec::new(),
             selected: 0,
-            flat: false,
+            // Every note, not thread roots only. Roots-only was the opening view for flood
+            // control, and that does not survive contact with a vault one person writes: threads
+            // here are short, and the reader panel already answers "what is this one" without
+            // opening anything. What the timeline was hiding — that a note is a reply, and what it
+            // is a reply to — is the thing worth seeing. `f` still gets the roots-only view.
+            flat: true,
             sort: FileSort::default(),
             query: String::new(),
             mode: Mode::Normal,
@@ -1056,14 +1061,16 @@ mod tests {
     #[test]
     fn flat_toggles_only_on_the_timeline() {
         let (_tmp, mut app) = vault(&["a"]);
-        app.dispatch(Action::ToggleFlat);
-        assert!(app.is_flat());
+        assert!(app.is_flat(), "every note is the opening view");
+
         app.dispatch(Action::ToggleFlat);
         assert!(!app.is_flat());
+        app.dispatch(Action::ToggleFlat);
+        assert!(app.is_flat());
 
         app.dispatch(Action::NextView); // files
         app.dispatch(Action::ToggleFlat);
-        assert!(!app.is_flat(), "flat is a timeline concept");
+        assert!(app.is_flat(), "flat is a timeline concept");
     }
 
     #[test]
@@ -1256,14 +1263,19 @@ mod tests {
         app.dispatch(Action::Reply);
         serve(&mut app, &Canned::titled("a reply"));
 
-        // Roots-only, so the reply is folded into its parent rather than listed.
-        assert_eq!(app.rows().len(), 1, "a reply is not a root");
-        let root = &app.rows()[0];
-        assert_eq!(root.note.id, parent);
+        // Every note by default, so both are listed and the reply is visibly a reply.
+        assert_eq!(app.rows().len(), 2, "flat shows both");
+        let root = app.rows().iter().find(|r| r.note.id == parent).unwrap();
         assert_eq!(root.replies, 1, "the parent shows its new reply");
+        assert!(
+            app.rows()
+                .iter()
+                .any(|r| r.note.reply_to == Some(parent) && !r.is_root()),
+            "and the reply knows what it is a reply to"
+        );
 
         app.dispatch(Action::ToggleFlat);
-        assert_eq!(app.rows().len(), 2, "flat shows both");
+        assert_eq!(app.rows().len(), 1, "roots only folds it back in");
     }
 
     #[test]
@@ -1313,8 +1325,7 @@ mod tests {
         app.dispatch(Action::Reply);
         serve(&mut app, &Canned::titled("child"));
 
-        // Roots-only hides the child's parent, so `u` should point at `f` rather than no-op.
-        app.dispatch(Action::ToggleFlat);
+        // The parent is listed beside the child now, which is most of why `u` is worth having.
         let child = app
             .rows()
             .iter()
