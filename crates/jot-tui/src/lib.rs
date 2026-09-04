@@ -11,6 +11,7 @@
 //! [`Workspace`]: jot_core::workspace::Workspace
 
 pub mod app;
+pub mod compose;
 pub mod key;
 pub mod run;
 pub mod ui;

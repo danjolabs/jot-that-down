@@ -946,6 +946,7 @@ name = "jot-tui"
 version = "0.0.4-a"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "insta",
  "jot-core",

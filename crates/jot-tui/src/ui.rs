@@ -242,12 +242,24 @@ fn draw_key_bar(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Width of the key column in the help overlay. `Space q` is the longest key, at 7.
+const KEY_COLUMN: usize = 10;
+
 /// The `?` overlay, rendered from the same table the event loop dispatches on.
 fn draw_help(frame: &mut Frame, area: Rect) {
     let bindings = Keymap::bindings();
 
-    // Two columns of key/description, centred, sized to the content rather than the terminal.
-    let width = 46u16.min(area.width.saturating_sub(4));
+    // Sized to the *content*: a guessed constant silently truncates the longest row, and the
+    // longest row here is `Tab`'s, which is exactly the one a newcomer most needs to read whole.
+    // 2 columns of border, 2 of indent, then the key column and the description.
+    let widest = bindings
+        .iter()
+        .map(|b| KEY_COLUMN + b.description.width())
+        .max()
+        .unwrap_or(0);
+    let width = u16::try_from(widest + 6)
+        .unwrap_or(u16::MAX)
+        .min(area.width.saturating_sub(4));
     let height = (bindings.len() as u16 + 4).min(area.height.saturating_sub(2));
     let popup = centred(area, width, height);
 
@@ -256,7 +268,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         .map(|b| {
             Line::from(vec![
                 Span::styled(
-                    format!("  {:<10}", b.keys),
+                    format!("  {:<width$}", b.keys, width = KEY_COLUMN),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),

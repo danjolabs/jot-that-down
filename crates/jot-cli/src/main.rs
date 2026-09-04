@@ -23,6 +23,7 @@
 //! | 3 | no such note or workspace |
 //! | 4 | ambiguous id prefix |
 
+mod compose;
 mod context;
 mod editor;
 mod output;
@@ -420,7 +421,7 @@ fn run() -> Result<(), Failure> {
                     "`jot tui` needs a terminal; stdout is redirected"
                 )));
             }
-            jot_tui::run(context.workspace).map_err(Failure::runtime)
+            jot_tui::run(context.workspace, &compose::Editor).map_err(Failure::runtime)
         }
         Command::Workspace(_) | Command::Completions { .. } => unreachable!("handled above"),
     }

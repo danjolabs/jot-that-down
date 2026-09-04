@@ -144,6 +144,23 @@ fn a_cjk_title_does_not_break_the_frame() {
 }
 
 #[test]
+fn the_help_overlay_shows_every_description_in_full() {
+    let (_tmp, mut app) = vault(&["a note"]);
+    app.dispatch(Action::Help);
+    let frame = render_at(&app, 100, 26);
+
+    // Sizing the popup by a guessed constant clipped `Tab`'s row, which is the longest and the one
+    // a newcomer most needs whole. Assert every description survives rather than eyeballing it.
+    for binding in jot_tui::key::Keymap::bindings() {
+        assert!(
+            frame.contains(binding.description),
+            "`{}` is clipped out of the help overlay:\n{frame}",
+            binding.description
+        );
+    }
+}
+
+#[test]
 fn the_key_bar_is_wider_on_a_wider_terminal_and_never_overflows() {
     let (_tmp, app) = vault(&["a note"]);
 

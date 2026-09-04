@@ -16,6 +16,7 @@ path = "src/lib.rs"
 jot-core = { path = "../jot-core" }
 
 anyhow = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 ratatui = { workspace = true }
 unicode-width = { workspace = true }

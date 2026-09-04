@@ -33,7 +33,8 @@ use ratatui::crossterm::terminal::{
 };
 use ratatui::crossterm::{ExecutableCommand, cursor};
 
-use crate::app::App;
+use crate::app::{App, Pending};
+use crate::compose::Composer;
 use crate::key::Resolved;
 use crate::ui;
 
@@ -50,12 +51,12 @@ const TICK: Duration = Duration::from_millis(100);
 ///
 /// If the terminal cannot be put into raw mode or the alternate screen, or if drawing fails.
 /// A workspace that cannot be watched is **not** an error — see [`jot_core::error::Error::Watch`].
-pub fn run(ws: Workspace) -> Result<()> {
+pub fn run(ws: Workspace, composer: &dyn Composer) -> Result<()> {
     let mut terminal = setup().context("cannot start the terminal UI")?;
 
     // Everything after setup runs with the terminal captured, so failures have to be caught and
     // the terminal restored before they propagate. `restore` is idempotent.
-    let outcome = event_loop(&mut terminal, ws);
+    let outcome = event_loop(&mut terminal, ws, composer);
     restore();
     outcome
 }
@@ -84,7 +85,11 @@ fn restore() {
 }
 
 /// Draw, wait, dispatch, repeat.
-fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ws: Workspace) -> Result<()> {
+fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ws: Workspace,
+    composer: &dyn Composer,
+) -> Result<()> {
     // A failed watch costs live updates, not the session. The message reaches the user as a toast
     // on the first frame rather than as a refusal to open.
     let watch = Watcher::new(ws.root());
@@ -120,6 +125,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ws: Workspace) 
             }
         }
 
+        if let Some(pending) = app.take_pending() {
+            serve(terminal, &mut app, composer, pending)?;
+        }
+
         if let Some(watcher) = &watch {
             drain_watcher(watcher, &mut app);
         }
@@ -128,6 +137,82 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ws: Workspace) 
             return Ok(());
         }
     }
+}
+
+/// Do the thing `App` asked for but cannot do itself. See [`Pending`].
+fn serve(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    composer: &dyn Composer,
+    pending: Pending,
+) -> Result<()> {
+    match pending {
+        Pending::Copy(text) => {
+            // OSC 52, rather than a clipboard crate. It is one escape sequence, it needs no
+            // dependency and no X11/Wayland/pbcopy branch, and — the reason that actually decides
+            // it — it works over ssh, where a clipboard library would put the text on the
+            // *server's* clipboard, which is nobody's.
+            //
+            // Not every terminal honours it. A terminal that ignores it is indistinguishable from
+            // one that copied, which is why the toast says "copied" before we get here rather than
+            // claiming success afterwards.
+            copy_to_clipboard(&text)?;
+        }
+
+        Pending::Compose { reply_to, quote } => {
+            let outcome = with_terminal_released(terminal, || {
+                composer.compose(app.workspace(), reply_to, quote)
+            })?;
+            match outcome {
+                Ok(draft) => app.create(draft),
+                Err(err) => app.set_toast_error(err.to_string()),
+            }
+        }
+
+        Pending::EditNote(id) => {
+            let outcome = with_terminal_released(terminal, || composer.edit(app.workspace(), id))?;
+            match outcome {
+                Ok(edit) => app.apply_edit(id, edit),
+                Err(err) => app.set_toast_error(err.to_string()),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Hand the terminal back, run `f`, then take it again and repaint from scratch.
+///
+/// An editor needs the real terminal: raw mode off so it sees line discipline, the alternate
+/// screen left so it gets its own, and the cursor visible so you can see what you are typing.
+/// Leaving any of those set gives `$EDITOR` a terminal it cannot use.
+///
+/// `clear()` on the way back is not optional. The editor drew over the alternate screen, and
+/// ratatui's next frame only paints the cells it believes changed — so without it the browser
+/// comes back with the editor's leftovers showing through wherever the two happen to agree.
+fn with_terminal_released<T>(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    f: impl FnOnce() -> T,
+) -> Result<T> {
+    restore();
+    let outcome = f();
+
+    enable_raw_mode()?;
+    io::stdout().execute(EnterAlternateScreen)?;
+    io::stdout().execute(cursor::Hide)?;
+    terminal.clear()?;
+    Ok(outcome)
+}
+
+/// Put `text` on the terminal's clipboard with OSC 52.
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    use base64::Engine as _;
+    use std::io::Write as _;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let mut out = io::stdout();
+    write!(out, "\x1b]52;c;{encoded}\x07")?;
+    out.flush()?;
+    Ok(())
 }
 
 /// Apply whatever the watcher has to say, coalescing anything that queued up.
