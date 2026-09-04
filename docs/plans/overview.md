@@ -204,6 +204,16 @@ they were correctness costs the deferral would have been a mistake.
   tool, which is the only sense of "deterministic" worth having. Git does not track `.git/hooks/`,
   so each clone needs `git config core.hooksPath .githooks` once — see `AGENTS.md`. Escape hatch:
   `JOT_SKIP_VERSION_BUMP=1 git commit …`.
+
+  **A version nobody installs proves nothing**, so `.githooks/post-commit` compares the `jot` on
+  your PATH against the version just committed and says when they differ. It notifies rather than
+  installs, because `cargo install` writes to `~/.cargo/bin` and a hook that silently swaps a
+  binary on your PATH is unwelcome the day you are bisecting; `git config jot.autoInstall true`
+  opts in. It is deliberately **post**-commit — a release build takes minutes, and gating a commit
+  on one would punish the WIP commit you least want installed.
+
+  The pair is what closes the loop: the letter moves when the build changes, so
+  "installed ≠ committed" means exactly "your PATH is stale".
 - **Paths in the index** — relative to the workspace root, forward slashes, so the DB survives moving
   the vault between machines and platforms.
 - **Tests** — one `tests/fixtures/vault/` used by every stage. Add to it, never fork it. Property

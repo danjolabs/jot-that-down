@@ -18,10 +18,26 @@ git config core.hooksPath .githooks
 ```
 
 Git does not track `.git/hooks/`, so this is not inherited by a clone and nothing warns you when it
-is missing — the version letter simply stops moving. `.githooks/pre-commit` bumps
-`workspace.package.version`'s letter on any commit that changes what `cargo build` produces, which
-is what keeps a dogfooded `jot --version` honest about which build is on your PATH. See the
-Versioning bullet in `overview.md` for what it will and will not decide.
+is missing — the hooks below simply stop running. Two of them:
+
+- **`pre-commit`** bumps `workspace.package.version`'s letter on any commit that changes what
+  `cargo build` produces, and leaves docs-only commits alone. See the Versioning bullet in
+  `overview.md` for what it will and will not decide.
+- **`post-commit`** compares the `jot` on your PATH with the version you just committed and tells
+  you when they differ. It does not install by default: that writes outside the repository, and a
+  hook replacing a binary on your PATH as a side effect of `git commit` is unwelcome the day you
+  are bisecting. Opt in with `git config jot.autoInstall true`.
+
+The two work together. Because the letter moves on every commit that changes the build,
+"installed ≠ committed" is exactly "your PATH is stale" — which is worth knowing, because it had
+already happened: the `jot` being dogfooded was `0.0.4-a`, a stage-4 binary with no `jot tui` in it
+at all, while stage 5 was eight commits along.
+
+To refresh by hand:
+
+```sh
+cargo install --path crates/jot-cli --locked
+```
 
 ## Rules
 
