@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+#
+# Bump the version letter on any commit that changes what `cargo build` produces.
+#
+# Why this exists
+# ---------------
+# `overview.md` fixes the scheme as `0.0.<stage>-<letter>`, and says why: a dogfooded
+# `jot --version` should tell you which build is on your PATH. That only works if the letter
+# actually moves when the binary does — and relying on whoever is committing to remember is exactly
+# how it stops being true. It had already drifted: stage 5 was four commits old while the workspace
+# still said `0.0.4-a`.
+#
+# So this is a git hook rather than an editor or agent hook. It fires for every `git commit` in this
+# repository, by any tool and any person, which is the only sense of "deterministic" worth having.
+#
+# What it does NOT decide
+# -----------------------
+# The **stage number** and the **seal**. Both are judgements — which stage you are in, and whether
+# it is finished — and a hook that guessed them would be confidently wrong at exactly the moments
+# that matter. It bumps the letter and nothing else; a bare `0.0.<stage>` with no letter is a sealed
+# stage, and this hook refuses to touch one rather than inventing the next stage number.
+#
+# Escape hatch: `JOT_SKIP_VERSION_BUMP=1 git commit ...`
+
+set -euo pipefail
+
+if [[ "${JOT_SKIP_VERSION_BUMP:-}" == "1" ]]; then
+    exit 0
+fi
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+# --- 1. Does this commit change what gets built? -------------------------------------------------
+#
+# Docs, CI config and editor settings do not produce a different binary, so they do not earn a new
+# version — a letter that moves for a typo fix tells you nothing about the build on your PATH.
+# `.md` files under `crates/` are excluded for the same reason: a crate README is not code.
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+affects_build=false
+while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    case "$file" in
+        *.md) continue ;;
+        crates/*|Cargo.toml|Cargo.lock|rust-toolchain.toml|.cargo/*)
+            affects_build=true
+            break
+            ;;
+    esac
+done <<< "$staged"
+
+if [[ "$affects_build" != true ]]; then
+    exit 0
+fi
+
+# --- 2. Has someone already set the version in this commit? --------------------------------------
+#
+# Idempotence. Without this an amend bumps a second time, and a deliberate stage bump gets a letter
+# stapled onto it. If the staged version already differs from HEAD's, that was a decision — leave it.
+# `|| true` is load-bearing: under `set -e`, a grep that matches nothing returns 1 and kills the
+# hook, which git reports as a *failed commit* with no message. That bug bit during development and
+# is invisible from the outside — `git commit` simply does nothing.
+version_of() {
+    grep -m1 '^version = ' <<< "$1" 2>/dev/null | sed 's/^version = "\(.*\)"/\1/' || true
+}
+
+staged_toml="$(git show :Cargo.toml 2>/dev/null || true)"
+head_toml="$(git show HEAD:Cargo.toml 2>/dev/null || true)"
+[[ -z "$staged_toml" ]] && exit 0
+
+staged_version="$(version_of "$staged_toml")"
+head_version="$(version_of "$head_toml")"
+
+if [[ -z "$head_version" ]]; then
+    exit 0  # first commit; nothing to compare against
+fi
+if [[ "$staged_version" != "$head_version" ]]; then
+    echo "jot: version already set to $staged_version in this commit; leaving it alone"
+    exit 0
+fi
+
+# --- 3. Bump the letter --------------------------------------------------------------------------
+if [[ ! "$staged_version" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-([a-z]+)$ ]]; then
+    cat >&2 <<MSG
+jot: cannot bump the version letter — \`$staged_version\` is not \`<x.y.z>-<letter>\`.
+
+A bare \`0.0.<stage>\` is a *sealed* stage. Starting the next one is a decision this hook will not
+make for you: set \`workspace.package.version\` in Cargo.toml to the new stage's \`-a\` by hand,
+then commit again.
+MSG
+    exit 1
+fi
+
+base="${BASH_REMATCH[1]}"
+letter="${BASH_REMATCH[2]}"
+
+# a -> b, z -> aa. Bash's ++ on a string does exactly this and wraps the way we want.
+next=$(perl -e '
+    my $s = shift;
+    $s++;            # "a"->"b", "z"->"aa", "az"->"ba"
+    print $s;
+' "$letter")
+
+new_version="$base-$next"
+
+# --- 4. Write it, refresh the lock, stage both ---------------------------------------------------
+#
+# `Cargo.lock` records every workspace member''s own version, so leaving it stale makes the next
+# cargo command dirty the tree right after a commit that claimed to be clean.
+perl -0pi -e "s/^version = \"\Q$staged_version\E\"/version = \"$new_version\"/m" Cargo.toml
+
+if ! cargo metadata --format-version 1 --offline --quiet >/dev/null 2>&1; then
+    cargo metadata --format-version 1 --quiet >/dev/null 2>&1 || true
+fi
+
+git add Cargo.toml
+if [[ -f Cargo.lock ]]; then
+    git add Cargo.lock
+fi
+
+# Not `[[ -f ... ]] && git add`, for the same reason as above: a false test would be the script's
+# last command and so its exit status, aborting the commit whenever there is no lock file.
+echo "jot: version $staged_version -> $new_version (this commit changes the build)"

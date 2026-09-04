@@ -6,10 +6,22 @@ micro-blog. Rust core, three surfaces — CLI, then TUI, then desktop.
 ## Read first
 
 - `docs/plans/overview.md` — locked decisions, architecture, conventions
-- `docs/plans/stage<N>.md` — the stage being worked on
+- `docs/plans/stages/stage<N>.md` — the stage being worked on
 - `docs/plans/orchestration.md` — how stages get executed and verified
 
 `docs/ideas.md` and `docs/conversation.md` are history, not spec. If something in them matters, it belongs in a plan doc.
+
+## Setup, once per clone
+
+```sh
+git config core.hooksPath .githooks
+```
+
+Git does not track `.git/hooks/`, so this is not inherited by a clone and nothing warns you when it
+is missing — the version letter simply stops moving. `.githooks/pre-commit` bumps
+`workspace.package.version`'s letter on any commit that changes what `cargo build` produces, which
+is what keeps a dogfooded `jot --version` honest about which build is on your PATH. See the
+Versioning bullet in `overview.md` for what it will and will not decide.
 
 ## Rules
 

@@ -187,6 +187,23 @@ they were correctness costs the deferral would have been a mistake.
   there. Nothing is published to crates.io at these versions — they exist so a dogfooded
   `jot --version` says which stage the binary on your PATH came from. The first release version is
   a decision for after stage 6, not a convention to fix here.
+
+  **The letter is bumped by a git hook, not by whoever is committing.** `.githooks/pre-commit`
+  moves it on any commit that changes what `cargo build` produces — anything under `crates/`, the
+  manifests, the lockfile, the toolchain pin — and leaves docs-only commits alone, because a letter
+  that moves for a typo tells you nothing about the build on your PATH. It had already drifted
+  before the hook existed: stage 5 was four commits old while the workspace still said `0.0.4-a`,
+  which is exactly the failure the scheme exists to prevent.
+
+  The hook deliberately decides **only the letter**. The stage number and the seal are judgements —
+  which stage you are in, and whether it is finished — and a hook guessing them would be
+  confidently wrong at the moments that matter most. A bare `0.0.<stage>` is refused rather than
+  incremented: starting the next stage is something you write by hand.
+
+  It is a *git* hook rather than an editor or agent hook so that it fires for every commit by every
+  tool, which is the only sense of "deterministic" worth having. Git does not track `.git/hooks/`,
+  so each clone needs `git config core.hooksPath .githooks` once — see `AGENTS.md`. Escape hatch:
+  `JOT_SKIP_VERSION_BUMP=1 git commit …`.
 - **Paths in the index** — relative to the workspace root, forward slashes, so the DB survives moving
   the vault between machines and platforms.
 - **Tests** — one `tests/fixtures/vault/` used by every stage. Add to it, never fork it. Property
