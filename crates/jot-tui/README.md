@@ -1,7 +1,7 @@
 # jot-tui
 
 The terminal reading surface. **A library, not a binary** — `jot-cli` owns the `jot` executable and
-hands this crate an already-opened `Workspace`. With no `main` there is nowhere for a
+hands this crate an already-opened `Workspace`. With no `fn main` there is nowhere for a
 workspace-opening path to grow, so "surfaces never touch the filesystem or SQLite" is enforced by
 the compiler at the crate boundary rather than by review.
 

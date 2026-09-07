@@ -5,7 +5,7 @@ Four crates. One of them knows what a note is; the rest are ways of looking at o
 | Crate | Lines | Kind | What it is |
 | --- | ---: | --- | --- |
 | [`jot-core`](jot-core/README.md) | ~14k | lib | The domain, the vault I/O, the index, the thread algebra. Everything jot knows how to do. |
-| [`jot-tui`](jot-tui/README.md) | ~3.9k | lib | The terminal reading surface. No `main`, on purpose. |
+| [`jot-tui`](jot-tui/README.md) | ~3.9k | lib | The terminal reading surface. No `fn main`, on purpose. |
 | [`jot-cli`](jot-cli/README.md) | ~2.5k | **bin** | `jot`. The only executable in the workspace. |
 | `jot-acceptance` | — | lib | Stage acceptance criteria, executable. Owned by the verifier; read-only to implementers. |
 
@@ -18,8 +18,8 @@ subcommand that hands an already-opened `Workspace` down.
 ```text
    ┌──────────────────────────────────────────────────────────────┐
    │ jot-cli                          bin `jot`                   │
-   │ argv → workspace → core → text.  Owns `main`, and with it     │
-   │ the process, the exit codes, and $EDITOR.                     │
+   │ argv → workspace → core → text.  Owns `fn main`, and with it │
+   │ the process, the exit codes, and $EDITOR.                    │
    └────────────┬─────────────────────────────┬───────────────────┘
                 │ `jot_tui::run(ws, &Editor)` │ every command
                 ▼                             │
@@ -27,7 +27,7 @@ subcommand that hands an already-opened `Workspace` down.
    │ jot-tui                     lib  │       │      ┌─────────────────┐
    │ keys → state → cells.            │       │      │ jot-desktop     │
    │ Cannot open a workspace: it has  │       │      │ (stage 6)       │
-   │ no `main` to open one from.      │       │      │ Tauri commands, │
+   │ no `fn main` to open one from.   │       │      │ Tauri commands, │
    └────────────┬─────────────────────┘       │      │ same rules      │
                 │                             │      └────────┬────────┘
                 ▼                             ▼               ▼
@@ -116,8 +116,9 @@ wrong side of the seam, and the desktop app would have grown a second one.
 
 The three structural habits worth copying into any new surface crate:
 
-- **No `main` unless you own the process.** `jot-tui` cannot acquire a workspace by accident because
-  it has nowhere to acquire one from.
+- **No `fn main` unless you own the process.** `jot-tui` cannot acquire a workspace by accident
+  because it has nowhere to acquire one from. Throughout these READMEs `fn main` is the process
+  entry point and `main.rs` is `jot-cli`'s largest module; they are not the same claim.
 - **Declare the favour, don't implement it.** `Composer` and `Highlighter` are both traits with a
   test double, so the impure parts — an editor, a subprocess — sit outside the tested path.
 - **Take core's types, don't mirror them.** A surface-local `struct NoteView` is where two surfaces
