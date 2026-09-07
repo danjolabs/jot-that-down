@@ -48,13 +48,15 @@ times in prose and does not depend on it, and `snapshot` imports `Workspace` in 
       └───────────────┬──────────────────────────┘   deliberately so — see below
                       │
                       ▼
-                ┌───────────┐         ┌────────────┐  the workspace list, in the config dir.
-                │ fs        │◀────────│ registry   │  Nothing in this crate depends on it —
-                └─────┬─────┘         └─────┬──────┘  `jot-cli` is the only caller
-                      │                     │
-                      ▼                     │
-                ┌───────────┐               │
-                │ error     │◀──────────────┘ the leaf: depends on nothing
+                ┌───────────┐        ┌────────────┐   ┌────────────┐
+                │ fs        │        │ registry   │   │ watch      │
+                └─────┬─────┘        └────────────┘   └────────────┘
+                      │            the two side cars. Both depend on `fs`
+                      │            and `error`, and nothing in this crate
+                      │            depends on either: `registry` is
+                      ▼            `jot-cli`'s alone, `watch` is `jot-tui`'s
+                ┌───────────┐
+                │ error     │      the leaf: depends on nothing
                 └───────────┘
 ```
 
@@ -80,6 +82,7 @@ done
 | `thread` | 622 | `note` | The reply tree — paths, segments, sibling order. |
 | `query` | 626 | `frontmatter` `fs` `note` | The vocabulary of a read: `Draft`, `Edit`, `Row`, `Page`, `State`, `Ref`, and the query structs. |
 | `registry` | 1285 | `error` `fs` | The list of known workspaces, in the user's config directory. |
+| `watch` | 326 | `error` `fs` | A non-recursive watch over the two directories that hold notes, debounced to 200 ms. Hands back a `Receiver<Change>` — no paths, no `notify` types. |
 | `snapshot` | 1738 | `error` `frontmatter` `fs` `link` `note` `query` `shortid` `thread` | The vault as a `BTreeMap`, plus every query over it. The derived `root` walk lives here. |
 | `index` | 1673 | `error` `frontmatter` `fs` `note` `query` `snapshot` | SQLite: change detection and persistence. Private to the crate. |
 | `workspace` | 3448 | `error` `frontmatter` `fs` `index` `link` `note` `query` `snapshot` `thread` | The public facade. Every operation a surface performs goes through it. |
@@ -96,10 +99,14 @@ is acyclic.
 and hands it up; the snapshot has never heard of SQLite. That direction is what makes deleting
 `.jot/index.db` a non-event, and it is the first thing to check if the two ever look tangled.
 
-**`registry` has no caller inside this crate.** It hangs off the side of the graph because nothing
-here uses it: `workspace.rs` says why in its module docs (§U7) — neither `init` nor `open` consults
-or writes the registry, so there is no `use crate::registry` anywhere in `jot-core`. `jot-cli` is
-the only consumer. A grep that finds one appearing later is a design change, not a tidy-up.
+**`registry` has no caller inside this crate, and neither does `watch`.** They hang off the side of
+the graph because nothing here uses them. `workspace.rs` says why for the first in its module docs
+(§U7) — neither `init` nor `open` consults or writes the registry, so there is no
+`use crate::registry` anywhere in `jot-core`; `jot-cli` is the only consumer. `watch` is the same
+shape for a different reason: it is in core because *stage 6 needs the same events* and a surface
+that grew its own watcher would be domain logic on the wrong side of the seam — but a `Workspace`
+does not watch itself, and `jot-tui`'s run loop is the only caller. A grep that finds an internal
+one appearing later is a design change, not a tidy-up.
 
 **`index` is the one module that is not `pub`.** `lib.rs` declares it `mod index;`, so there is no
 `&Index` to hand a surface and no way for one to depend on the index's *representation* — which is
