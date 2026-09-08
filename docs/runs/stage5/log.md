@@ -1,7 +1,9 @@
 # Stage 5 — run log
 
-Branch `stage/5-tui`, from tag `stage4`. **In progress**; this log is written mid-stage and will be
-finished at seal. Linux 6.18.48, rustc 1.96.1. CI has still never run on any branch of this
+Branch `stage/5-tui`, from tag `stage4`, merged to `prototype` at `3efa15c`. **Sealed 2026-09-08 at
+`0.0.5`**, with two of the three gates waived — see "Seal" at the bottom, which is the section to
+read before trusting anything above it. Most of this log was written mid-stage; Linux 6.18.48,
+rustc 1.96.1 unless a section says otherwise. CI has still never run on any branch of this
 repository — see "Still open".
 
 ## Mode: inline, at the user's direction
@@ -350,10 +352,59 @@ Phase B has **not** run — no verifier has been dispatched. `/code-review` has 
 diff. Two of the three gates are therefore unmet, which is the honest state of an inline stage
 mid-flight and the first thing to fix before sealing.
 
+### At seal, on Windows
+
+Re-run 2026-09-08 at `3b8e3f7`, on **Windows 11 build 26200.9168, rustc 1.98.1** — the first time
+this stage's gate has run on anything but Linux, and one of stage 5's named acceptance criteria was
+Windows.
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all --check` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `cargo test --workspace` | 608 pass |
+| `cargo test -p jot-acceptance --features stage1b` | 120 pass |
+| `cargo test -p jot-acceptance --features stage4` | 67 pass |
+
+608 against Linux's 609 is a `cfg`-gated pair, not a regression: `fs.rs` and the acceptance crate
+both carry `cfg(windows)` / `cfg(unix)` arms, so the two platforms do not run the same set. The
+pre-existing flake above did not appear in this run.
+
+**What this does not establish.** A green `cargo test` on Windows is not the TUI running on Windows
+Terminal. Nothing interactive was exercised here — no raw mode, no alternate screen, no editor
+handoff, no `KeyEventKind::Press` behaviour against a real terminal. That criterion is still open
+and is listed as such.
+
+## Seal
+
+Sealed at `0.0.5` on 2026-09-08, at the user's direction, **with phase B and the review gate
+waived** rather than met. Recording the waiver rather than letting a bare version number imply three
+green gates is the whole point of writing it down.
+
+- **What was waived.** No verifier was dispatched, so stage 5's acceptance criteria still have no
+  executable form and no adversary has looked at the watcher. `/code-review` never ran on the stage
+  diff. Both are listed under "Still open" and neither is closed by sealing.
+- **What was not waived.** The mechanical gate, re-run at seal on Windows — see above.
+- **Why seal anyway.** The stage's work is done and dogfooded, and stage 6 is consolidation over
+  exactly this code. Holding the number open would not have produced the verifier; it would only
+  have made the version stop meaning "which stage the binary on your PATH came from", which is the
+  one job the scheme has.
+- **The risk this accepts, stated plainly.** Stage 4's schema-fingerprint bug was found by a
+  verifier who had not written the implementation, and `orchestration.md` says an inline stage
+  would have shipped it. Stage 5 ran inline throughout. The watcher is the piece most likely to be
+  carrying an equivalent bug — concurrent, intermittent when wrong, invisible on screen — and
+  nobody adversarial has looked at it.
+
+**The version scheme was not being enforced during this stage.** `core.hooksPath` was unset in the
+working clone, so `.githooks/pre-commit` never ran here — the silent failure `AGENTS.md` warns
+about, found only when a commit that changed `crates/` left the letter alone. Set at seal. Every
+letter this stage claimed was therefore moved by hand or not at all, which means the letters are
+not evidence of anything before `0.0.5`.
+
 ## Still open
 
-- **Phase B and the review gate.** See above. The watcher is the specific piece that wants an
-  adversary: concurrent, intermittent when wrong, and not visible on screen.
+- **Phase B and the review gate.** Waived at seal, not met — see "Seal". The watcher is the specific
+  piece that wants an adversary: concurrent, intermittent when wrong, and not visible on screen.
 - **The human checkpoint, inherited from stage 4.** `orchestration.md` says stage 4 is done when a
   week of real capture has gone through it. The dogfood vault holds one note. Stage 5 depends on
   stage 4, and `jot 0.0.5-c` is only now installed for that week to start.
@@ -369,6 +420,8 @@ mid-flight and the first thing to fix before sealing.
   at `Plain` by construction, so it cannot come back empty, but "`cat` is on the path and `bat` is
   not" has not been exercised end to end. On Windows neither may be, which makes `Plain` the
   likely default there rather than the fallback.
-- **Windows.** Every result here is Linux. The `KeyEventKind::Press` filter is in place for the
-  double-keystroke bug, but nothing has been run on Windows Terminal, which is one of this stage's
-  named acceptance criteria.
+- **Windows, interactively.** Partly answered at seal: the full gate now passes on Windows 11
+  (see "At seal, on Windows"), so the code compiles and its tests pass there. Nothing *interactive*
+  has been exercised — the `KeyEventKind::Press` filter is in place for the double-keystroke bug,
+  but `jot tui` has not been run against Windows Terminal, which is what the acceptance criterion
+  actually asks for.
