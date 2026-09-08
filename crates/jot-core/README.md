@@ -103,8 +103,8 @@ and hands it up; the snapshot has never heard of SQLite. That direction is what 
 the graph because nothing here uses them. `workspace.rs` says why for the first in its module docs
 (§U7) — neither `init` nor `open` consults or writes the registry, so there is no
 `use crate::registry` anywhere in `jot-core`; `jot-cli` is the only consumer. `watch` is the same
-shape for a different reason: it is in core because *stage 6 needs the same events* and a surface
-that grew its own watcher would be domain logic on the wrong side of the seam — but a `Workspace`
+shape for a different reason: it is in core because *the desktop surface needs the same events* and
+a surface that grew its own would be domain logic on the wrong side of the seam — but a `Workspace`
 does not watch itself, and `jot-tui`'s run loop is the only caller. A grep that finds an internal
 one appearing later is a design change, not a tidy-up.
 

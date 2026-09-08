@@ -1,9 +1,9 @@
 //! Watching a vault for changes made outside jot.
 //!
-//! Lives in core rather than in the TUI because stage 6 needs the same events, and a surface that
-//! grew its own watcher would be domain logic on the wrong side of the seam. What a surface gets
-//! back is a [`Receiver`] of [`Change`] — no paths, no notify types, nothing that leaks the
-//! filesystem into a view.
+//! Lives in core rather than in the TUI because the desktop surface needs the same events, and a
+//! surface that grew its own watcher would be domain logic on the wrong side of the seam. What a
+//! surface gets back is a [`Receiver`] of [`Change`] — no paths, no notify types, nothing that
+//! leaks the filesystem into a view.
 //!
 //! # Why the watch is not recursive
 //!

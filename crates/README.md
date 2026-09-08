@@ -26,7 +26,7 @@ subcommand that hands an already-opened `Workspace` down.
    ┌──────────────────────────────────┐       │
    │ jot-tui                     lib  │       │      ┌─────────────────┐
    │ keys → state → cells.            │       │      │ jot-desktop     │
-   │ Cannot open a workspace: it has  │       │      │ (stage 6)       │
+   │ Cannot open a workspace: it has  │       │      │ (deferred)      │
    │ no `fn main` to open one from.   │       │      │ Tauri commands, │
    └────────────┬─────────────────────┘       │      │ same rules      │
                 │                             │      └────────┬────────┘
@@ -104,8 +104,10 @@ keep it that way: `bat` takes the markdown over stdin rather than being handed a
 
 ## Adding a surface
 
-Stage 6's own risk register names the failure mode: *logic leaking into the frontend, which quietly
-undoes stages 1–4.* The test is one question, asked of every new function in a surface:
+The desktop plan's own risk register names the failure mode: *logic leaking into the frontend, which
+quietly undoes stages 1–4.* That plan is [deferred](../docs/plans/todo/desktop.md) and the rule is
+not — it is what makes deferring a surface cost nothing. The test is one question, asked of every
+new function in a surface:
 
 > **Should the TUI have this too?**
 

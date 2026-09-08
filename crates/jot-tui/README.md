@@ -79,10 +79,10 @@ path would otherwise become non-deterministic — spawning `bat`, spawning an ed
 with a test double, so the snapshot suite tests this crate rather than the tester's `$PATH`.
 
 **The watcher is core's, not this crate's.** `run` consumes `jot_core::watch::Watcher`, which hands
-back a `Receiver<Change>` carrying no paths and no `notify` types. Stage 6 needs the same events; a
-surface that grew its own would be domain logic on the wrong side of the seam. `crossterm` is
-likewise never a direct dependency — it comes through `ratatui::crossterm`, so there is only ever
-one `KeyEvent` type in the build.
+back a `Receiver<Change>` carrying no paths and no `notify` types. The desktop surface needs the
+same events; one that grew its own would be domain logic on the wrong side of the seam.
+`crossterm` is likewise never a direct dependency — it comes through `ratatui::crossterm`, so there
+is only ever one `KeyEvent` type in the build.
 
 ## Layout
 
