@@ -1,13 +1,16 @@
 # jot-that-down
 
 Personal capture tool: a directory of markdown notes with a rebuildable SQLite index, browsed as a
-micro-blog. Rust core, three surfaces — CLI, then TUI, then desktop.
+micro-blog. Rust core, three surfaces — CLI, then TUI, then desktop. The first two are built; the
+desktop app is deferred to `docs/plans/todo/desktop.md` and is **not** stage 6.
 
 ## Read first
 
 - `docs/plans/overview.md` — locked decisions, architecture, conventions
 - `docs/plans/stages/stage<N>.md` — the stage being worked on
 - `docs/plans/orchestration.md` — how stages get executed and verified
+- `docs/plans/todo/` — plans that left the numbered stages. Deferred, not cancelled, and not work
+  in progress: read one only when it is being scheduled again.
 
 `docs/ideas.md` and `docs/conversation.md` are history, not spec. If something in them matters, it belongs in a plan doc.
 

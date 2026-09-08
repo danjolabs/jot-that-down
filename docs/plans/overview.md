@@ -10,6 +10,7 @@ whose **filename is its identity** and whose frontmatter carries its title and i
 is a rebuildable index that makes querying titles, dates, and relations fast. The interface is a micro-blog — notes reply to notes and quote
 notes — because that lets an idea grow a structure *while it is being written*, instead of demanding
 a folder decision before the thought is finished. Three surfaces over one core: CLI, TUI, desktop.
+Two are built; the desktop app is deferred and unscheduled ([`todo/desktop.md`](todo/desktop.md)).
 
 ## Locked decisions
 
@@ -30,8 +31,8 @@ Carried in from `docs/conversation/initial.md`; stages assume these without re-a
 | Link scope | Resolve within one workspace only. A workspace is an independent unit. |
 | Workspace | Self-identifying directory; `.jot/` holds config, trash, and the DB. |
 | Workspace types | One. `workspace.kind` and the `plain` type are deleted: a workspace declaring no `relation:*` entry **is** what `plain` meant, so the distinction lives in the schema. Filenames are always UUID-named. |
-| Stack | Rust core; `clap` CLI, `ratatui` TUI, Tauri v2 desktop. |
-| Build order | CLI → TUI → desktop. |
+| Stack | Rust core; `clap` CLI, `ratatui` TUI, Tauri v2 desktop. The desktop choice is **deferred, not revoked** — Tauri v2 stands for whenever it is built. |
+| Build order | CLI → TUI → desktop. The first two are built. The desktop app left the numbered stages after stage 5 and is now unscheduled — see [`todo/desktop.md`](todo/desktop.md). The order is unchanged; only the timing of its tail is. |
 
 ## Architecture
 
@@ -57,6 +58,10 @@ is enforceable at the crate boundary rather than by discipline.
         └─────────┘                   └─────────┘
 ```
 
+`jot-desktop` is drawn because the seam exists for it: the rule is what stops a third surface from
+becoming a third subtly different application, and it has to hold before that surface is written,
+not after. It does not exist yet. `crates/README.md` documents the two that do.
+
 ### Repository layout
 
 ```text
@@ -66,7 +71,8 @@ jot-that-down/
     jot-core/                 # domain, vault I/O, index, thread algebra
     jot-tui/                  # ratatui views (lib)
     jot-cli/                  # bin `jot`; depends on core + tui
-  apps/
+    jot-acceptance/           # executable acceptance criteria; owned by the verifier
+  apps/                       # DEFERRED — nothing here yet; see docs/plans/todo/desktop.md
     desktop/
       src-tauri/              # Tauri v2 backend, thin wrapper over jot-core
       ui/                     # TS frontend
@@ -75,8 +81,7 @@ jot-that-down/
 
 ### Core API surface
 
-The shape every stage builds toward. Stages 1, 2 and 4 fill it in; stages 3, 5 and 6 only
-consume it.
+The shape every stage builds toward. Stages 1, 2 and 4 fill it in; stages 3 and 5 only consume it.
 
 **Built as of stages 2–3** (see the build-order note below). Three signatures moved from the
 original sketch; each is marked and explained.
@@ -135,14 +140,23 @@ Three deliberate departures from the sketch:
 | — | [Pre-stage-4 refactor](stages/pre-stage4-refactor.md) | Typed frontmatter schema, roles declared rather than hardcoded | 3 |
 | 4 | [Index and rebuild](stages/stage4.md) | SQLite schema, scanner, deterministic rebuild | the refactor |
 | 5 | [TUI](stages/stage5.md) | Timeline, thread, file+reader, search, trash | 4 |
-| 6 | [Desktop](stages/stage6.md) | Tauri app, capture overlay, `jot://` deep links | 5 |
+| 6 | [Refactor and polish](stages/stage6.md) | Consolidation over what stages 1–5 built: the CLI and the `jot` interface, refined against real use | 5 |
 | 7 | [What is left of the schema](stages/stage7.md) | Mostly subsumed by the refactor. Enums, per-key defaults, optional rename detection | 6 |
+
+### Deferred
+
+| Plan | Was | Why it moved |
+| --- | --- | --- |
+| [Desktop](todo/desktop.md) — Tauri app, capture overlay, `jot://` deep links | stage 6 | Unscheduled, not cancelled. Stage 6 became consolidation instead: after five stages the thing worth doing next is refining what two surfaces already do, not adding a third. The desktop plan is unchanged and waiting; the seam it depends on is documented in `crates/README.md`. |
+
+A deferred plan keeps its content and loses its number. It has no `Depends on` because nothing
+depends on it — that is what made it safe to move.
 
 [`orchestration.md`](orchestration.md) covers how these stages get executed and verified — the agent
 roles, the model routing, the three gates, and the criteria no orchestrator can close.
 
 Stages 1–2 are one continuous piece of work — nothing is user-visible until stage 3. Resist the urge
-to skip ahead: every shortcut taken in 1–3 is paid for three times over in 4–6.
+to skip ahead: every shortcut taken in 1–3 is paid for three times over in everything after.
 
 The first moment the app is genuinely usable is **the end of stage 3**. Dogfood from there; let real
 use reorder everything after it.
@@ -186,7 +200,7 @@ they were correctness costs the deferral would have been a mistake.
   release (`0.0.4-a` < `0.0.4`); a stage therefore ends at its bare number rather than beginning
   there. Nothing is published to crates.io at these versions — they exist so a dogfooded
   `jot --version` says which stage the binary on your PATH came from. The first release version is
-  a decision for after stage 6, not a convention to fix here.
+  a decision for after the prototype stages, not a convention to fix here.
 
   **The letter is bumped by a git hook, not by whoever is committing.** `.githooks/pre-commit`
   moves it on any commit that changes what `cargo build` produces — anything under `crates/`, the
@@ -247,7 +261,7 @@ they were correctness costs the deferral would have been a mistake.
 | --- | --- |
 | SQLite in a synced vault corrupts | `.jot/.gitignore` excludes `index.db*`; document that `.jot/` should be excluded from Dropbox/iCloud/OneDrive sync; keep `--db-path` as an escape hatch. The DB being disposable is the real protection. |
 | Windows atomic rename over an existing file | **Verified, stage 1: not a risk in the form stated.** `std::fs::rename` already maps to `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` and replaces an existing target with no third-party crate needed — confirmed by `fs.rs`'s `std_rename_replaces_an_existing_file_on_this_platform`, run on Windows 11 (build 26200) / `1.97.1-x86_64-pc-windows-msvc`, 2026-08-30. This is a finding about *replacement*, not that renames never fail: a read-only target, or another process holding the file without `FILE_SHARE_DELETE`, still fails the rename — and in both cases the target is left byte-intact, which is the property that actually matters. |
-| External edits desync the index | Every command calls `sync()` first; stage 5 adds a watcher. `mtime`+size fast path, content hash on mismatch. |
+| External edits desync the index | Every command calls `sync()` first; stage 5 added a watcher (`jot_core::watch`). `mtime`+size fast path, content hash on mismatch. |
 | Three surfaces drift apart | The seam. Surfaces contain no domain logic — if a surface needs a new rule, the rule goes in core. |
 | Scope creep into an Obsidian clone | Tags, backlinks-as-graph, FTS, and collections are all deliberately deferred. The premise is capture, not curation. |
 
@@ -267,7 +281,9 @@ they were correctness costs the deferral would have been a mistake.
   reader cared about; it is replaced by a creation-time option for whether a new note's filename gets
   a slug derived from its title. Because identity is the filename's UUID and the reader ignores
   everything after it, re-slugging on a title change does not move the note.
-- **Desktop frontend framework** (React / Svelte / Solid) — not needed until stage 6.
+- **Desktop frontend framework** (React / Svelte / Solid) — not needed until the desktop app is
+  built, which is now [deferred](todo/desktop.md). Left open deliberately: deciding it while the
+  surface is unscheduled would be choosing a framework against a guess.
 - ~~**`plain` workspace depth.**~~ **Settled by deletion** in the [pre-stage-4
   refactor](stages/pre-stage4-refactor.md). There is no `plain` type: once relations are schema-declared,
   "a workspace with no threads" is a schema that declares none, and what was left of the field was a

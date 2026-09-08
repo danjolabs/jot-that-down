@@ -285,8 +285,11 @@ They fail differently on purpose, which is why there are three.
 
 The seam rule from `overview.md` — surfaces never touch the filesystem or SQLite — is a standing
 review item from stage 3 onward, and is worth a grep in the review prompt:
-`rusqlite|std::fs` under `crates/jot-cli`, `crates/jot-tui`, `apps/desktop/src-tauri` should return
-nothing but the thin command layer.
+`rusqlite|std::fs` under `crates/jot-cli` and `crates/jot-tui` should return nothing but the
+`$EDITOR` scratch file and the registry's parent directory — four lines, all in `jot-cli`, all
+outside the vault. `crates/README.md` names them, so a fifth is the regression to look for.
+`apps/desktop/src-tauri` joins the grep if the [deferred desktop plan](todo/desktop.md) is ever
+built; until then it matches nothing.
 
 ### Adjudication
 

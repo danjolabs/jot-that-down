@@ -13,8 +13,8 @@ git.
 
 ## Status
 
-**Usable from the command line.** Stages 1–4 of [`docs/plans/overview.md`](docs/plans/overview.md)
-are built.
+**Usable from the command line, and browsable from the terminal.** Stages 1–5 of
+[`docs/plans/overview.md`](docs/plans/overview.md) are built.
 
 | | |
 | --- | --- |
@@ -22,7 +22,9 @@ are built.
 | ✅ Note lifecycle, thread algebra, links | stage 2 |
 | ✅ `jot` CLI | stage 3 |
 | ✅ SQLite index, incremental sync, deterministic rebuild | stage 4 |
-| ⏳ TUI, desktop app, user-declared schema fields | stages 5–7 |
+| ✅ `jot tui` — timeline, files, search, trash, reader pane | stage 5 |
+| ⏳ Refactor and polish; the tail of the schema | stages 6–7 |
+| 💤 Desktop app | deferred, unscheduled |
 
 The version is `0.0.<stage>-<letter>` while this is a prototype — the patch is the stage number, the
 letter is a round of change made after that stage landed, and a bare `0.0.<stage>` means the stage is
@@ -209,6 +211,7 @@ ones. `jot-core` uses it for the index's `raw` column — a JSON projection of t
 | --- | --- |
 | [`docs/plans/overview.md`](docs/plans/overview.md) | Locked decisions, architecture, the core API. **Read first.** |
 | [`docs/plans/stages/stage<N>.md`](docs/plans/stages) | One file per stage, self-contained. |
+| [`docs/plans/todo/`](docs/plans/todo) | Plans that left the numbered stages. Deferred, not cancelled. |
 | [`docs/runs/`](docs/runs) | What each run actually did, what it found, what it cost. |
 | [`docs/cli-json.md`](docs/cli-json.md) | The `--json` contract and exit codes. |
 

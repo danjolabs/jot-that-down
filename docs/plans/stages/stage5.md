@@ -5,7 +5,9 @@
 **Why now.** The CLI proved capture; it is bad at *browsing*. Reading a thread with branches, scanning
 a week of notes, or hunting for a half-remembered title are all things a scrolling terminal command
 does poorly. The TUI is also a cheap rehearsal of the desktop interaction model — everything settled
-here is a decision stage 6 does not have to relitigate, at a fraction of the cost.
+here is a decision the desktop app does not have to relitigate, at a fraction of the cost. That
+argument survived the desktop app being [deferred](../todo/desktop.md): the rehearsal was worth it
+for the TUI on its own, which is why deferring cost nothing already spent.
 
 **Not in this stage.** Rendered markdown beyond terminal-reasonable styling; global hotkeys; images.
 
@@ -186,7 +188,8 @@ choice the stage doc leaves genuinely open. Reviewed 2026-09-04, at the stage 4 
       help: it asked for the browser explicitly, and quietly doing something else is how a script
       ends up parsing a help page.
 - [ ] **File watcher in core** (`notify`), debounced ~200 ms, emitting change events that trigger a
-      `sync()` and a redraw. Put it in `jot-core`, not the TUI — stage 6 needs the same thing.
+      `sync()` and a redraw. Put it in `jot-core`, not the TUI — the desktop app needs the same
+      thing, and a surface growing its own would be domain logic on the wrong side of the seam.
 - [x] Terminal markdown styling: headings, bold, italics, inline code, fenced blocks, lists, links.
       Nothing more.
 

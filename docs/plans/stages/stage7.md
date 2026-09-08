@@ -91,7 +91,8 @@ If it is not worth the cost, it is now safe to drop entirely. That was not true 
 - [ ] `enum` type with `values`, and advisory validation reported through `SyncReport`.
 - [ ] Per-key `default`, applied at creation only.
 - [ ] Field filters in `jot ls`, `jot search`, and both UIs.
-- [ ] Typed field controls in the desktop composer.
+- [ ] Typed field controls in the desktop composer — only if the [desktop
+      app](../todo/desktop.md) is built by then. Not a reason to hold this stage.
 - [ ] Rename detection over stage 4's content hash — **optional**; decide by whether re-slugging
       actually shows up as churn in a real vault.
 

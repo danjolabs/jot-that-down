@@ -24,7 +24,7 @@ jot purge <id>         # irreversible; confirms
 jot trash              # list what is in the trash
 jot search <query> [--since] [--until]
 jot links <id>         # backlinks and quoted-by
-jot open <id>          # hands off to the desktop app (stage 6)
+jot open <id>          # hands off to the desktop app (deferred; todo/desktop.md)
 jot workspace list | use <id> | --id <id> | --name <name>
               | add <path> | new <path>
               | remove <id> | --id <id> | --name <name> | prune   # alias: ws, and ls/rm within
