@@ -1,15 +1,57 @@
 # Orchestration
 
-How Fable drives `stage1.md`–`stage7.md`, and how each stage is proved done rather than declared done.
+How a stage gets executed and proved done rather than declared done.
 
 Read `overview.md` first — its locked decisions, conventions, and core API surface are the contract
-every agent in this document works against.
+this document works against.
+
+## Two modes, and how to choose
+
+Stages 1–4 ran **dispatched**: a planner, implementers in waves, an integrator, a verifier. Stage 5
+ran **inline**: one agent planning and implementing in conversation with you, committing in small
+waves. Both are supported. Neither is the default — the choice is made per stage, out loud, and
+recorded in that stage's run log.
+
+| | Dispatched | Inline |
+| --- | --- | --- |
+| Who writes code | implementer subagents | the agent you are talking to |
+| Parallelism | up to three implementers | none |
+| Your involvement | at the gates | continuous |
+| Cost per unit of work | higher — each agent re-derives context from cold | lower |
+| Audit trail | breakdown, dispatch, verification, log | the commit history, and a log at seal |
+| Rule 1 (below) | held | **not held** |
+| Rule 2 (below) | held | held only if a verifier is used |
+
+**Choose dispatched** when the work splits cleanly into parallel pieces with disjoint file
+ownership, when getting it wrong is expensive and invisible, or when you want the independent
+verification that is the whole point of the structure. Stage 4's index was exactly this: three
+tasks, one foundation, and a bug that only an agent who had not written the implementation would
+have found.
+
+**Choose inline** when the work is one connected thing that resists being cut into disjoint pieces,
+when you want to steer it as it happens, or when the feedback loop matters more than the audit
+trail. Stage 5's TUI was this: keymap, state, and rendering are one design, and three of the
+decisions in it changed *because you saw the result and said so*. A dispatched wave would have
+taken those corrections a round trip each.
+
+The honest summary: **dispatched buys verification, inline buys iteration speed.** A stage whose
+failure would be silent wants the first. A stage whose value you can see on screen wants the second.
+
+**Hybrid is a real third option and was stage 4's actual shape** — orchestrator implementing inline,
+verifier subagent for phases A and B. It gives up rule 1 and keeps rule 2, which is the trade worth
+making when the implementation is small enough to hold in one head but the criteria are worth an
+adversary. Prefer it to full inline whenever the stage has acceptance criteria that can be written
+before the code.
+
+Whichever is chosen, **the three gates do not change.** They are what "done" means, and they are
+described once, below, for both modes.
 
 ## The two rules
 
-Everything below follows from two rules. If a situation is ambiguous, resolve it by these.
+Everything in dispatched mode follows from two rules. If a situation is ambiguous, resolve it by
+these.
 
-1. **The orchestrator never writes code.** Fable plans, dispatches, adjudicates, and seals. The moment
+1. **The orchestrator never writes code.** It plans, dispatches, adjudicates, and seals. The moment
    it patches something itself, that change has no independent verifier — the one thing this whole
    structure exists to guarantee.
 2. **Whoever implements does not judge.** Acceptance tests are written by a different agent than the
@@ -19,9 +61,38 @@ Everything below follows from two rules. If a situation is ambiguous, resolve it
 Rule 2 is aimed at the dominant failure mode of agent-run projects: the implementer quietly weakens
 the test until the suite passes, and every downstream stage builds on a lie.
 
+### What inline mode gives up, stated plainly
+
+Rule 1 is gone by construction: the agent writing the code is the one deciding whether it is right.
+Rule 2 is gone too unless a verifier is dispatched separately. That is a real loss and should not be
+papered over — stage 4's schema-fingerprint bug was found by a verifier who had not written the
+implementation, and an inline stage would have shipped it.
+
+What partially replaces it, and what does not:
+
+- **You are in the loop continuously.** Three of stage 5's decisions were corrections you made after
+  seeing the result. That is a form of independent judgment the dispatched flow gets only at gates —
+  but it is judgment about *what was asked for*, not about whether the code is quietly wrong.
+- **Tests written before the implementation still work inline.** Writing the assertion first is a
+  discipline, not an agent boundary. It is weaker — the same head writes both — but it is not
+  nothing, and it is free.
+- **The mechanical gate is unchanged and is mode-independent.** Exit codes do not care who typed.
+- **Nothing replaces the mutation spot-check.** If a stage's correctness is not visible on screen,
+  inline mode has no answer for it, and that is the signal to dispatch a verifier even if
+  everything else stays inline.
+
+**The rule for choosing, in one line:** if you cannot tell by looking whether it works, do not run it
+inline without a verifier.
+
 ## Roles
 
 Five agent definitions in `.claude/agents/`. Fewer types, sharper boundaries.
+
+**These are dispatched-mode roles.** Inline mode collapses planner, implementer, integrator and
+scribe into the one agent in the conversation; only the verifier is worth dispatching separately,
+and the hybrid shape above is exactly that. The role descriptions still matter inline — they name
+the *jobs* that have to happen, and an inline agent that skips the integrator's job has skipped
+running the gate, not saved a step.
 
 ### `stage-planner` — opus
 
@@ -34,8 +105,8 @@ tools: Read, Grep, Glob, Bash, Write
 ---
 ```
 
-Reads `docs/plans/stage<N>.md`, `overview.md`, and the current repo state. Emits
-`docs/plans/runs/stage<N>/breakdown.md`: a task DAG, an explicit **file ownership set** per task,
+Reads `docs/plans/stages/stage<N>.md`, `overview.md`, and the current repo state. Emits
+`docs/runs/stage<N>/breakdown.md`: a task DAG, an explicit **file ownership set** per task,
 which tasks are parallel-safe, and a recommended model per task with a one-line reason. Writes no
 production code.
 
@@ -106,7 +177,7 @@ tools: Read, Grep, Glob, Edit, Write
 ---
 ```
 
-Writes `runs/stage<N>/log.md` and applies plan-doc corrections that Fable has already approved —
+Writes `docs/runs/stage<N>/log.md` and applies plan-doc corrections that Fable has already approved —
 `overview.md`'s definition of done, item 4. It applies decisions; it does not make them.
 
 ## Model routing
@@ -179,7 +250,7 @@ Skipping the mutation check is the tempting shortcut and the one that lets a vac
 ```text
   ┌─ 0. gate in ── previous stage tagged, tree clean, branch stage/<N>-<slug>
   │
-  ├─ 1. plan ───── stage-planner (opus) → runs/stage<N>/breakdown.md
+  ├─ 1. plan ───── stage-planner (opus) → docs/runs/stage<N>/breakdown.md
   │                 Fable reviews; surfaces the wave plan to the user
   │
   ├─ 2. phase A ── verifier (opus) writes acceptance tests, red
@@ -200,7 +271,11 @@ Skipping the mutation check is the tempting shortcut and the one that lets a vac
 
 ### The three gates
 
-All three must pass. They fail differently on purpose, which is why there are three.
+All three must pass, **in both modes**. They are what "done" means; the mode only changes who runs
+them. Inline, the orchestrator runs the mechanical gate itself and `/code-review` still applies —
+what it cannot supply on its own is phase B, which is the one gate that needs an adversary.
+
+They fail differently on purpose, which is why there are three.
 
 | Gate | Who | Judgment involved | Catches |
 | --- | --- | --- | --- |
@@ -245,7 +320,7 @@ more than the parallelism saves, and Fable's attention becomes the bottleneck ra
 ## Context hygiene
 
 - Subagents' tool output stays out of Fable's context — that is the point of dispatching. Fable reads
-  **artifacts** in `runs/stage<N>/`, never transcripts.
+  **artifacts** in `docs/runs/stage<N>/`, never transcripts.
 - Each agent receives its stage doc, the locked-decisions table, its task, and its ownership set.
   It does not receive the design conversation. `docs/conversation/initial.md` is history; the plan docs are
   the specification, and if something in the conversation matters it belongs in a plan doc.
@@ -257,7 +332,7 @@ more than the parallelism saves, and Fable's attention becomes the bottleneck ra
 ## Artifacts
 
 ```text
-docs/plans/runs/stage<N>/
+docs/runs/stage<N>/
   breakdown.md      # planner: task DAG, ownership, model routing
   dispatch.md       # who got what, which model, which wave
   verification.md   # phase B: per-criterion verdict, quoted output, mutation results
@@ -279,7 +354,7 @@ anchoring it to the Claude Code session that produced it. `.claude/settings.loca
 **One `Assisted-by:` per commit, and it records the orchestrator.** Subagents do not commit — they
 hand work back and Fable lands it — so the trailer describes the tool and configuration of whoever
 actually created the commit object. Which agent did the underlying work is
-`runs/stage<N>/dispatch.md`'s job, and it does that job better than a trailer can.
+`docs/runs/stage<N>/dispatch.md`'s job, and it does that job better than a trailer can.
 
 This is not merely a tidiness rule. An agent can report its own model and effort with certainty; it
 can only ever *guess* another agent's. A per-agent trailer therefore invites exactly the confident
@@ -326,7 +401,7 @@ and the trailer machine-readable, at the cost of `claude-opus-5` reading less ni
 Worth it — a trailer nobody can parse is a comment.
 
 **The subagent role is deliberately absent.** `implementer` versus `verifier` is recorded in
-`runs/stage<N>/dispatch.md`, which is authoritative anyway; putting it in the trailer would compete
+`docs/runs/stage<N>/dispatch.md`, which is authoritative anyway; putting it in the trailer would compete
 with the `tool` field for the same slot. If you later want it visible in `git log`, add it as its own
 trailer (`Assisted-role: verifier`) rather than crowding this one.
 
@@ -344,7 +419,7 @@ The single-trailer rule narrows what is being claimed rather than fixing this. T
 reports only itself, which is the one configuration it actually knows — but nothing stops it
 misreporting that either, and no hook can catch it.
 
-So: `runs/stage<N>/dispatch.md` is authoritative for **who did the work**, because Fable writes it at
+So: `docs/runs/stage<N>/dispatch.md` is authoritative for **who did the work**, because Fable writes it at
 dispatch time from what it actually passed to the `Agent` call. The trailer answers a narrower
 question — **who committed** — and the two are deliberately different facts. A commit whose trailer
 says `claude-opus-5` may contain work from three sonnet implementers; that is not a contradiction,

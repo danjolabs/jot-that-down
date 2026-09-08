@@ -328,6 +328,13 @@ pub enum FileSort {
     /// Newest first, by the id's UUIDv7 timestamp.
     #[default]
     Created,
+    /// Oldest first, by the id's UUIDv7 timestamp.
+    ///
+    /// The one order that reads a vault forwards. Added for stage 5's files view, whose sort cycle
+    /// is four long: the other three all answer "what did I touch lately", and this one answers
+    /// "how did this start", which is a different question and the reason it earns a variant
+    /// rather than a `reverse()` at the call site.
+    CreatedAsc,
     /// Most recently written first, by filesystem mtime.
     Edited,
     /// Alphabetical by title; untitled notes sort last.
@@ -352,6 +359,13 @@ pub struct Row {
     pub replies: usize,
     /// Everything beneath this note, at any depth.
     pub descendants: usize,
+    /// How many notes quote this one.
+    ///
+    /// The inverse of `note.quote`, and deliberately a count rather than a list: a listing wants
+    /// to say "something points here", and anything more than that is a reason to open the note.
+    /// Counted under the same filter as [`Row::replies`], so it means "quotes this listing would
+    /// show you" — a trashed quoter is absent from the timeline's count and present in the trash's.
+    pub quoted: usize,
     /// Filesystem mtime, which is what `edited_at` means from stage 1b onward.
     pub edited_at: Option<DateTime<Utc>>,
 }
@@ -593,6 +607,7 @@ mod tests {
             parent: Some(Ref::Deleted(nid(A))),
             replies: 0,
             descendants: 0,
+            quoted: 0,
             edited_at: None,
         };
         assert!(row.is_root(), "an orphan must not be invisible");
@@ -606,6 +621,7 @@ mod tests {
             parent: Some(Ref::Trashed(meta(A))),
             replies: 0,
             descendants: 0,
+            quoted: 0,
             edited_at: None,
         };
         assert!(!row.is_root());

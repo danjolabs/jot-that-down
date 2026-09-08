@@ -1,0 +1,16 @@
+---
+source: crates/jot-tui/tests/render.rs
+expression: render(&mut app)
+---
+┌ timeline — every note ───────────────────────────────────────────────┐
+│                                                                      │
+│  Nothing here yet. Press n to write the first note.                  │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+  Space  n  e  x  ·  Tab  f  /  ·  ?  q

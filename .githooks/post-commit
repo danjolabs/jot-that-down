@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#
+# Notice when the `jot` on your PATH is older than the `jot` you just committed.
+#
+# Why this is post-commit and not pre-commit
+# ------------------------------------------
+# `cargo install` runs a release build, which takes minutes. Gating every commit on one would make
+# committing something you avoid, and would punish exactly the WIP commit you most want to make
+# mid-refactor — a commit whose code you have no intention of putting on your PATH yet. Running it
+# *after* the commit is recorded costs nothing if it fails and blocks nothing if it is slow.
+#
+# Why it notifies rather than installs, by default
+# ------------------------------------------------
+# Installing writes outside the repository, to `~/.cargo/bin`. A hook that silently replaces a
+# binary on your PATH as a side effect of `git commit` is the kind of helpfulness you curse at
+# 2am when you are bisecting. The check is deterministic; the install is your call.
+#
+# Opt in with:
+#     git config jot.autoInstall true
+#
+# The pre-commit hook is what makes this check meaningful: because the version letter moves on
+# every commit that changes the build, "installed != committed" is exactly "your PATH is stale".
+
+set -uo pipefail
+
+root="$(git rev-parse --show-toplevel)" || exit 0
+cd "$root" || exit 0
+
+install_cmd="cargo install --path crates/jot-cli --locked"
+
+committed="$(grep -m1 '^version = ' Cargo.toml 2>/dev/null | sed 's/^version = "\(.*\)"/\1/' || true)"
+[[ -z "$committed" ]] && exit 0
+
+if ! command -v jot >/dev/null 2>&1; then
+    echo "jot: not on your PATH. \`$install_cmd\` to dogfood $committed."
+    exit 0
+fi
+
+installed="$(jot --version 2>/dev/null | awk '{print $2}' || true)"
+
+if [[ "$installed" == "$committed" ]]; then
+    exit 0
+fi
+
+if [[ "$(git config --bool jot.autoInstall 2>/dev/null || echo false)" == "true" ]]; then
+    echo "jot: PATH has $installed, committed $committed — installing…"
+    if $install_cmd; then
+        echo "jot: installed $committed"
+    else
+        # Never fail the hook: the commit is already made, and a broken build is a thing to fix in
+        # the next commit rather than a reason to shout about a commit that already succeeded.
+        echo "jot: install failed; PATH still has $installed" >&2
+    fi
+else
+    echo "jot: PATH has $installed, committed $committed — \`$install_cmd\` to catch up."
+    echo "     (\`git config jot.autoInstall true\` to do this automatically)"
+fi
+
+exit 0

@@ -23,6 +23,7 @@
 //! | 3 | no such note or workspace |
 //! | 4 | ambiguous id prefix |
 
+mod compose;
 mod context;
 mod editor;
 mod output;
@@ -146,6 +147,8 @@ enum Command {
     /// Inspect the vault index.
     #[command(subcommand)]
     Index(IndexCommand),
+    /// Browse the vault full-screen.
+    Tui,
     /// Print a shell completion script.
     Completions {
         /// The shell to generate for.
@@ -359,8 +362,21 @@ fn run() -> Result<(), Failure> {
     let cli = Cli::parse();
     let style = Style::new(cli.long, cli.no_color);
 
-    let Some(command) = &cli.command else {
-        // No arguments prints help. Stage 5 makes this launch the TUI.
+    // No arguments opens the browser, which is stage 5's headline: `jot` is a thing you *read* as
+    // well as a thing you type at. `jot tui` is the explicit form, and both land in the same arm
+    // below once a workspace has been resolved.
+    //
+    // Unless nobody is looking. `jot | less`, a CI step, a script capturing output — none of them
+    // can drive a full-screen app, and switching to the alternate screen there produces escape
+    // codes in a pipe rather than a user interface. A bare `jot` in that situation keeps its
+    // stage-3 behaviour and prints help, which is also the only thing a script could have wanted.
+    // `jot tui` asked explicitly, and is refused explicitly below rather than silently downgraded.
+    // `jot` is a CLI first. A bare invocation prints help, as it has since stage 3 — the browser
+    // is somewhere you go on purpose, via `jot tui`, not somewhere you land by typing the
+    // program's name. There is deliberately no `--tui` twin: the global options are `global =
+    // true`, so `jot tui --workspace ~/notes` already reads the way you would want it to, and a
+    // second spelling would be a second thing to keep in step for no reach it does not have.
+    let Some(command) = cli.command.as_ref() else {
         Cli::command().print_help().map_err(anyhow::Error::from)?;
         return Ok(());
     };
@@ -396,6 +412,17 @@ fn run() -> Result<(), Failure> {
         Command::Search(args) => search(&context.workspace, args, &cli, &style),
         Command::Links(args) => links(&context.workspace, args, &cli, &style),
         Command::Index(args) => index(&mut context.workspace, args, &cli),
+        // The seam in one line: the TUI is handed an already-opened workspace and owns nothing
+        // else. It syncs on its own from here, because a full-screen app syncs repeatedly where a
+        // command syncs once.
+        Command::Tui => {
+            if !std::io::stdout().is_terminal() {
+                return Err(Failure::runtime(anyhow::anyhow!(
+                    "`jot tui` needs a terminal; stdout is redirected"
+                )));
+            }
+            jot_tui::run(context.workspace, &compose::Editor).map_err(Failure::runtime)
+        }
         Command::Workspace(_) | Command::Completions { .. } => unreachable!("handled above"),
     }
 }

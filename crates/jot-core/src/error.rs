@@ -45,7 +45,7 @@
 //! - Failures originating in a third-party parser (YAML, TOML) carry the parser's own diagnostic as
 //!   a `message: String` rather than as a `#[source]` of that crate's error type. That keeps the
 //!   frozen enum from pinning the public API to a specific YAML or TOML crate, and those
-//!   diagnostics already carry line and column — see `docs/plans/runs/stage1/yaml-crate.md`.
+//!   diagnostics already carry line and column — see `docs/runs/stage1/yaml-crate.md`.
 
 use std::path::{Path, PathBuf};
 
@@ -290,6 +290,15 @@ pub enum Error {
     /// A read or a write against the index failed.
     #[error("index `{path}`: {message} (the index is derived — deleting it is safe)")]
     IndexQuery { path: PathBuf, message: String },
+
+    /// The filesystem watcher could not be started, or could not watch a directory.
+    ///
+    /// Never fatal to a surface. A vault with no watcher is a vault you refresh by hand, which is
+    /// exactly what every release before stage 5 did; the caller reports this and carries on
+    /// rather than refusing to open. Inotify watch limits and unsupported filesystems are the
+    /// common causes, and neither is worth losing the session over.
+    #[error("cannot watch `{path}` for changes: {message}")]
+    Watch { path: PathBuf, message: String },
 }
 
 impl Error {
@@ -330,7 +339,8 @@ impl Error {
             | Error::RegistrySerialize { path, .. }
             | Error::IndexOpen { path, .. }
             | Error::IndexTooNew { path, .. }
-            | Error::IndexQuery { path, .. } => Some(path),
+            | Error::IndexQuery { path, .. }
+            | Error::Watch { path, .. } => Some(path),
             Error::Rename { to, .. } => Some(to),
             Error::WorkspaceNotFound { from } => Some(from),
             Error::SerializeFrontmatter { .. }

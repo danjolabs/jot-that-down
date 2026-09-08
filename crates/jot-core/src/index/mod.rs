@@ -13,7 +13,7 @@
 //!
 //! That is the whole of `stage4.md`'s "What the snapshot leaves for this stage", and it is why the
 //! `Queries` section of that document is not implemented here — see
-//! `docs/plans/runs/stage4/breakdown.md`. Every column below is load-bearing for reconstructing a
+//! `docs/runs/stage4/breakdown.md`. Every column below is load-bearing for reconstructing a
 //! `Record`; a column no reconstruction needs would be dead weight.
 //!
 //! # The invariant

@@ -1,5 +1,5 @@
 -- Version 1 of the index. Kept as SQL rather than as `execute` calls so that the schema this
--- project is documented as having (`docs/plans/stage4.md`) and the schema it creates are the same
+-- project is documented as having (`docs/plans/stages/stage4.md`) and the schema it creates are the same
 -- text, diffable side by side.
 --
 -- Everything here is derived from the markdown files and is disposable. Deleting `.jot/index.db`

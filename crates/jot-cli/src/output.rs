@@ -505,6 +505,7 @@ mod tests {
                 parent: None,
                 replies: 0,
                 descendants: 0,
+                quoted: 0,
                 edited_at: None,
             },
             &plain(),
@@ -566,6 +567,7 @@ mod tests {
             parent: None,
             replies: 1,
             descendants: 3,
+            quoted: 0,
             edited_at: None,
         });
         for key in [

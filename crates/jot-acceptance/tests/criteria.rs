@@ -1,6 +1,6 @@
 #![cfg(feature = "stage1b")]
 //! Stage 1b acceptance criteria, one test per named criterion in the Acceptance section of
-//! `docs/plans/stage1b.md`, each named after the criterion it encodes.
+//! `docs/plans/stages/stage1b.md`, each named after the criterion it encodes.
 //!
 //! Stage 1's criteria are **not** carried forward wholesale. Three of them were about rules stage
 //! 1b deletes — "the frontmatter wins", the filename/frontmatter mismatch, and byte-identical

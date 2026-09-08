@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 jot-core = { path = "../jot-core" }
+jot-tui = { path = "../jot-tui" }
 
 anyhow = { workspace = true }
 chrono = { workspace = true }

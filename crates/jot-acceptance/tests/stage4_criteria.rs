@@ -1,6 +1,6 @@
 #![cfg(feature = "stage4")]
 //! Stage 4 acceptance criteria: one test per named bullet in the Acceptance section of
-//! `docs/plans/stage4.md`, plus the two invariants the body of that document states as
+//! `docs/plans/stages/stage4.md`, plus the two invariants the body of that document states as
 //! obligations — the rebuild invariant over whole `Record`s, and "the swap is invisible".
 //!
 //! Run with:

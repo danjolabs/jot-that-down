@@ -1063,6 +1063,67 @@ fn bare_jot_prints_help_rather_than_failing() {
         .stdout(predicates::str::contains("Usage:"));
 }
 
+/// `jot` is a CLI first: the browser is somewhere you go on purpose.
+///
+/// Stage 5 briefly made a bare `jot` open the TUI. Reverted — typing the program's name should
+/// tell you what it does, not capture your terminal.
+#[test]
+fn bare_jot_does_not_open_the_browser() {
+    let vault = Vault::new();
+    vault
+        .cmd()
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Usage:"))
+        // The alternate-screen switch. If this ever appears, a bare `jot` has taken the terminal.
+        .stdout(predicates::function::function(|out: &str| {
+            !out.contains("\u{1b}[?1049h")
+        }));
+}
+
+/// `jot tui` asks for the browser explicitly, so a redirected stdout is refused rather than
+/// quietly downgraded to help — which is how a script ends up parsing a help page.
+///
+/// The harness gives the child a pipe, so this exercises the refusal rather than the browser,
+/// which is the half reachable without a pty.
+#[test]
+fn tui_without_a_terminal_is_refused_rather_than_downgraded() {
+    let vault = Vault::new();
+    vault
+        .cmd()
+        .arg("tui")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("needs a terminal"));
+}
+
+/// The globals are `global = true`, which is why `tui` needs no `--tui` twin: the option reads
+/// naturally after the subcommand, and that is the whole reason the flag was dropped.
+#[test]
+fn tui_takes_the_global_options_after_the_subcommand() {
+    let vault = Vault::new();
+    vault
+        .cmd()
+        .args(["tui", "--workspace"])
+        .arg(vault.path())
+        .assert()
+        .failure()
+        // Reached the TUI arm, which only happens once the workspace resolved.
+        .stderr(predicates::str::contains("needs a terminal"));
+}
+
+/// There is one spelling. A `--tui` flag existed briefly and was removed.
+#[test]
+fn there_is_no_tui_flag() {
+    let vault = Vault::new();
+    vault
+        .cmd()
+        .arg("--tui")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unexpected argument"));
+}
+
 /// The registry's current workspace, as JSON.
 fn current(vault: &Vault) -> Value {
     vault

@@ -5,7 +5,7 @@ conversation for stage2 schema, sqlite and relation layer.
 > **Numbering.** This conversation was held under the old stage numbering, in which the SQLite
 > index was stage 2. The stages were renumbered afterwards — the domain is now stage 2, the CLI
 > stage 3, and the index stage 4 — and the schema work discussed here became
-> `docs/plans/pre-stage4-refactor.md`. The transcript below is left verbatim: read every "stage 2"
+> `docs/plans/stages/pre-stage4-refactor.md`. The transcript below is left verbatim: read every "stage 2"
 > in it as the index, i.e. stage 4, and every "stage 3"/"stage 4" as stages 2 and 3.
 
 -- User

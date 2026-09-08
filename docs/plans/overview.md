@@ -18,13 +18,13 @@ Carried in from `docs/conversation/initial.md`; stages assume these without re-a
 | Area | Decision |
 | --- | --- |
 | Source of truth | Markdown files. SQLite is derived and disposable. |
-| Identity | UUIDv7, in the filename only. Moved from "filename **and** frontmatter" during stage 1b — see [stage1b.md](stage1b.md). |
-| Thread storage | Adjacency: `relation:reply_to`, and nothing else. The root is **derived** — a memoized walk at scan time, never stored in a file. Moved from "`reply_to` + denormalized `relation:root`" in the [pre-stage-4 refactor](pre-stage4-refactor.md). Paths (form 1) and segments (form 2) are computed at render time, never stored. |
+| Identity | UUIDv7, in the filename only. Moved from "filename **and** frontmatter" during stage 1b — see [stage1b.md](stages/stage1b.md). |
+| Thread storage | Adjacency: `relation:reply_to`, and nothing else. The root is **derived** — a memoized walk at scan time, never stored in a file. Moved from "`reply_to` + denormalized `relation:root`" in the [pre-stage-4 refactor](stages/pre-stage4-refactor.md). Paths (form 1) and segments (form 2) are computed at render time, never stored. |
 | Quote | Single nullable `relation:quote_to`. Cross-tree: never affects the derived root, never joins the quoted note's thread. |
 | Frontmatter meaning | A key's **role** is declared by its `type`, not by its name. `workspace.toml` carries an ordered `[[schema.frontmatter]]` list; `manifest schema_version = 2`. A key the schema gives no role is preserved verbatim and never interpreted. |
-| Trash | Move the file into `.jot/.trash/`. Location on disk *is* the state — the frontmatter stamp is gone (stage 1b). There is no `trashed_at`: the index keeps one `mtime_ns` per note, and `state` says whether it means "last edited" or "moved to the trash". Amended in [stage4.md](stage4.md), because a rename leaves mtime alone and writes nothing else, so a separate stamp would be state living only in the database. |
+| Trash | Move the file into `.jot/.trash/`. Location on disk *is* the state — the frontmatter stamp is gone (stage 1b). There is no `trashed_at`: the index keeps one `mtime_ns` per note, and `state` says whether it means "last edited" or "moved to the trash". Amended in [stage4.md](stages/stage4.md), because a rename leaves mtime alone and writes nothing else, so a separate stamp would be state living only in the database. |
 | Trashing a parent | Replies stay live and render a trashed-parent placeholder. Trash is never cascading. |
-| Index scope | Title, dates, relations, links, and the whole frontmatter block as JSON. Note bodies are not stored in the index. One table per kind of fact: `notes`, `relations`, `links` — no `files` table, because it would be 1:1 with `notes` and the filename is already the join key. A fourth table, `index_meta`, holds housekeeping only — the digest of the declared frontmatter schema the rows were built against — and never a fact a note asserts. See [stage4.md](stage4.md). |
+| Index scope | Title, dates, relations, links, and the whole frontmatter block as JSON. Note bodies are not stored in the index. One table per kind of fact: `notes`, `relations`, `links` — no `files` table, because it would be 1:1 with `notes` and the filename is already the join key. A fourth table, `index_meta`, holds housekeeping only — the digest of the declared frontmatter schema the rows were built against — and never a fact a note asserts. See [stage4.md](stages/stage4.md). |
 | Search | Title and metadata only. Full-text deferred — see `docs/sidenote.md`. |
 | Tags | Out of scope. Links in. |
 | Link scope | Resolve within one workspace only. A workspace is an independent unit. |
@@ -128,15 +128,15 @@ Three deliberate departures from the sketch:
 
 | # | Stage | Delivers | Depends on |
 | --- | --- | --- | --- |
-| 1 | [Vault foundations](stage1.md) | Workspace on disk, frontmatter round-trip, atomic writes | — |
-| 1b | [Declared frontmatter schema](stage1b.md) | Filename-only identity, schema-declared frontmatter, single write path | 1 |
-| 2 | [Notes and threads](stage2.md) | Full note lifecycle, thread algebra, links | 1b |
-| 3 | [CLI](stage3.md) | `jot` — daily-usable capture and retrieval | 2 |
-| — | [Pre-stage-4 refactor](pre-stage4-refactor.md) | Typed frontmatter schema, roles declared rather than hardcoded | 3 |
-| 4 | [Index and rebuild](stage4.md) | SQLite schema, scanner, deterministic rebuild | the refactor |
-| 5 | [TUI](stage5.md) | Timeline, thread, file+reader, search, trash | 4 |
-| 6 | [Desktop](stage6.md) | Tauri app, capture overlay, `jot://` deep links | 5 |
-| 7 | [What is left of the schema](stage7.md) | Mostly subsumed by the refactor. Enums, per-key defaults, optional rename detection | 6 |
+| 1 | [Vault foundations](stages/stage1.md) | Workspace on disk, frontmatter round-trip, atomic writes | — |
+| 1b | [Declared frontmatter schema](stages/stage1b.md) | Filename-only identity, schema-declared frontmatter, single write path | 1 |
+| 2 | [Notes and threads](stages/stage2.md) | Full note lifecycle, thread algebra, links | 1b |
+| 3 | [CLI](stages/stage3.md) | `jot` — daily-usable capture and retrieval | 2 |
+| — | [Pre-stage-4 refactor](stages/pre-stage4-refactor.md) | Typed frontmatter schema, roles declared rather than hardcoded | 3 |
+| 4 | [Index and rebuild](stages/stage4.md) | SQLite schema, scanner, deterministic rebuild | the refactor |
+| 5 | [TUI](stages/stage5.md) | Timeline, thread, file+reader, search, trash | 4 |
+| 6 | [Desktop](stages/stage6.md) | Tauri app, capture overlay, `jot://` deep links | 5 |
+| 7 | [What is left of the schema](stages/stage7.md) | Mostly subsumed by the refactor. Enums, per-key defaults, optional rename detection | 6 |
 
 [`orchestration.md`](orchestration.md) covers how these stages get executed and verified — the agent
 roles, the model routing, the three gates, and the criteria no orchestrator can close.
@@ -161,7 +161,7 @@ substitution behind the seam rather than a rewrite in front of it.
 
 What this bought: the domain got exercised against a real surface, by hand, weeks earlier — which is
 the whole argument `stage3.md` makes for building the CLI early, applied one stage further back.
-What it costs is written up in [stage4.md](stage4.md) under "What the snapshot leaves for this
+What it costs is written up in [stage4.md](stages/stage4.md) under "What the snapshot leaves for this
 stage". The costs are all *performance* costs, which is the correct shape for a deferred index. If
 they were correctness costs the deferral would have been a mistake.
 
@@ -187,6 +187,33 @@ they were correctness costs the deferral would have been a mistake.
   there. Nothing is published to crates.io at these versions — they exist so a dogfooded
   `jot --version` says which stage the binary on your PATH came from. The first release version is
   a decision for after stage 6, not a convention to fix here.
+
+  **The letter is bumped by a git hook, not by whoever is committing.** `.githooks/pre-commit`
+  moves it on any commit that changes what `cargo build` produces — anything under `crates/`, the
+  manifests, the lockfile, the toolchain pin — and leaves docs-only commits alone, because a letter
+  that moves for a typo tells you nothing about the build on your PATH. It had already drifted
+  before the hook existed: stage 5 was four commits old while the workspace still said `0.0.4-a`,
+  which is exactly the failure the scheme exists to prevent.
+
+  The hook deliberately decides **only the letter**. The stage number and the seal are judgements —
+  which stage you are in, and whether it is finished — and a hook guessing them would be
+  confidently wrong at the moments that matter most. A bare `0.0.<stage>` is refused rather than
+  incremented: starting the next stage is something you write by hand.
+
+  It is a *git* hook rather than an editor or agent hook so that it fires for every commit by every
+  tool, which is the only sense of "deterministic" worth having. Git does not track `.git/hooks/`,
+  so each clone needs `git config core.hooksPath .githooks` once — see `AGENTS.md`. Escape hatch:
+  `JOT_SKIP_VERSION_BUMP=1 git commit …`.
+
+  **A version nobody installs proves nothing**, so `.githooks/post-commit` compares the `jot` on
+  your PATH against the version just committed and says when they differ. It notifies rather than
+  installs, because `cargo install` writes to `~/.cargo/bin` and a hook that silently swaps a
+  binary on your PATH is unwelcome the day you are bisecting; `git config jot.autoInstall true`
+  opts in. It is deliberately **post**-commit — a release build takes minutes, and gating a commit
+  on one would punish the WIP commit you least want installed.
+
+  The pair is what closes the loop: the letter moves when the build changes, so
+  "installed ≠ committed" means exactly "your PATH is stale".
 - **Paths in the index** — relative to the workspace root, forward slashes, so the DB survives moving
   the vault between machines and platforms.
 - **Tests** — one `tests/fixtures/vault/` used by every stage. Add to it, never fork it. Property
@@ -235,13 +262,13 @@ they were correctness costs the deferral would have been a mistake.
   table (size, mtime, hash) is the first place with the machinery to solve it.
 - **Externally deleted file** — not moved to `.jot/.trash/`, just gone. Not trashed, not purged. The
   index row drops on sync with no tombstone. Raised in stage 1b; stage 4 is where it becomes real.
-- ~~**Filename slug.**~~ **Settled in [stage 1b](stage1b.md).** The `[notes] filename` knob is gone.
+- ~~**Filename slug.**~~ **Settled in [stage 1b](stages/stage1b.md).** The `[notes] filename` knob is gone.
   The slug was always decorative and always ignored by the reader, so the knob governed nothing the
   reader cared about; it is replaced by a creation-time option for whether a new note's filename gets
   a slug derived from its title. Because identity is the filename's UUID and the reader ignores
   everything after it, re-slugging on a title change does not move the note.
 - **Desktop frontend framework** (React / Svelte / Solid) — not needed until stage 6.
 - ~~**`plain` workspace depth.**~~ **Settled by deletion** in the [pre-stage-4
-  refactor](pre-stage4-refactor.md). There is no `plain` type: once relations are schema-declared,
+  refactor](stages/pre-stage4-refactor.md). There is no `plain` type: once relations are schema-declared,
   "a workspace with no threads" is a schema that declares none, and what was left of the field was a
   filename policy wearing the name of a workspace type.
