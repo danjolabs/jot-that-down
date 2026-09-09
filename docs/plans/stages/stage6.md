@@ -442,11 +442,17 @@ it probably is not: you read a branch, not a minute — which was the recommenda
 timeline already reads in, and the same order the sweep gets for free from UUIDv7. The idle-lane
 cost stands and is accepted.
 
-**And deferred, at the same direction.** The graph is not built in this round. When it is, it goes
-**below the calendar in the sidebar**, and it **renders only while toggled** rather than occupying
-that space permanently — which materially changes the height budget the calendar was measured
-against, and is the reason the sidebar's empty space is being left empty rather than filled.
-Everything above stays as written; nothing here is cancelled.
+**Placed below the calendar in the sidebar, and rendered only while toggled.** Not permanently
+resident: that is what keeps the sidebar's height budget honest once the calendar has taken 13 of
+its rows.
+
+**Un-deferred 2026-09-09**, after the calendar comparison — the space it needs is exactly the space
+deleting the losing calendar freed.
+
+**The sidebar is 22 columns, 20 inside its borders, so this is a minimap and not a reading view.**
+A lane gutter plus a truncated title is what fits. The question it answers is "where am I in this
+thread", and the reader panel goes on answering "what is this one". Two panels, two questions —
+which is the same division the reader already has with the list.
 
 ---
 
@@ -509,12 +515,13 @@ six week rows. Putting the dot on its own line under each row doubles them:
 On a 24-row terminal, minus the status line, 14 rows is 61% of the sidebar's height spent on one
 month.
 
-**Settled 2026-09-09, at the user's direction: build both, stacked top-down, and look at them.**
-The sidebar renders the dot-under variant above the dot-in-cell variant so the two can be compared
-in the same terminal, at the same width, against the same vault. This is **evaluation scaffolding
-and is temporary** — say so in the code, because a second calendar left in by accident is the kind
-of thing that survives a year. One of the two is deleted once the comparison has been made, and the
-item is not done until it has been.
+**Settled 2026-09-09: both were built and compared; the dot under the day wins.** The sidebar
+rendered the two variants stacked, at one width against one vault, and the comparison was made on
+sight. The dot-in-cell variant is deleted, along with the scaffolding that carried it — which is
+what the scaffolding comment promised would happen, made good on rather than left as an intention.
+
+So the calendar is 13 content rows, and the roughly seven rows that frees are where the thread
+graph goes.
 
 **Constraints this inherits.**
 
@@ -562,8 +569,8 @@ whatever is being hit daily.
 - [ ] Core: `default_path`'s shape test, which asserts a path component macOS does not produce.
 - [ ] TUI: a view indicator — which view, what else there is, what mode this one is in.
 - [ ] TUI: table layout for the list views, and a key that hides the reader.
-- [ ] ~~TUI: thread detail as a lane graph~~ — **deferred within this stage**; sweep order settled
-      as chronological, placement settled as below the calendar and only while toggled.
+- [ ] TUI: thread detail as a lane graph — chronological, root at top, in the sidebar below the
+      calendar and only while toggled.
 - [ ] Core: which days have notes, as a read the TUI can ask for.
 - [ ] TUI: the three-pane layout, with a drop order for the side panes and a calendar in the sidebar.
 - [ ] Docs: `stage5.md`'s thread-detail section, which now describes a view that is not being built.
@@ -612,4 +619,3 @@ whatever is being hit daily.
 - What the graph draws where a thread has a hole — deferred on purpose, and still owed.
 - Which key moves focus between the sidebar and the table, given `Tab` already cycles views.
 - Where the view indicator goes: a strip above the table, or a segment of the status line.
-- Calendar height — being answered by building both and looking at them.

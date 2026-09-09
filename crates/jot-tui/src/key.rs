@@ -65,6 +65,8 @@ pub enum Action {
     ToggleSidebar,
     /// Show or hide the reader, which is the right pane.
     ToggleReader,
+    /// Show or hide the thread graph, which sits under the calendar in the sidebar.
+    ToggleGraph,
     /// Move the focused note to the trash.
     Trash,
     /// Undo the last trash, while the toast is up.
@@ -303,7 +305,7 @@ impl Keymap {
 ///
 /// A `static` rather than an inline `&[..]` because the rows are `const fn` calls, which are
 /// const-evaluable but block rvalue static promotion — the array needs a name to live in.
-static BINDINGS: [Binding; 21] = {
+static BINDINGS: [Binding; 22] = {
     use Action as A;
     // One row per *action*, not per key. Pairing "j / k" on one line reads more compactly, but it
     // leaves `MoveUp` and `Bottom` named by no row — and then `?` documents half of what the keymap
@@ -389,6 +391,22 @@ static BINDINGS: [Binding; 21] = {
             "reader",
             Scope::Always,
             A::ToggleReader,
+        ),
+        // `t` for thread, and it is free — the letters this surface had already spent are `f`,
+        // `s`, `g`, `G`, `j`, `k`, `q` and `u`. A bracket would have been wrong here even though
+        // the graph lives in the left pane: `[` and `]` name *panes of the frame*, and the graph
+        // is a panel inside one of them. A third bracket would have made the pair a series and
+        // stopped either of them meaning "left" or "right".
+        //
+        // No prefix. Nothing here writes to the vault — the graph is a projection of a thread
+        // that already exists — so it sits with the other two toggles on the near side of the
+        // rule stated both ways in `every_write_is_behind_the_prefix_and_nothing_else_is`.
+        b(
+            "t",
+            "thread graph on / off",
+            "thread",
+            Scope::Always,
+            A::ToggleGraph,
         ),
         b(
             "Space x",
@@ -497,6 +515,7 @@ fn resolve_normal(key: KeyEvent, plain: bool) -> Resolved {
         KeyCode::Char('f') => A::ToggleFlat,
         KeyCode::Char('[') => A::ToggleSidebar,
         KeyCode::Char(']') => A::ToggleReader,
+        KeyCode::Char('t') => A::ToggleGraph,
         KeyCode::Char('q') => A::Quit,
         KeyCode::Char('/') => A::Search,
         KeyCode::Char('?') => A::Help,

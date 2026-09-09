@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Panes, ViewKind, sort_name};
+use crate::app::{App, GraphRow, Lane, Panes, ViewKind, sort_name};
 use crate::key::{Keymap, Mode, PREFIX_LABEL, Scope};
 
 /// Paint the whole frame.
@@ -221,27 +221,6 @@ fn draw_reader(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-// =============================================================================================
-//                        TEMPORARY — TWO CALENDARS, ONE OF THEM IS GOING AWAY
-//
-// The sidebar below renders the *same month twice*, on purpose and only for as long as it takes
-// to look at it. `stage6.md` settled the height question by building both variants and comparing
-// them at one width, against one vault, in one terminal:
-//
-//   * `calendar_dot_under`   — the dot on its own row under the day. 6 weeks x 2 rows, plus the
-//                              weekday header and the month in the block's title: 14 rows.
-//   * `calendar_dot_in_cell` — one row per week, the day itself carrying the fact.  8 rows.
-//
-// On a 24-row terminal, minus the status line, the first one is 61% of the sidebar's height spent
-// on one month. That is the trade being looked at.
-//
-// **Delete one of them.** Whichever loses, its builder, its unit tests and this banner go with
-// it, and `draw_sidebar` renders the survivor alone. Two calendars stacked in a sidebar is not a
-// feature and is not a fallback — it is scaffolding, and scaffolding left up is how a year-old
-// oddity gets explained to someone as "that's just how it is". The stage item is not done until
-// one of these is gone.
-// =============================================================================================
-
 /// The dot.
 ///
 /// `∙` is U+2219 BULLET OPERATOR, East Asian **Neutral** — one column in every locale, checked in
@@ -254,10 +233,18 @@ const DOT: &str = "\u{2219}";
 /// Week rows the grid always draws, whatever the month needs.
 ///
 /// A month spans four to six of them, and drawing only as many as it needs would make the
-/// sidebar's contents change height from month to month — which moves everything below it and, in
-/// the scaffolding above, moves the second calendar. Six is the worst case, so six is the budget
-/// and short months end on blank rows.
+/// sidebar's contents change height from month to month — which moves everything below it, and
+/// there is now something below it: the thread graph would slide up and down the sidebar as the
+/// months turned. Six is the worst case, so six is the budget and short months end on blank rows.
 const CALENDAR_WEEKS: usize = 6;
+
+/// Rows the calendar occupies inside the sidebar's borders.
+///
+/// The weekday header, then two rows per week — the numbers and the dots under them. Thirteen,
+/// which is the *whole* of the sidebar's calendar budget: `stage6.md` had two variants stacked
+/// here for comparison, one row per week against two, and the dot-under-the-day variant won. What
+/// deleting the loser freed is what [`draw_graph`] draws into.
+const CALENDAR_ROWS: u16 = 1 + CALENDAR_WEEKS as u16 * 2;
 
 /// The weekday header, and the source of the sidebar's width.
 ///
@@ -266,26 +253,62 @@ const CALENDAR_WEEKS: usize = 6;
 /// less its borders.
 const WEEKDAYS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
-/// The sidebar: a month, twice, until the comparison above has been made.
+/// The sidebar: the month, and the thread graph under it while that is toggled on.
 ///
 /// `now` is the frame's clock and `app.zone()` the offset it is read in — the same discipline as
 /// everywhere else here. This module never asks the operating system what time it is or where it
 /// is: a rendered frame is a function of the state handed to it, which is what makes a snapshot
 /// worth taking. See [`App::zone`](crate::app::App::zone) for who supplies the offset.
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
+    let (calendar, graph) = split_sidebar(area, app.graph_is_open());
+    draw_calendar(frame, calendar, app, now);
+    if let Some(graph) = graph {
+        draw_graph(frame, graph, app);
+    }
+}
+
+/// The shortest a graph panel is worth drawing: two borders and a single row of content.
+///
+/// Below this the calendar keeps the whole column. A bordered box with nothing inside it is an
+/// affordance that says a thing is here and then does not show it, which is worse than the key
+/// appearing to do nothing.
+const GRAPH_MIN_HEIGHT: u16 = 3;
+
+/// Cut the sidebar into the calendar and, while it is toggled on, the graph beneath it.
+///
+/// The calendar's height is **fixed** at [`CALENDAR_ROWS`] plus its borders rather than shared
+/// proportionally, and that is the whole reason the loser of the two-calendar comparison had to
+/// go: a grid whose height moves is a grid that has to be re-found every time the pane resizes,
+/// and everything below it moves with it. So the month takes exactly what a month needs and the
+/// graph takes the remainder, which on a 24-row terminal — minus the status line — is eight rows.
+///
+/// The graph is dropped when the remainder is under [`GRAPH_MIN_HEIGHT`], by the same rule the
+/// frame drops the reader and then the sidebar: the automatic decision wins, and the toggle is an
+/// escape hatch in the direction that *removes* a pane.
+fn split_sidebar(area: Rect, graph: bool) -> (Rect, Option<Rect>) {
+    let calendar_height = CALENDAR_ROWS + 2;
+    if !graph || area.height < calendar_height + GRAPH_MIN_HEIGHT {
+        return (area, None);
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(calendar_height), Constraint::Min(1)])
+        .split(area);
+    (chunks[0], Some(chunks[1]))
+}
+
+/// The month: a grid of day numbers with a dot under any day that has a note on it.
+fn draw_calendar(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
     let today = now.with_timezone(&app.zone()).date_naive();
     let days = app.days_with_notes();
 
-    // The month goes in the title rather than in a row of its own: it costs no height, it is what
-    // a bordered box's title is for, and it leaves the two grids to be compared against each
-    // other rather than against two different headers.
+    // The month goes in the title rather than in a row of its own: it costs no height, and it is
+    // what a bordered box's title is for.
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {} ", today.format("%b %Y")));
 
-    let mut lines = calendar_dot_under(today, days);
-    lines.push(Line::raw(""));
-    lines.extend(calendar_dot_in_cell(today, days));
+    let lines = calendar(today, days);
 
     // No `Wrap`: every line here is built to the pane's exact inner width, and wrapping one would
     // fold a week onto the next row and desynchronise the grid from the header above it.
@@ -323,19 +346,27 @@ fn month_grid(anchor: NaiveDate) -> Vec<[Option<NaiveDate>; 7]> {
     grid
 }
 
-/// The weekday header row, shared by both variants so they are compared on the same grid.
+/// The weekday header row, and the top of the grid.
 fn weekday_header() -> Line<'static> {
     Line::from(Span::styled(WEEKDAYS.join(" "), dim()))
 }
 
-/// Variant 1 — the dot on its own row, directly under the day it belongs to.
+/// The calendar: the dot on its own row, directly under the day it belongs to.
 ///
-/// Two rows per week: the numbers, then the dots. The dot sits under the units digit, which is
-/// where the eye is already looking on a right-aligned number, and an empty day is two spaces
-/// rather than a placeholder — a grid of "no" marks says nothing and reads as noise.
+/// Two rows per week — the numbers, then the dots — for [`CALENDAR_ROWS`] in total. The dot sits
+/// under the units digit, which is where the eye is already looking on a right-aligned number, and
+/// an empty day is two spaces rather than a placeholder: a grid of "no" marks says nothing and
+/// reads as noise.
 ///
-/// Costs 13 rows plus the block's borders. That is the whole of the comparison this is here for.
-fn calendar_dot_under(today: NaiveDate, days: &BTreeSet<NaiveDate>) -> Vec<Line<'static>> {
+/// # Why the dot gets a row of its own
+///
+/// It cost twice the height of the alternative, which was styling the day number itself, and
+/// `stage6.md` settled the question by building both and looking at them in one terminal against
+/// one vault. The dot-under variant won and the other is deleted. Two rows per week is what a dot
+/// that is *separate from the number* costs, and the reason to pay it is that a styled number
+/// carries two facts in one glyph — which is which day, and whether it has notes — so the second
+/// fact is only legible against its neighbours. A dot is legible on its own.
+fn calendar(today: NaiveDate, days: &BTreeSet<NaiveDate>) -> Vec<Line<'static>> {
     let mut lines = vec![weekday_header()];
 
     for week in month_grid(today) {
@@ -373,41 +404,6 @@ fn calendar_dot_under(today: NaiveDate, days: &BTreeSet<NaiveDate>) -> Vec<Line<
     lines
 }
 
-/// Variant 2 — one row per week, the day number itself carrying the fact.
-///
-/// `stage6.md` offers two spellings for this, "a trailing glyph or a styled day number", and the
-/// arithmetic picks: a trailing glyph needs a third column in every cell, and 7 x 3 is 21 against
-/// the 20 the sidebar has inside its borders. Dropping the last separator — which is where the 20
-/// comes from — takes Sunday's glyph slot with it, so exactly one day of the week could never
-/// carry a dot. A styled number costs no columns at all and is legible at a glance, which is the
-/// only thing the dot was for.
-///
-/// Costs 7 rows plus the block's borders, against variant 1's 13.
-fn calendar_dot_in_cell(today: NaiveDate, days: &BTreeSet<NaiveDate>) -> Vec<Line<'static>> {
-    let mut lines = vec![weekday_header()];
-
-    for week in month_grid(today) {
-        let mut spans = Vec::new();
-        for (i, cell) in week.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::raw(" "));
-            }
-            match cell {
-                None => spans.push(Span::raw("  ")),
-                Some(day) => {
-                    let mut style = day_style(*day, today);
-                    if days.contains(day) {
-                        style = style.fg(Color::Cyan).add_modifier(Modifier::BOLD);
-                    }
-                    spans.push(Span::styled(format!("{:>2}", day.day()), style));
-                }
-            }
-        }
-        lines.push(Line::from(spans));
-    }
-    lines
-}
-
 /// How a day number is painted before anything is known about its notes.
 ///
 /// Today is reversed rather than bracketed or arrowed: a two-column cell has no room for a
@@ -418,6 +414,224 @@ fn day_style(day: NaiveDate, today: NaiveDate) -> Style {
         Style::default().add_modifier(Modifier::REVERSED)
     } else {
         Style::default()
+    }
+}
+
+// ============================================================================== the thread graph
+
+/// The graph's glyphs. ASCII, and that is a constraint rather than a style.
+///
+/// `*` node, `@` the focused note, `|` a lane, `/` and `\` the diagonals under a fork, `+` the
+/// fold described in [`MAX_LANES`]. Every one of them is East Asian **Narrow** — one column in any
+/// locale — which is checked in `every_graph_glyph_is_one_column_in_every_locale` rather than
+/// assumed. `undotree` offers a Unicode set as an option and this deliberately does not take it:
+/// `●`, `○`, `│`, `╱`, `╲` and every box-drawing character in U+2500–U+2573 are **Ambiguous** and
+/// render two columns under a CJK locale, which in a fixed gutter is a frame that has come apart.
+const GLYPH_NODE: char = '*';
+/// See [`GLYPH_NODE`]. The focused note, so "where am I" is answerable without reading colour.
+const GLYPH_FOCUS: char = '@';
+/// See [`GLYPH_NODE`].
+const GLYPH_LANE: char = '|';
+/// See [`GLYPH_NODE`].
+const GLYPH_FORK_RIGHT: char = '\\';
+/// See [`GLYPH_NODE`].
+const GLYPH_FORK_LEFT: char = '/';
+/// See [`GLYPH_NODE`] and [`MAX_LANES`].
+const GLYPH_MORE: char = '+';
+
+/// Columns between the gutter and the title.
+const GRAPH_GAP: usize = 1;
+
+/// The widest the gutter is drawn, however many lanes the thread actually has.
+///
+/// # Why there has to be a cap
+///
+/// The gutter is one column per live lane and the number of live lanes is unbounded in principle:
+/// a note with forty replies opens forty lanes. The sidebar has **20 columns inside its borders**,
+/// which is the whole budget for gutter, gap and title together, so an uncapped gutter is a title
+/// column that can reach zero — and a graph whose labels have been eaten by its own art is not a
+/// minimap, it is a decoration.
+///
+/// # Why six
+///
+/// Six lanes plus the gap leaves 13 columns of title, which is about two short words. Below that a
+/// title stops distinguishing anything and the panel stops answering the question it exists for.
+/// Six simultaneous open branches in one conversation is also well past anything the vault this is
+/// dogfooded against has produced, so the cap is a guard rather than a routine truncation.
+///
+/// # What happens past it
+///
+/// The lanes at and beyond the last drawn column **fold into that column**, and nothing is
+/// dropped: every note still gets its row and its title. The folded column shows the node glyph
+/// when this row's note is out there, [`GLYPH_MORE`] when some other lane is, and a blank when
+/// nothing is. So the *art* degrades and the *list* does not — which is the right way round,
+/// because the list is what carries the titles and the focus.
+const MAX_LANES: usize = 6;
+
+/// The thread graph: the focused note's whole thread as a lane gutter and one title per node.
+///
+/// **This is a minimap, not a reading view.** Twenty columns hold a gutter and a truncated title
+/// and nothing else; it answers "where am I in this thread, and what else is in it" and refers
+/// everything past that to the reader panel, which is already showing the note. Trying to make it
+/// read — wrapping titles, showing bodies, adding a meta column — is how a 20-column pane becomes
+/// unreadable in both jobs.
+fn draw_graph(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default().borders(Borders::ALL).title(" thread ");
+
+    let rows = app.graph();
+    if rows.is_empty() {
+        // Reachable with an empty list, and only then: every note is in a thread, even if that
+        // thread is only itself. A workspace whose schema declares no `relation:*` entry lands on
+        // the one-row graph below rather than here, which is the point — the panel says "you are
+        // here, alone" instead of offering an affordance that could never fire.
+        // No leading blank line, unlike the reader's version of this message: the graph's pane can
+        // be a single row tall, and a message spent on a blank line is a message nobody reads.
+        let paragraph = Paragraph::new("  Nothing selected.")
+            .block(block)
+            .style(dim());
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    // One gutter width for the whole panel rather than per row, so the titles form a column. The
+    // widest row decides it, capped; a linear thread is therefore two columns of gutter and gap,
+    // exactly as promised.
+    let gutter = rows
+        .iter()
+        .map(|row| row.lanes.len())
+        .max()
+        .unwrap_or(1)
+        .clamp(1, MAX_LANES);
+    let title_width = inner_width.saturating_sub(gutter + GRAPH_GAP);
+
+    let focus = rows
+        .iter()
+        .position(|row| row.node.as_ref().is_some_and(|node| node.is_focus))
+        .unwrap_or(0);
+    let window = graph_window(rows.len(), focus, inner_height);
+
+    let lines: Vec<Line> = window
+        .clone()
+        .map(|at| {
+            // The counts include the row the marker itself displaces, which is the only honest
+            // arithmetic: `+2 above` has to mean two rows you cannot see, not two plus this one.
+            let elided = if at == window.start && window.start > 0 && at != focus {
+                Some(format!("+{} above", window.start + 1))
+            } else if at + 1 == window.end && window.end < rows.len() && at != focus {
+                Some(format!("+{} below", rows.len() - window.end + 1))
+            } else {
+                None
+            };
+            match elided {
+                // Blank gutter rather than a lane glyph: the lanes do carry on through the
+                // elision, but drawing them would make this look like a connector row, and the
+                // one thing this row has to say is a number.
+                Some(text) => Line::from(Span::styled(
+                    format!(
+                        "{}{}",
+                        " ".repeat(gutter + GRAPH_GAP),
+                        truncate(&text, title_width)
+                    ),
+                    dim(),
+                )),
+                None => graph_line(&rows[at], gutter, title_width),
+            }
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Which slice of the graph a panel `height` rows tall shows.
+///
+/// # An over-tall thread scrolls to the focus rather than being cut off at the root
+///
+/// The sidebar's graph gets what the calendar leaves — eight rows on a 24-row terminal, six of
+/// them content — and threads are routinely longer than that. Showing the first six rows would put
+/// the root on screen and the note you are actually reading off it, which inverts what the panel
+/// is for.
+///
+/// So the window is **centred on the focus** and clamped to both ends, and the focused note is
+/// guaranteed to be inside it: `start` is never past `focus`, and `start + height` is always
+/// beyond it. A short thread is shown whole and never scrolls.
+///
+/// The first and last visible rows are then spent on `+n above` / `+n below` markers when there is
+/// anything out of view, which costs at most two nodes and buys the one thing a window cannot say
+/// for itself — that it is a window. The markers never displace the focus: the check is at the
+/// call site, and it is why this function returns the range rather than the lines.
+fn graph_window(len: usize, focus: usize, height: usize) -> std::ops::Range<usize> {
+    if height == 0 {
+        return 0..0;
+    }
+    if len <= height {
+        return 0..len;
+    }
+    let start = focus.saturating_sub(height / 2).min(len - height);
+    start..start + height
+}
+
+/// One row: the gutter, a space, and as much of the title as is left.
+fn graph_line(row: &GraphRow, gutter: usize, title_width: usize) -> Line<'static> {
+    let focused = row.node.as_ref().is_some_and(|node| node.is_focus);
+    let mut spans = vec![
+        Span::styled(fold_gutter(&row.lanes, gutter, focused), dim()),
+        Span::raw(" ".repeat(GRAPH_GAP)),
+    ];
+
+    if let Some(node) = &row.node {
+        let (text, style) = match &node.title {
+            Some(title) => (title.clone(), Style::default()),
+            // Same word the list uses for the same state, so the two panes agree about what an
+            // untitled note is called.
+            None => ("Untitled".to_string(), dim()),
+        };
+        let style = if focused {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            style
+        };
+        spans.push(Span::styled(truncate(&text, title_width), style));
+    }
+
+    Line::from(spans)
+}
+
+/// Render `lanes` into exactly `width` columns, folding anything past the last one.
+///
+/// See [`MAX_LANES`] for what the fold means and why it is a fold rather than a truncation.
+fn fold_gutter(lanes: &[Lane], width: usize, focused: bool) -> String {
+    let node = if focused { GLYPH_FOCUS } else { GLYPH_NODE };
+    (0..width)
+        .map(|at| {
+            let folds = at + 1 == width && lanes.len() > width;
+            if !folds {
+                return lane_glyph(lanes.get(at).copied().unwrap_or(Lane::Empty), node);
+            }
+            let rest = &lanes[at..];
+            if rest.contains(&Lane::Node) {
+                node
+            } else if rest.iter().all(|lane| *lane == Lane::Empty) {
+                ' '
+            } else {
+                GLYPH_MORE
+            }
+        })
+        .collect()
+}
+
+/// How one lane column is painted. See [`GLYPH_NODE`] for the width rule these all obey.
+fn lane_glyph(lane: Lane, node: char) -> char {
+    match lane {
+        Lane::Empty => ' ',
+        Lane::Through => GLYPH_LANE,
+        Lane::Node => node,
+        Lane::ForkRight => GLYPH_FORK_RIGHT,
+        Lane::ForkLeft => GLYPH_FORK_LEFT,
     }
 }
 
@@ -1202,10 +1416,7 @@ mod tests {
         let days = BTreeSet::from([on(2026, 9, 9), on(2026, 9, 30)]);
         let inner = SIDEBAR_WIDTH as usize - 2;
 
-        for line in calendar_dot_under(today, &days)
-            .into_iter()
-            .chain(calendar_dot_in_cell(today, &days))
-        {
+        for line in calendar(today, &days) {
             assert_eq!(line.width(), inner, "`{line}` is not {inner} columns");
         }
     }
@@ -1214,7 +1425,7 @@ mod tests {
     fn the_dot_sits_under_the_day_it_belongs_to() {
         let today = on(2026, 9, 4);
         let days = BTreeSet::from([on(2026, 9, 9)]);
-        let lines: Vec<String> = calendar_dot_under(today, &days)
+        let lines: Vec<String> = calendar(today, &days)
             .iter()
             .map(ToString::to_string)
             .collect();
@@ -1242,7 +1453,7 @@ mod tests {
     #[test]
     fn a_month_with_no_notes_gets_no_dots_and_no_placeholders() {
         let today = on(2026, 9, 4);
-        let rendered: String = calendar_dot_under(today, &BTreeSet::new())
+        let rendered: String = calendar(today, &BTreeSet::new())
             .iter()
             .map(ToString::to_string)
             .collect();
@@ -1253,40 +1464,38 @@ mod tests {
     }
 
     #[test]
-    fn both_calendars_mark_today_and_neither_spends_a_column_on_it() {
+    fn the_calendar_marks_today_without_spending_a_column_on_it() {
         let today = on(2026, 9, 4);
         let days = BTreeSet::new();
 
-        for lines in [
-            calendar_dot_under(today, &days),
-            calendar_dot_in_cell(today, &days),
-        ] {
-            let marked: Vec<String> = lines
-                .iter()
-                .flat_map(|line| line.spans.iter())
-                .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
-                .map(|span| span.content.to_string())
-                .collect();
-            assert_eq!(
-                marked,
-                [" 4"],
-                "today is reverse video: a bracket or an arrow would cost a column the grid does \
-                 not have, and every glyph that fits is two columns in some locale"
-            );
-        }
+        let marked: Vec<String> = calendar(today, &days)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|span| span.content.to_string())
+            .collect();
+        assert_eq!(
+            marked,
+            [" 4"],
+            "today is reverse video: a bracket or an arrow would cost a column the grid does not \
+             have, and every glyph that fits is two columns in some locale"
+        );
     }
 
     #[test]
-    fn the_two_calendars_differ_in_height_by_the_rows_the_dot_costs() {
-        // The whole point of rendering both: 13 rows against 7, before the block's borders and the
-        // month in its title. On a 24-row terminal that difference is most of the sidebar.
-        let today = on(2026, 9, 4);
+    fn the_calendar_costs_exactly_the_rows_the_sidebar_budgeted_for_it() {
+        // 13 content rows, whatever the month: the header and two rows per week. That number is
+        // the sidebar's calendar budget and the thing `split_sidebar` subtracts, so a calendar
+        // that grew a row would silently take one off the graph below it.
         let days = BTreeSet::new();
-        assert_eq!(
-            calendar_dot_under(today, &days).len(),
-            1 + CALENDAR_WEEKS * 2
-        );
-        assert_eq!(calendar_dot_in_cell(today, &days).len(), 1 + CALENDAR_WEEKS);
+        for anchor in [on(2026, 9, 4), on(2026, 2, 1), on(2026, 8, 15)] {
+            assert_eq!(
+                calendar(anchor, &days).len(),
+                CALENDAR_ROWS as usize,
+                "{anchor} draws a different number of rows from every other month"
+            );
+        }
+        assert_eq!(CALENDAR_ROWS as usize, 1 + CALENDAR_WEEKS * 2);
     }
 
     #[test]
@@ -1304,6 +1513,147 @@ mod tests {
             assert_eq!(day.width(), 2);
             assert_eq!(UnicodeWidthStr::width_cjk(day), 2);
         }
+    }
+
+    // ------------------------------------------------------------------------- the thread graph
+
+    #[test]
+    fn every_graph_glyph_is_one_column_in_every_locale() {
+        // The same trap as the calendar's dot, in a gutter where it is worse: `undotree` offers a
+        // Unicode set, and `●`, `○`, `│`, `╱`, `╲` and every box-drawing character in
+        // U+2500–U+2573 are East Asian *Ambiguous*. Two columns under a CJK locale in a
+        // fixed-width gutter is a frame that has come apart.
+        for glyph in [
+            GLYPH_NODE,
+            GLYPH_FOCUS,
+            GLYPH_LANE,
+            GLYPH_FORK_RIGHT,
+            GLYPH_FORK_LEFT,
+            GLYPH_MORE,
+        ] {
+            let s = glyph.to_string();
+            assert_eq!(s.width(), 1, "`{glyph}` is not one column");
+            assert_eq!(
+                UnicodeWidthStr::width_cjk(s.as_str()),
+                1,
+                "`{glyph}` widens under a CJK locale and would break the gutter"
+            );
+            assert!(glyph.is_ascii(), "`{glyph}` is not ASCII");
+        }
+    }
+
+    #[test]
+    fn a_gutter_narrower_than_the_thread_folds_rather_than_dropping_the_row() {
+        // Past `MAX_LANES` the art degrades and the list does not. Whichever lane this row's note
+        // is in, the row still says which row it is.
+        let wide = vec![Lane::Through; 9];
+        let folded = fold_gutter(&wide, MAX_LANES, false);
+        assert_eq!(
+            folded.chars().count(),
+            MAX_LANES,
+            "the gutter must be exact"
+        );
+        assert_eq!(folded, "|||||+", "the tail folds into one column");
+
+        // The node is what the fold must never hide: it is the only thing saying where you are.
+        let mut with_node = vec![Lane::Through; 9];
+        with_node[7] = Lane::Node;
+        assert_eq!(fold_gutter(&with_node, MAX_LANES, false), "|||||*");
+        assert_eq!(fold_gutter(&with_node, MAX_LANES, true), "|||||@");
+
+        // And a fold over nothing is a blank rather than a `+` promising lanes that are not there.
+        let mut sparse = vec![Lane::Empty; 9];
+        sparse[0] = Lane::Node;
+        assert_eq!(fold_gutter(&sparse, MAX_LANES, false), "*     ");
+    }
+
+    #[test]
+    fn a_gutter_inside_the_cap_is_drawn_verbatim_and_padded() {
+        assert_eq!(fold_gutter(&[Lane::Node], 1, false), "*");
+        assert_eq!(fold_gutter(&[Lane::Node], 3, false), "*  ");
+        assert_eq!(
+            fold_gutter(
+                &[Lane::Through, Lane::ForkRight, Lane::ForkLeft, Lane::Empty],
+                4,
+                false
+            ),
+            "|\\/ "
+        );
+    }
+
+    #[test]
+    fn the_cap_leaves_a_title_worth_reading() {
+        // The arithmetic the cap was chosen against: 20 columns inside the sidebar's borders, a
+        // gutter, a gap, and what is left for the title. If either constant moves, this is what
+        // says the title column has stopped being able to say anything.
+        let inner = SIDEBAR_WIDTH as usize - 2;
+        assert!(
+            inner - (MAX_LANES + GRAPH_GAP) >= 13,
+            "a {MAX_LANES}-lane gutter leaves {} columns of title",
+            inner - (MAX_LANES + GRAPH_GAP)
+        );
+    }
+
+    #[test]
+    fn a_thread_that_fits_is_shown_whole_and_never_scrolls() {
+        assert_eq!(graph_window(3, 0, 8), 0..3);
+        assert_eq!(graph_window(8, 7, 8), 0..8);
+        assert_eq!(graph_window(0, 0, 8), 0..0);
+    }
+
+    #[test]
+    fn an_over_tall_thread_always_keeps_the_focused_note_on_screen() {
+        // The one row that must always be visible. Swept across every position in a thread twice
+        // the height of the pane, because a window that loses the focus is worse than no window.
+        for height in 1..=8 {
+            for focus in 0..40 {
+                let window = graph_window(40, focus, height);
+                assert_eq!(
+                    window.len(),
+                    height.min(40),
+                    "height {height}, focus {focus}"
+                );
+                assert!(
+                    window.contains(&focus),
+                    "focus {focus} fell out of {window:?} at height {height}"
+                );
+                assert!(window.end <= 40);
+            }
+        }
+    }
+
+    #[test]
+    fn an_over_tall_thread_scrolls_rather_than_being_cut_off_at_the_root() {
+        // Centred on the focus, clamped at both ends: the top of a long thread shows the root,
+        // the bottom shows the last node, and the middle shows context either side.
+        assert_eq!(graph_window(20, 0, 6), 0..6);
+        assert_eq!(graph_window(20, 10, 6), 7..13);
+        assert_eq!(graph_window(20, 19, 6), 14..20);
+    }
+
+    #[test]
+    fn the_sidebar_gives_the_calendar_a_fixed_height_and_the_graph_the_remainder() {
+        let column = Rect {
+            x: 0,
+            y: 0,
+            width: SIDEBAR_WIDTH,
+            height: 23,
+        };
+
+        // Off: the calendar has the column to itself, which is the state the surface opens in.
+        assert_eq!(split_sidebar(column, false), (column, None));
+
+        // On, on a 24-row terminal minus the status line: 15 rows of calendar and 8 of graph.
+        let (calendar, graph) = split_sidebar(column, true);
+        assert_eq!(calendar.height, CALENDAR_ROWS + 2);
+        assert_eq!(graph.map(|r| r.height), Some(23 - (CALENDAR_ROWS + 2)));
+
+        // And a column too short to carry both keeps the month rather than drawing an empty box.
+        let short = Rect {
+            height: CALENDAR_ROWS + 2 + GRAPH_MIN_HEIGHT - 1,
+            ..column
+        };
+        assert_eq!(split_sidebar(short, true), (short, None));
     }
 
     #[test]

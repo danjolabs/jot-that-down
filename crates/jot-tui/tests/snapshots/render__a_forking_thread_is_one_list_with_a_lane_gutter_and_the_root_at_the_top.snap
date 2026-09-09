@@ -3,10 +3,10 @@ source: crates/jot-tui/tests/render.rs
 expression: frame
 ---
 ┌ Sep 2026 ──────────┐┌ timeline — every note ───────────────┐┌ id---------------------------------- ──────────┐
-│Mo Tu We Th Fr Sa Su││   id-----------  the note in …  [age]││# the note in focus                             │
-│    1  2  3  4  5  6││   id-----------  older          [age]││                                                │
-│                    ││                                      ││the body of the focused note                    │
-│ 7  8  9 10 11 12 13││                                      ││                                                │
+│Mo Tu We Th Fr Sa Su││↳  id-----------  a follow up    [age]││# the question                                  │
+│    1  2  3  4  5  6││↳  id-----------  second answer  [age]││                                                │
+│                    ││↳  id-----------  first answer   [age]││the body of the root                            │
+│ 7  8  9 10 11 12 13││⚑  id-----------  the question   [age]││                                                │
 │                    ││                                      ││                                                │
 │14 15 16 17 18 19 20││                                      ││                                                │
 │                    ││                                      ││                                                │
@@ -16,5 +16,13 @@ expression: frame
 │                    ││                                      ││                                                │
 │                    ││                                      ││                                                │
 │                    ││                                      ││                                                │
+└────────────────────┘│                                      ││                                                │
+┌ thread ────────────┐│                                      ││                                                │
+│@  the question     ││                                      ││                                                │
+│|\                  ││                                      ││                                                │
+│*| first answer     ││                                      ││                                                │
+│|* second answer    ││                                      ││                                                │
+│*  a follow up      ││                                      ││                                                │
+│                    ││                                      ││                                                │
 └────────────────────┘└──────────────────────────────────────┘└────────────────────────────────────────────────┘
- 1/2  Space  n  r  q  e  x  ·  Tab  f  [  ]  t  /  ·  ?  q
+ 4/4  Space  n  r  q  e  x  ·  Tab  f  [  ]  t  /  ·  ?  q

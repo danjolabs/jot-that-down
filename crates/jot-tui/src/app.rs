@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, FixedOffset, NaiveDate, Offset, Utc};
 use jot_core::note::NoteId;
 use jot_core::query::{Draft, Edit, FileSort, Row, SearchQuery, State, TimelineQuery};
+use jot_core::thread::TreeNode;
 use jot_core::workspace::Workspace;
 use ratatui::text::Line;
 
@@ -159,6 +160,49 @@ pub enum Pending {
     EditNote(NoteId),
 }
 
+/// What one lane column holds on one row of the thread graph.
+///
+/// Topology, not glyphs. [`crate::ui`] maps these onto `*`, `|`, `/` and `\` — the sweep has no
+/// business knowing what a terminal cell looks like, and the mapping is where the
+/// one-column-in-every-locale rule is asserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    /// Nothing here on this row.
+    Empty,
+    /// A branch that is neither starting nor ending here: it passes through.
+    Through,
+    /// This row's note sits in this lane.
+    Node,
+    /// A reply opening a lane to the **right** of the note it replies to.
+    ForkRight,
+    /// A reply opening a lane to the **left** — a lane that fell empty earlier and is being
+    /// reused rather than a seventh column being added to a twenty-column pane.
+    ForkLeft,
+}
+
+/// The note a graph row stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphNode {
+    /// Which note. Carried so a future `Enter` can jump to the row under the cursor.
+    pub id: NoteId,
+    /// Its title, or `None` for an untitled note — which is a legal note.
+    pub title: Option<String>,
+    /// Whether this is the note the rest of the surface is focused on.
+    pub is_focus: bool,
+}
+
+/// One row of the lane graph: a gutter, and the note it belongs to when it has one.
+///
+/// A row with no node is a **connector**: the row drawn under a fork, carrying the diagonals that
+/// say which lanes the replies opened into. It has no label because it is not a note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRow {
+    /// One entry per lane that exists on this row, left to right.
+    pub lanes: Vec<Lane>,
+    /// The note, for a node row.
+    pub node: Option<GraphNode>,
+}
+
 /// The whole of the TUI's state.
 pub struct App {
     /// The vault. Owned, because `Workspace` is neither `Clone` nor `Sync` and this is the one
@@ -183,6 +227,16 @@ pub struct App {
     /// whole vault is asked for at once and the sidebar takes the month it needs out of it; a
     /// month-bounded query would have to be redone the moment the calendar can be paged.
     days: BTreeSet<NaiveDate>,
+    /// Whether the thread graph is toggled on. Off until asked for; see [`Action::ToggleGraph`].
+    graph_open: bool,
+    /// The focused note's thread, swept into lanes. See [`App::refresh_graph`].
+    graph: Vec<GraphRow>,
+    /// Which note [`App::graph`] was built for, so the sweep is not redone every frame.
+    ///
+    /// A thread is tens of nodes and the sweep is cheap, but "cheap" times ten frames a second is
+    /// a choice nobody made. The two things that can change the answer are the vault changing —
+    /// [`App::reload`] clears this — and the cursor moving, which is what the comparison catches.
+    graph_key: Option<NoteId>,
     /// Search: what has been typed so far.
     query: String,
     mode: Mode,
@@ -245,6 +299,11 @@ impl App {
             // test binary happens to run in. See [`App::with_zone`].
             zone: Utc.fix(),
             days: BTreeSet::new(),
+            // Off until asked for. The sidebar's job is the calendar, and a graph occupying the
+            // space permanently is what `stage6.md` refused when it settled this as a toggle.
+            graph_open: false,
+            graph: Vec::new(),
+            graph_key: None,
             query: String::new(),
             mode: Mode::Normal,
             keymap: Keymap::new(),
@@ -361,6 +420,13 @@ impl App {
         self.days = self
             .ws
             .days_with_notes(NaiveDate::MIN..=NaiveDate::MAX, &self.zone);
+
+        // And the thread graph, which a reload can change without the cursor moving at all: a
+        // reply arriving from the watcher adds a lane to a thread already on screen. Clearing the
+        // key first is what turns the "has the selection moved?" check into an unconditional
+        // rebuild here.
+        self.graph_key = None;
+        self.refresh_graph();
     }
 
     /// Bring the reader panel up to date for the focused note at `width` text columns.
@@ -473,6 +539,10 @@ impl App {
             // whole screen changing shape, which needs no announcement when it happens.
             Action::ToggleSidebar => self.panes.sidebar = !self.panes.sidebar,
             Action::ToggleReader => self.panes.reader = !self.panes.reader,
+            // Same reasoning one pane in. `ui::split_sidebar` may refuse this on a short terminal
+            // and `split_frame` may have dropped the sidebar entirely, so a toast confirming it
+            // would be promising something this end of the surface cannot check.
+            Action::ToggleGraph => self.graph_open = !self.graph_open,
 
             Action::Search => {
                 self.view = ViewKind::Search;
@@ -523,6 +593,78 @@ impl App {
         }
 
         self.clamp_selection();
+        // After the clamp, because the graph is a function of what is *now* under the cursor and
+        // the clamp is the last thing that can move it. Every path that moves the selection —
+        // `j`, `G`, `u`, a search keystroke narrowing the list — funnels through here, which is
+        // why this is one call at the bottom rather than a line in each arm.
+        self.refresh_graph();
+    }
+
+    /// Rebuild [`App::graph`] if the note it describes has changed.
+    ///
+    /// Deliberately not called from the draw path: [`crate::ui`] is pure and a frame is painted
+    /// ten times a second, so the sweep runs on the two events that can change its answer — a
+    /// reload and a move — and nowhere else.
+    fn refresh_graph(&mut self) {
+        // Nothing is drawn while the toggle is off, so nothing is computed either. Dropping the
+        // rows rather than keeping them also means turning the graph back on cannot show a
+        // thread from before the last reload.
+        if !self.graph_open {
+            self.graph.clear();
+            self.graph_key = None;
+            return;
+        }
+
+        let Some(focus) = self.focused_id() else {
+            self.graph.clear();
+            self.graph_key = None;
+            return;
+        };
+        if self.graph_key == Some(focus) {
+            return;
+        }
+        self.graph = self.thread_graph(focus);
+        self.graph_key = Some(focus);
+    }
+
+    /// Sweep the whole thread `focus` sits in into lanes.
+    ///
+    /// # The obvious call is the wrong one
+    ///
+    /// `thread(focus)` is what you reach for and it does not give you the thread. `Thread.tree` is
+    /// rooted at **the focus**, not at the thread's root: the ancestors come back separately, in
+    /// `Thread.ancestors`, and that chain is linear by construction. So a graph swept from
+    /// `thread(focus).tree` would draw the focus and everything under it and silently hide every
+    /// branch above it — including the root's other children, which is exactly the fork you opened
+    /// the graph to see.
+    ///
+    /// Hence the second call: ask for the thread of the **root**, whose `tree` spans the whole
+    /// thing, and mark the focus inside it. The root is `ancestors.first()`, or the focus itself
+    /// when there are no ancestors, which is what [`Thread::root`](jot_core::thread::Thread::root)
+    /// already answers. Two snapshot reads over tens of notes, on a cursor move.
+    ///
+    /// # Holes
+    ///
+    /// A purged or trashed note mid-thread is **unhandled by decision, not by oversight**:
+    /// `stage6.md` defers what the graph draws where a thread has a hole. Core truncates for us —
+    /// `ancestors` stops at the first note the vault does not hold and `TreeNode::assemble` never
+    /// descends through one — so a hole quietly yields a smaller graph rooted at the highest
+    /// ancestor that still resolves. That is a degradation, not an answer, and it is the reason
+    /// this function has no branch for it.
+    fn thread_graph(&self, focus: NoteId) -> Vec<GraphRow> {
+        let Some(thread) = self.ws.thread(focus) else {
+            return Vec::new();
+        };
+        let root = thread.root().id;
+        let whole = if root == focus {
+            thread
+        } else {
+            // `None` here would mean the snapshot answered with an ancestor it does not hold,
+            // which it cannot. Falling back to the focus-rooted thread rather than unwrapping
+            // keeps a surprise from being a panic.
+            self.ws.thread(root).unwrap_or(thread)
+        };
+        sweep(&whole.tree, focus)
     }
 
     /// The focused note's id, if anything is focused.
@@ -755,6 +897,18 @@ impl App {
         &self.days
     }
 
+    /// Whether the thread graph is toggled on.
+    #[must_use]
+    pub fn graph_is_open(&self) -> bool {
+        self.graph_open
+    }
+
+    /// The focused note's thread as lane rows, root first. Empty while the graph is off.
+    #[must_use]
+    pub fn graph(&self) -> &[GraphRow] {
+        &self.graph
+    }
+
     /// Whether the timeline is showing every note rather than roots only.
     #[must_use]
     pub fn is_flat(&self) -> bool {
@@ -894,6 +1048,137 @@ impl App {
     /// The workspace, for the run loop's `$EDITOR` handoff.
     pub fn workspace(&mut self) -> &mut Workspace {
         &mut self.ws
+    }
+}
+
+/// Sweep a thread tree into lane rows, root first, growing downward.
+///
+/// # The lane bookkeeping
+///
+/// This is `undotree`'s algorithm, and it is the part of the graph a reader will not reconstruct
+/// from the code, so here it is in prose.
+///
+/// A **lane** is a vertical column in the gutter holding exactly one note that has been drawn but
+/// whose replies have not. `lanes` is that list — one slot per column, `None` for a column that is
+/// currently empty. It starts as a single lane holding the root.
+///
+/// Each pass does three things:
+///
+/// 1. **Emit the live lane with the lowest id.** UUIDv7 sorts by creation time, so "lowest id" is
+///    "written first" and the vertical axis is a timeline. That is the settled sweep order —
+///    chronological, the same order the timeline reads in — and it is what makes the total order
+///    free: `TreeNode::children` is already sorted this way, so nothing here has to sort anything.
+///    The lane is emptied, and the row drawn is `Node` in that column and `Through` in every other
+///    live one.
+/// 2. **Replace the lane with the note's replies.** The first reply takes the lane its parent just
+///    vacated, so an unbranched conversation never changes column and costs exactly one column of
+///    gutter forever. Every further reply takes the leftmost empty lane, appending a new one only
+///    when there is none — which is what keeps a thread with many short branches from growing a
+///    column per leaf. A note with no replies simply leaves its lane empty.
+/// 3. **Draw a connector row under a fork.** Only under a fork: one reply continues the line and
+///    needs no diagonal. The extra replies are drawn `ForkRight` or `ForkLeft` depending on which
+///    side of the parent their lane fell, which is the only place `ForkLeft` comes from — a lane
+///    being *reused* is a lane to the left.
+///
+/// Trailing empty lanes are dropped at the end of each pass, so the gutter is as wide as the
+/// thread is branchy at that moment and no wider.
+///
+/// # The idle-lane cost, which is accepted
+///
+/// A branch opened early and answered late holds its lane all the way down the thread, because
+/// chronological order will not come back to it until its reply's turn. `stage6.md` weighed that
+/// against depth-first order — where branches stay contiguous but the vertical axis stops being
+/// time — and settled on chronological. This is where the cost lives.
+///
+/// # Termination
+///
+/// Every pass empties exactly one lane and fills it with strictly deeper nodes, and
+/// `TreeNode::assemble` has already broken any `reply_to` cycle, so the tree is finite and the
+/// loop runs once per node.
+fn sweep(tree: &TreeNode, focus: NoteId) -> Vec<GraphRow> {
+    let mut lanes: Vec<Option<&TreeNode>> = vec![Some(tree)];
+    let mut rows = Vec::new();
+
+    while let Some(at) = next_lane(&lanes) {
+        let node = lanes[at]
+            .take()
+            .expect("`next_lane` only names a live lane");
+
+        let mut gutter = through(&lanes);
+        gutter[at] = Lane::Node;
+        rows.push(GraphRow {
+            lanes: gutter,
+            node: Some(GraphNode {
+                id: node.id(),
+                title: node.note.title.clone(),
+                is_focus: node.id() == focus,
+            }),
+        });
+
+        let mut forks = Vec::new();
+        for (nth, child) in node.children.iter().enumerate() {
+            // The first reply inherits the lane; the rest have to find one.
+            let lane = if nth == 0 { at } else { empty_lane(&mut lanes) };
+            lanes[lane] = Some(child);
+            if nth > 0 {
+                forks.push(lane);
+            }
+        }
+        while lanes.last().is_some_and(Option::is_none) {
+            lanes.pop();
+        }
+
+        if !forks.is_empty() {
+            let mut gutter = through(&lanes);
+            for lane in forks {
+                gutter[lane] = if lane > at {
+                    Lane::ForkRight
+                } else {
+                    Lane::ForkLeft
+                };
+            }
+            rows.push(GraphRow {
+                lanes: gutter,
+                node: None,
+            });
+        }
+    }
+
+    rows
+}
+
+/// Which lane to emit next: the live one whose note was written first.
+fn next_lane(lanes: &[Option<&TreeNode>]) -> Option<usize> {
+    lanes
+        .iter()
+        .enumerate()
+        .filter_map(|(at, lane)| lane.map(|node| (node.id(), at)))
+        .min()
+        .map(|(_, at)| at)
+}
+
+/// A row where every live lane simply passes through, ready to be overwritten.
+fn through(lanes: &[Option<&TreeNode>]) -> Vec<Lane> {
+    lanes
+        .iter()
+        .map(|lane| {
+            if lane.is_some() {
+                Lane::Through
+            } else {
+                Lane::Empty
+            }
+        })
+        .collect()
+}
+
+/// The leftmost empty lane, appending one when every lane is taken.
+fn empty_lane(lanes: &mut Vec<Option<&TreeNode>>) -> usize {
+    match lanes.iter().position(Option::is_none) {
+        Some(at) => at,
+        None => {
+            lanes.push(None);
+            lanes.len() - 1
+        }
     }
 }
 
@@ -1675,5 +1960,284 @@ mod tests {
         assert!(app.toast().is_some());
         app.dispatch(Action::MoveDown);
         assert!(app.toast().is_none());
+    }
+
+    // ------------------------------------------------------------------------- the thread graph
+    //
+    // The sweep is tested against hand-built trees rather than against a vault: a `TreeNode` is
+    // what it takes, the shapes that matter are specific, and building a nine-note fork through
+    // `Workspace::create` would test the vault's ability to store a fork rather than this
+    // function's ability to draw one. `the_graph_is_the_whole_thread_and_not_the_focused_subtree`
+    // below goes through a real workspace, which is where that half belongs.
+
+    /// A note whose id sorts by `n`, so a test can spell creation order out loud.
+    fn node_meta(n: u32, title: &str) -> jot_core::note::NoteMeta {
+        let id: NoteId = format!("01a03d60-0000-7000-8000-{n:012}")
+            .parse()
+            .expect("a well-formed v7 uuid");
+        jot_core::note::NoteMeta {
+            id,
+            created_at: id.created_at(),
+            title: Some(title.to_string()),
+            root: None,
+            reply_to: None,
+            quote: None,
+        }
+    }
+
+    /// A subtree: `n` is both the creation order and the label.
+    fn node(n: u32, children: Vec<TreeNode>) -> TreeNode {
+        TreeNode {
+            note: node_meta(n, &format!("n{n}")),
+            children,
+        }
+    }
+
+    fn nid(n: u32) -> NoteId {
+        node_meta(n, "").id
+    }
+
+    /// The sweep as text: the gutter, then the label or nothing for a connector.
+    fn drawn(rows: &[GraphRow]) -> Vec<String> {
+        rows.iter()
+            .map(|row| {
+                let gutter: String = row
+                    .lanes
+                    .iter()
+                    .map(|lane| match lane {
+                        Lane::Empty => ' ',
+                        Lane::Through => '|',
+                        Lane::Node => '*',
+                        Lane::ForkRight => '\\',
+                        Lane::ForkLeft => '/',
+                    })
+                    .collect();
+                match &row.node {
+                    Some(n) => format!("{gutter} {}", n.title.clone().unwrap_or_default()),
+                    None => gutter,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lone_note_is_one_row_and_one_lane() {
+        // The thread-agnostic case: a workspace whose schema declares no `relation:*` entry has
+        // no replies and no parents, so every thread looks exactly like this. It has to read as
+        // "you are here, alone" rather than as an empty panel.
+        let rows = sweep(&node(1, vec![]), nid(1));
+        assert_eq!(drawn(&rows), ["* n1"]);
+        assert!(rows[0].node.as_ref().unwrap().is_focus);
+    }
+
+    #[test]
+    fn an_unbranched_thread_costs_exactly_one_lane_all_the_way_down() {
+        // The common case, and the one the two-column promise is about: no connector rows, no
+        // second lane, and the column never moves.
+        let rows = sweep(&node(1, vec![node(2, vec![node(3, vec![])])]), nid(9));
+        assert_eq!(drawn(&rows), ["* n1", "* n2", "* n3"]);
+    }
+
+    #[test]
+    fn a_fork_opens_a_lane_to_the_right_under_a_connector_row() {
+        //   1
+        //   |\
+        //   2 3
+        let rows = sweep(&node(1, vec![node(2, vec![]), node(3, vec![])]), nid(1));
+        assert_eq!(drawn(&rows), ["* n1", "|\\", "*| n2", " * n3"]);
+    }
+
+    #[test]
+    fn the_sweep_is_chronological_rather_than_depth_first() {
+        // 1 forks into 2 and 5; 2 is answered by 3 and 3 by 4. Depth-first would draw the whole
+        // 2-branch before touching 5. Chronological interleaves them by id, which is creation
+        // time — the settled order, and the same order the timeline reads in.
+        let tree = node(
+            1,
+            vec![
+                node(2, vec![node(3, vec![node(6, vec![])])]),
+                node(5, vec![]),
+            ],
+        );
+        let labels: Vec<String> = sweep(&tree, nid(1))
+            .iter()
+            .filter_map(|row| row.node.as_ref())
+            .map(|node| node.title.clone().unwrap())
+            .collect();
+        assert_eq!(labels, ["n1", "n2", "n3", "n5", "n6"]);
+    }
+
+    #[test]
+    fn a_branch_that_ends_frees_its_lane_for_the_next_fork() {
+        // The lane bookkeeping's whole point. 1 forks into 2 and 3; 2 is a leaf, so its lane is
+        // empty by the time 3 forks — and 3's second reply reuses it rather than opening a fourth
+        // column in a twenty-column pane. Reuse to the *left* is the only source of `/`.
+        let tree = node(
+            1,
+            vec![
+                node(2, vec![]),
+                node(3, vec![node(4, vec![]), node(5, vec![])]),
+            ],
+        );
+        let rows = sweep(&tree, nid(1));
+        assert_eq!(
+            drawn(&rows),
+            ["* n1", "|\\", "*| n2", " * n3", "/|", "|* n4", "* n5"]
+        );
+        assert!(
+            rows.iter().all(|row| row.lanes.len() <= 2),
+            "the gutter grew a third lane rather than reusing the one that fell empty: {:?}",
+            drawn(&rows)
+        );
+    }
+
+    #[test]
+    fn a_three_way_fork_opens_two_lanes_from_one_connector() {
+        let tree = node(1, vec![node(2, vec![]), node(3, vec![]), node(4, vec![])]);
+        assert_eq!(
+            drawn(&sweep(&tree, nid(1))),
+            ["* n1", "|\\\\", "*|| n2", " *| n3", "  * n4"]
+        );
+    }
+
+    #[test]
+    fn only_the_focused_note_is_marked_and_a_focus_outside_the_thread_marks_nothing() {
+        let tree = node(1, vec![node(2, vec![]), node(3, vec![])]);
+        let focused: Vec<Option<String>> = sweep(&tree, nid(3))
+            .iter()
+            .filter_map(|row| row.node.as_ref())
+            .filter(|node| node.is_focus)
+            .map(|node| node.title.clone())
+            .collect();
+        assert_eq!(focused, [Some("n3".to_string())]);
+
+        // A focus the tree does not contain cannot happen through `App`, and marking nothing is
+        // the right degradation if it ever does — better a graph with no `@` than a panic.
+        assert!(
+            sweep(&tree, nid(99))
+                .iter()
+                .filter_map(|row| row.node.as_ref())
+                .all(|node| !node.is_focus)
+        );
+    }
+
+    #[test]
+    fn every_note_in_the_thread_gets_exactly_one_row() {
+        let tree = node(
+            1,
+            vec![
+                node(2, vec![node(4, vec![]), node(7, vec![])]),
+                node(3, vec![node(5, vec![node(6, vec![])])]),
+            ],
+        );
+        let mut ids: Vec<NoteId> = sweep(&tree, nid(1))
+            .iter()
+            .filter_map(|row| row.node.as_ref().map(|node| node.id))
+            .collect();
+        assert_eq!(ids.len(), 7, "a node was drawn twice or not at all");
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 7);
+    }
+
+    #[test]
+    fn the_graph_is_the_whole_thread_and_not_the_focused_notes_subtree() {
+        // `thread(focus).tree` is rooted at the focus, so a graph built from it would hide the
+        // root's other children. Focusing the *reply* must still show its sibling branch.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ws = Workspace::init(tmp.path()).unwrap();
+        let root = ws.create(Draft::new("b").title("root")).unwrap().meta().id;
+        let reply = ws
+            .create(Draft::new("b").title("reply").reply_to(root))
+            .unwrap()
+            .meta()
+            .id;
+        ws.create(Draft::new("b").title("sibling").reply_to(root))
+            .unwrap();
+        ws.sync().unwrap();
+
+        let mut app = App::new(ws);
+        app.dispatch(Action::ToggleGraph);
+
+        // Put the cursor on the reply, which is the note whose own subtree is a single node.
+        let at = app
+            .rows()
+            .iter()
+            .position(|row| row.note.id == reply)
+            .unwrap();
+        while app.selected() != at {
+            app.dispatch(Action::MoveDown);
+        }
+
+        let titles: Vec<String> = app
+            .graph()
+            .iter()
+            .filter_map(|row| row.node.as_ref())
+            .map(|node| node.title.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            titles,
+            ["root", "reply", "sibling"],
+            "the graph must span the whole thread, root first"
+        );
+        assert!(
+            app.graph()
+                .iter()
+                .filter_map(|row| row.node.as_ref())
+                .any(|node| node.is_focus && node.title.as_deref() == Some("reply")),
+            "and mark the focus inside it"
+        );
+    }
+
+    #[test]
+    fn the_graph_is_empty_until_it_is_toggled_and_follows_the_cursor_after() {
+        let (_tmp, mut app) = vault(&["a", "b"]);
+        assert!(
+            app.graph().is_empty() && !app.graph_is_open(),
+            "nothing is drawn and nothing is computed while the toggle is off"
+        );
+
+        app.dispatch(Action::ToggleGraph);
+        assert!(app.graph_is_open());
+        let first = app.graph().to_vec();
+        assert_eq!(first.len(), 1, "two unrelated notes are two threads of one");
+
+        app.dispatch(Action::MoveDown);
+        assert_ne!(
+            app.graph(),
+            first.as_slice(),
+            "the graph is a function of what is under the cursor"
+        );
+
+        app.dispatch(Action::ToggleGraph);
+        assert!(app.graph().is_empty(), "and the same key puts it away");
+    }
+
+    #[test]
+    fn a_reply_arriving_on_a_reload_reaches_the_graph_without_the_cursor_moving() {
+        // The cache key is the focused note, so a vault that changed under a stationary cursor is
+        // exactly the case a naive key would miss.
+        let (_tmp, mut app) = vault(&["root"]);
+        app.dispatch(Action::ToggleGraph);
+        assert_eq!(app.graph().len(), 1);
+
+        let root = app.focused().unwrap().note.id;
+        app.workspace()
+            .create(Draft::new("b").title("reply").reply_to(root))
+            .unwrap();
+        app.sync();
+
+        assert_eq!(
+            app.graph().iter().filter(|row| row.node.is_some()).count(),
+            2,
+            "the reply must show up without the cursor having moved"
+        );
+    }
+
+    #[test]
+    fn the_graph_of_an_empty_list_is_empty_rather_than_a_panic() {
+        let (_tmp, mut app) = vault(&[]);
+        app.dispatch(Action::ToggleGraph);
+        assert!(app.graph().is_empty());
     }
 }

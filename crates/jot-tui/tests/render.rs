@@ -782,8 +782,8 @@ fn the_calendar_dots_the_day_a_note_was_created() {
     let noon = day.and_hms_opt(12, 0, 0).unwrap().and_utc();
     let frame = render_raw_with_clock(&mut app, WIDE.0, 20, noon);
 
-    // The first calendar in the sidebar is the dot-under variant, so the row after the one
-    // carrying the day's number is that day's dot row.
+    // The dot sits on its own row under the day it belongs to, so the row after the one carrying
+    // the day's number is that day's dot row.
     let rows = sidebar_rows(&frame);
     let cell = format!("{:>2}", day.day());
     let (row, at) = rows
@@ -831,8 +831,8 @@ fn the_calendar_marks_today_without_spending_a_column_on_it() {
 
     assert_eq!(
         marked.replace(' ', ""),
-        "44",
-        "today is reverse video in both calendars and nothing else is: {marked:?}"
+        "4",
+        "today is reverse video and nothing else is: {marked:?}"
     );
 }
 
@@ -843,7 +843,7 @@ fn the_calendar_marks_today_without_spending_a_column_on_it() {
 fn sidebar_rows(frame: &str) -> Vec<Vec<char>> {
     frame
         .lines()
-        .map(|line| line.chars().skip(1).take(20).collect())
+        .map(|line| line.chars().skip(1).take(SIDEBAR_INNER).collect())
         .collect()
 }
 
@@ -864,4 +864,288 @@ fn threaded() -> (TempDir, App) {
         .unwrap();
     ws.sync().unwrap();
     (tmp, App::new(ws))
+}
+
+/// A vault holding one forking thread, synced and loaded with the graph toggled on.
+///
+/// The shape is the one `stage6.md`'s acceptance criterion names — "a thread with a fork" — and
+/// it is deliberately the smallest tree with every feature the sweep has: a trunk, a fork, and a
+/// reply arriving *after* the fork so the two branches interleave chronologically.
+fn forked() -> (TempDir, App) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(tmp.path()).unwrap();
+    let root = ws
+        .create(Draft::new("the body of the root").title("the question"))
+        .unwrap()
+        .meta()
+        .id;
+    let first = ws
+        .create(Draft::new("b").title("first answer").reply_to(root))
+        .unwrap()
+        .meta()
+        .id;
+    ws.create(Draft::new("b").title("second answer").reply_to(root))
+        .unwrap();
+    ws.create(Draft::new("b").title("a follow up").reply_to(first))
+        .unwrap();
+    ws.sync().unwrap();
+
+    let mut app = App::new(ws);
+    app.dispatch(Action::ToggleGraph);
+    (tmp, app)
+}
+
+/// The sidebar's inner rows as text, one string per *content* row.
+///
+/// Filtered to lines that open with the frame's left border, which drops the horizontal rules
+/// between the panels and the status line below them — neither is sidebar content, and both would
+/// otherwise turn up in an assertion about what the calendar or the graph drew.
+fn sidebar_text(frame: &str) -> Vec<String> {
+    frame
+        .lines()
+        .filter(|line| line.starts_with('\u{2502}'))
+        .map(|line| {
+            line.chars()
+                .skip(1)
+                .take(SIDEBAR_INNER)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Columns inside the sidebar's borders. `ui::SIDEBAR_WIDTH` less the two it spends on them.
+const SIDEBAR_INNER: usize = 20;
+
+/// Tall enough that the calendar's 15 rows leave the graph a pane worth drawing into.
+const TALL: (u16, u16) = (112, 24);
+
+#[test]
+fn the_thread_graph_is_off_until_it_is_toggled() {
+    // The sidebar is the calendar, and it keeps working with the graph off — which is the whole
+    // reason this is a toggle rather than a second permanent panel.
+    let (_tmp, mut app) = forked();
+    app.dispatch(Action::ToggleGraph);
+
+    let off = render_at(&mut app, TALL.0, TALL.1);
+    assert!(
+        !off.contains(" thread "),
+        "nothing announces a panel that is not there:\n{off}"
+    );
+    assert!(off.contains("Mo Tu We Th Fr Sa Su"));
+
+    app.dispatch(Action::ToggleGraph);
+    let on = render_at(&mut app, TALL.0, TALL.1);
+    assert!(
+        on.contains(" thread "),
+        "and the same key brings it back:\n{on}"
+    );
+    assert!(
+        on.contains("Mo Tu We Th Fr Sa Su"),
+        "without costing the calendar a row:\n{on}"
+    );
+}
+
+#[test]
+fn a_forking_thread_is_one_list_with_a_lane_gutter_and_the_root_at_the_top() {
+    let (_tmp, mut app) = forked();
+    // The timeline is newest first, so the root is the last row. Focusing it is what makes the
+    // `@` land at the top of the graph, which is the reading this test is about.
+    app.dispatch(Action::Bottom);
+    let frame = render_at(&mut app, TALL.0, TALL.1);
+
+    let graph: Vec<String> = sidebar_text(&frame)
+        .into_iter()
+        .skip_while(|row| !row.contains("question"))
+        // The pane is taller than the thread, so the rows after it are blank.
+        .take_while(|row| !row.is_empty())
+        .collect();
+    assert_eq!(
+        graph,
+        [
+            // Root at the top, growing downward: `undotree` is root-at-bottom and a conversation
+            // is not. `@` is the focused note and `*` every other one. The gutter is two columns
+            // because the thread forks once — a linear thread would be one — and `a follow up` is
+            // drawn after `second answer` because the sweep is chronological, which is also why
+            // it sits in the trunk's lane rather than under its own parent's row.
+            "@  the question",
+            "|\\",
+            "*| first answer",
+            "|* second answer",
+            "*  a follow up",
+        ],
+        "the graph is not the shape it should be:\n{frame}"
+    );
+    assert_frame!(frame);
+}
+
+#[test]
+fn the_gutter_carries_nothing_wider_than_one_column_under_a_cjk_locale() {
+    // The acceptance criterion, read off a painted frame rather than off the glyph table: every
+    // character the sidebar draws must be the same width in both locales, or the grid and the
+    // gutter come apart under `LANG=ja_JP.UTF-8`.
+    let (_tmp, mut app) = forked();
+    let frame = render_raw_at(&mut app, TALL.0, TALL.1);
+
+    for row in sidebar_text(&frame) {
+        for c in row.chars() {
+            let s = c.to_string();
+            assert_eq!(
+                UnicodeWidthStr::width_cjk(s.as_str()),
+                s.width(),
+                "`{c}` (U+{:04X}) is Ambiguous and would take two columns under a CJK locale",
+                c as u32
+            );
+        }
+    }
+}
+
+#[test]
+fn the_graph_follows_the_cursor_and_marks_where_you_are() {
+    let (_tmp, mut app) = forked();
+    // Newest first, so the surface opens on the leaf and `G` walks back to the root.
+    let at_leaf = sidebar_text(&render_at(&mut app, TALL.0, TALL.1));
+    assert!(
+        at_leaf.contains(&"@  a follow up".to_string()),
+        "the mark starts where the cursor is: {at_leaf:?}"
+    );
+    assert!(
+        at_leaf.contains(&"*  the question".to_string()),
+        "and the thread is still drawn from its root — `thread(focus)` alone would have hidden \
+         everything above the leaf: {at_leaf:?}"
+    );
+
+    app.dispatch(Action::Bottom);
+    let at_root = sidebar_text(&render_at(&mut app, TALL.0, TALL.1));
+    assert!(
+        at_root.contains(&"@  the question".to_string()),
+        "the mark must move with the cursor: {at_root:?}"
+    );
+    assert!(
+        at_root.contains(&"*  a follow up".to_string()),
+        "and nothing else may wear it: {at_root:?}"
+    );
+}
+
+#[test]
+fn a_workspace_with_no_replies_gets_a_note_and_a_lane_rather_than_an_empty_panel() {
+    // Thread-agnostic: a schema declaring no `relation:*` entry gives every note a thread of one.
+    // A single row that says "you are here" is a fact; a bordered box with nothing in it is an
+    // affordance that can never fire.
+    let (_tmp, mut app) = vault(&["a note on its own"]);
+    app.dispatch(Action::ToggleGraph);
+    let sidebar = sidebar_text(&render_at(&mut app, TALL.0, TALL.1));
+
+    assert!(
+        sidebar.contains(&"@ a note on its own".to_string()),
+        "one lane, one node, one title: {sidebar:?}"
+    );
+}
+
+#[test]
+fn a_thread_taller_than_the_pane_keeps_the_focus_and_says_what_it_hid() {
+    // Twelve replies in a line, against a graph pane six rows tall. Whichever note is focused, it
+    // is on screen — and the rows that are not are counted rather than silently missing.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(tmp.path()).unwrap();
+    let mut parent = ws
+        .create(Draft::new("b").title("note 00"))
+        .unwrap()
+        .meta()
+        .id;
+    for n in 1..12 {
+        parent = ws
+            .create(
+                Draft::new("b")
+                    .title(format!("note {n:02}"))
+                    .reply_to(parent),
+            )
+            .unwrap()
+            .meta()
+            .id;
+    }
+    ws.sync().unwrap();
+    let mut app = App::new(ws);
+    app.dispatch(Action::ToggleGraph);
+
+    // Newest first, so the top row is the deepest note and `G` walks back to the root.
+    for step in 0..12 {
+        let sidebar = sidebar_text(&render_at(&mut app, TALL.0, TALL.1));
+        let want = format!("@ note {:02}", 11 - step);
+        assert!(
+            sidebar.iter().any(|row| row.starts_with(&want)),
+            "at step {step} the focus `{want}` is not on screen: {sidebar:?}"
+        );
+        app.dispatch(Action::MoveDown);
+    }
+
+    // From the middle, both markers are up and both count the row they displaced.
+    app.dispatch(Action::Top);
+    for _ in 0..6 {
+        app.dispatch(Action::MoveDown);
+    }
+    let sidebar = sidebar_text(&render_at(&mut app, TALL.0, TALL.1));
+    assert!(
+        sidebar
+            .iter()
+            .any(|row| row.trim_start().starts_with('+') && row.ends_with("above")),
+        "a window that does not say it is a window: {sidebar:?}"
+    );
+    assert!(
+        sidebar
+            .iter()
+            .any(|row| row.trim_start().starts_with('+') && row.ends_with("below")),
+        "{sidebar:?}"
+    );
+}
+
+#[test]
+fn a_thread_wider_than_the_gutter_folds_its_lanes_and_keeps_every_title() {
+    // Eight replies to one note is eight simultaneous lanes, against a cap of six. What has to
+    // survive is the *list*: every reply still gets a row and a legible title, and only the art
+    // degrades — because the art is the part you can do without and the titles are not.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ws = Workspace::init(tmp.path()).unwrap();
+    let root = ws
+        .create(Draft::new("b").title("the root"))
+        .unwrap()
+        .meta()
+        .id;
+    for n in 0..8 {
+        ws.create(Draft::new("b").title(format!("reply {n}")).reply_to(root))
+            .unwrap();
+    }
+    ws.sync().unwrap();
+    let mut app = App::new(ws);
+    app.dispatch(Action::ToggleGraph);
+    app.dispatch(Action::Bottom);
+
+    // Nine notes and a connector is ten rows, against six of pane, so this also exercises the
+    // window: the root is focused and therefore pinned on screen.
+    let sidebar = sidebar_text(&render_at(&mut app, TALL.0, 34));
+    let graph: Vec<String> = sidebar
+        .into_iter()
+        .skip_while(|row| !row.contains("the root"))
+        .take_while(|row| !row.is_empty())
+        .collect();
+
+    for n in 0..8 {
+        let want = format!("reply {n}");
+        assert!(
+            graph.iter().any(|row| row.ends_with(&want)),
+            "`{want}` lost its row to the fold: {graph:?}"
+        );
+    }
+    assert!(
+        graph.iter().any(|row| row.contains('+')),
+        "the fold must say there are lanes it is not drawing: {graph:?}"
+    );
+    for row in &graph {
+        let gutter: String = row.chars().take_while(|c| *c != ' ').collect();
+        assert!(
+            gutter.chars().count() <= 6,
+            "`{row}` draws a gutter wider than the cap"
+        );
+    }
 }
