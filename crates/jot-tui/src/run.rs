@@ -22,7 +22,7 @@ use std::panic;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use chrono::Utc;
+use chrono::{Local, Offset as _, Utc};
 use jot_core::watch::Watcher;
 use jot_core::workspace::Workspace;
 use ratatui::Terminal;
@@ -98,7 +98,14 @@ fn event_loop(
     // The real terminal is the one place a highlighter may be shelled out to, so this is where
     // `Bat` gets installed. `App::new` alone stays subprocess-free, which is what keeps the
     // interaction tests from depending on what happens to be on `$PATH`.
-    let mut app = App::new(ws).with_highlighter(Box::new(Bat));
+    // The zone is resolved here, once, and handed to `App` — the same seam `now` crosses. A
+    // calendar is local by definition and a note id is UTC, so without this the sidebar buckets
+    // days in UTC: a note captured near midnight dots the neighbouring square, and "today" is
+    // marked a day out for part of every day. `App` does not read the environment for the same
+    // reason it does not read the clock.
+    let mut app = App::new(ws)
+        .with_zone(Local::now().offset().fix())
+        .with_highlighter(Box::new(Bat));
 
     // First paint, before the sync. See the module docs.
     terminal.draw(|frame| ui::draw(frame, &app, Utc::now()))?;
@@ -120,7 +127,14 @@ fn event_loop(
         // on the first frame after the burst, and labels itself from what it is showing meanwhile.
         if !event::poll(Duration::ZERO)? {
             let size = terminal.size()?;
-            app.prepare_preview(ui::reader_text_width(size.width, size.height));
+            // `_for`, not the default-pane version: the sidebar is 22 columns of the reader's
+            // budget, so hiding it makes the panel wider than the width this prepared text for
+            // and the reader would wrap early against its own border.
+            app.prepare_preview(ui::reader_text_width_for(
+                app.panes(),
+                size.width,
+                size.height,
+            ));
         }
 
         terminal.draw(|frame| ui::draw(frame, &app, Utc::now()))?;

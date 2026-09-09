@@ -2,15 +2,15 @@
 source: crates/jot-tui/tests/render.rs
 expression: render(&mut app)
 ---
-┌ timeline — every note ───────────────────────────────────────────────┐
-│   id-----------  a title long enough that it cannot possibly…  [age] │
-│                                                                      │
-│                                                                      │
-│                                                                      │
-│                                                                      │
-│                                                                      │
-│                                                                      │
-│                                                                      │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
- 1/1  Space  n  r  q  e  x  ·  Tab  f  /  ·  ?  q
+┌ Sep 2026 ──────────┐┌ timeline — every note ─────────────────────────┐
+│Mo Tu We Th Fr Sa Su││   id-----------  a title long enough th…  [age]│
+│    1  2  3  4  5  6││                                                │
+│                    ││                                                │
+│ 7  8  9 10 11 12 13││                                                │
+│                    ││                                                │
+│14 15 16 17 18 19 20││                                                │
+│                    ││                                                │
+│21 22 23 24 25 26 27││                                                │
+│                    ││                                                │
+└────────────────────┘└────────────────────────────────────────────────┘
+ 1/1  Space  n  r  q  e  x  ·  Tab  f  [  ]  /  ·  ?  q

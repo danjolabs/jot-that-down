@@ -7,7 +7,7 @@
 //! The clock is pinned rather than `Utc::now()` on purpose: the age column would otherwise make
 //! every snapshot fail a second after it was taken.
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use jot_core::query::Draft;
 use jot_core::workspace::Workspace;
 use jot_tui::app::App;
@@ -15,6 +15,7 @@ use jot_tui::key::Action;
 use jot_tui::ui;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::style::Modifier;
 use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 
@@ -49,8 +50,23 @@ fn render(app: &mut App) -> String {
     render_at(app, SIZE.0, SIZE.1)
 }
 
-/// A width wide enough that [`ui::split_main`] puts a reader panel beside the list.
-const WIDE: (u16, u16) = (110, 12);
+/// A width wide enough for all three panes.
+///
+/// 22 columns of sidebar, 40 of list — `LIST_MIN` — and the reader in what is left. It was 110
+/// while the frame carried two panes; the sidebar moved the threshold, and 110 is now a frame
+/// that drops the reader by the rule the layout has always had rather than by anything new.
+const WIDE: (u16, u16) = (112, 12);
+
+/// A frame wide enough that the list keeps its full meta column beside the other two panes.
+///
+/// At [`WIDE`] the list is squeezed to `LIST_MIN` and the meta cell degrades to the age alone —
+/// which is the list's own rule working exactly as written, and therefore the wrong frame to look
+/// for the counts in.
+const ROOMY: (u16, u16) = (130, 12);
+
+/// A frame that carries the sidebar and the list and no reader — the default terminal, and the
+/// middle band of the drop order.
+const EIGHTY: (u16, u16) = (80, 16);
 
 /// [`render`], at an explicit size.
 ///
@@ -69,12 +85,20 @@ fn render_at(app: &mut App, width: u16, height: u16) -> String {
 /// stable, and a masked frame is the wrong thing to measure — the mask is not the width the
 /// terminal actually painted.
 fn render_raw_at(app: &mut App, width: u16, height: u16) -> String {
-    app.prepare_preview(ui::reader_text_width(width, height));
+    render_raw_with_clock(app, width, height, clock())
+}
+
+/// [`render_raw_at`], at a clock of the caller's choosing.
+///
+/// The calendar is the only thing on screen that cares *which day* it is rather than how long ago
+/// something was, so it is the only thing that needs a clock other than [`clock`]: a note created
+/// while the suite runs lands on the real current date, and the grid has to be looking at that
+/// month for the dot to be on screen at all.
+fn render_raw_with_clock(app: &mut App, width: u16, height: u16, now: DateTime<Utc>) -> String {
+    app.prepare_preview(ui::reader_text_width_for(app.panes(), width, height));
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
-    terminal
-        .draw(|frame| ui::draw(frame, app, clock()))
-        .unwrap();
+    terminal.draw(|frame| ui::draw(frame, app, now)).unwrap();
 
     let buffer = terminal.backend().buffer();
     (0..buffer.area.height)
@@ -140,6 +164,7 @@ fn normalise(frame: String, app: &App) -> String {
                 }
             }
             out = mask_ages(&out);
+            out = mask_dots(&out);
             // Give back what the mask took, so the border stays where it was painted.
             let fill = before.saturating_sub(out.width());
             match out.pop() {
@@ -171,11 +196,45 @@ fn normalise(frame: String, app: &App) -> String {
 /// output — `now`, `ahead`, or a count and a unit — matched on whole space-separated tokens, so a
 /// title that happens to contain one of those words is left alone.
 fn mask_ages(line: &str) -> String {
+    // Split on the panel borders as well as on spaces. A row that fills its pane exactly puts the
+    // age flush against the border, and where the list abuts the reader the token is `ahead\u{2502}\u{2502}#`
+    // — which no age grammar matches, so three snapshots kept a live `ahead` the moment the
+    // sidebar made the list narrower. A border is a separator here for the same reason a space is.
     line.split(' ')
-        .map(|token| if is_age(token) { AGE_MASK } else { token })
+        .map(|token| {
+            token
+                .split('\u{2502}')
+                .map(|part| {
+                    if is_age(part) {
+                        AGE_MASK.to_string()
+                    } else {
+                        part.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\u{2502}")
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// Blank out the calendar's dots, which are on a timer of their own.
+///
+/// A note created while the suite runs is created *today*, and the calendar draws the month the
+/// frame's clock is in — so a snapshot taken in September and holding a dot on the 9th starts
+/// failing on the 1st of October, and moves a column every day until then. Same bomb as the ages,
+/// with a longer fuse.
+///
+/// Blanking rather than substituting, because the dot's information is entirely its *position*
+/// and there is no fixed-width token that could stand in for a column number. What the dots do is
+/// checked where it can be checked deterministically: `the_calendar_dots_the_day_a_note_was_created`
+/// renders at a clock derived from the note itself, and `ui`'s own tests build a day set by hand.
+fn mask_dots(line: &str) -> String {
+    line.replace(DOT, " ")
+}
+
+/// The calendar's dot, as `ui` paints it.
+const DOT: &str = "\u{2219}";
 
 /// Whether a token is something `ui::relative` could have produced.
 fn is_age(token: &str) -> bool {
@@ -473,8 +532,9 @@ fn every_row_shows_the_id_that_jot_show_would_accept() {
     for row in app.rows() {
         let short = app.short_id(row.note.id);
         assert!(
-            short.len() >= 8,
-            "`{short}` is shorter than the CLI's floor, so the two surfaces would disagree"
+            short.len() >= 13,
+            "`{short}` is shorter than the whole millisecond timestamp, which is where both this \
+             surface and `jot ls` floor — anything less and the two disagree about a note"
         );
         assert!(
             frame.contains(short.as_str()),
@@ -548,7 +608,7 @@ fn the_marker_distinguishes_a_reply_from_a_note_on_its_own() {
 #[test]
 fn a_quote_fills_the_second_slot_without_moving_the_first() {
     let (_tmp, mut app) = threaded();
-    let frame = render_at(&mut app, WIDE.0, WIDE.1);
+    let frame = render_at(&mut app, ROOMY.0, ROOMY.1);
 
     // Every row's id starts in the same column whether it carries zero, one or two glyphs. That
     // is the whole reason both slots are reserved rather than packed.
@@ -572,6 +632,219 @@ fn a_quote_fills_the_second_slot_without_moving_the_first() {
         frame.contains('\u{275e}'),
         "and the quoted note must show something points at it:\n{frame}"
     );
+}
+
+#[test]
+fn eighty_columns_carries_the_sidebar_and_the_list_and_no_reader() {
+    // The terminal that matters, and the middle band of the drop order: 22 columns of calendar,
+    // 58 of list, and the reader dropped by its own rule rather than squeezed in beside them.
+    let (_tmp, mut app) = bodies(&[
+        ("older", "an earlier thought"),
+        ("the note in focus", "the body of the focused note"),
+    ]);
+    let frame = render_at(&mut app, EIGHTY.0, EIGHTY.1);
+
+    assert!(
+        !frame.contains("the body of the focused note"),
+        "80 columns cannot carry a calendar and two bordered panels:\n{frame}"
+    );
+    assert!(
+        frame.contains("Mo Tu We Th Fr Sa Su"),
+        "but it carries the calendar, with 18 columns to spare:\n{frame}"
+    );
+    assert_eq!(
+        ui::reader_text_width(EIGHTY.0, EIGHTY.1),
+        None,
+        "and the run loop must be told, or it renders a panel into nothing"
+    );
+    assert_frame!(frame);
+}
+
+#[test]
+fn a_hundred_and_twelve_columns_carries_all_three_panes() {
+    let (_tmp, mut app) = bodies(&[
+        ("older", "an earlier thought"),
+        ("the note in focus", "the body of the focused note"),
+    ]);
+    let frame = render_at(&mut app, WIDE.0, 16);
+
+    assert!(
+        frame.contains("Mo Tu We Th Fr Sa Su"),
+        "the sidebar is the left pane:\n{frame}"
+    );
+    assert!(
+        frame.contains("the body of the focused note"),
+        "and the reader still gets the right of the main pane:\n{frame}"
+    );
+    assert_frame!(frame);
+}
+
+#[test]
+fn the_panes_drop_in_the_settled_order_as_the_frame_narrows() {
+    // Reader first, then sidebar, then the list alone — read off the painted frame rather than
+    // off the geometry, because what is on screen is the thing being promised.
+    let (_tmp, mut app) = bodies(&[("a note", "a body to look for")]);
+
+    let calendar = |frame: &str| frame.contains("Mo Tu We Th Fr Sa Su");
+    let reader = |frame: &str| frame.contains("a body to look for");
+
+    let three = render_at(&mut app, 112, 16);
+    assert!(calendar(&three) && reader(&three));
+
+    let two = render_at(&mut app, 111, 16);
+    assert!(calendar(&two), "the sidebar stays:\n{two}");
+    assert!(!reader(&two), "the reader is what goes first:\n{two}");
+
+    let one = render_at(&mut app, 61, 16);
+    assert!(!calendar(&one), "and the sidebar goes next:\n{one}");
+    assert!(!reader(&one));
+    assert!(
+        one.contains("a note"),
+        "the list is never dropped — it is the surface:\n{one}"
+    );
+}
+
+#[test]
+fn hiding_the_reader_gives_the_whole_main_pane_to_the_list() {
+    let (_tmp, mut app) = bodies(&[("a note", "a body to look for")]);
+    let with = render_at(&mut app, WIDE.0, 16);
+    assert!(with.contains("a body to look for"));
+
+    app.dispatch(Action::ToggleReader);
+    let without = render_at(&mut app, WIDE.0, 16);
+    assert!(
+        !without.contains("a body to look for"),
+        "the toggle takes the panel away:\n{without}"
+    );
+    assert!(
+        without.contains("Mo Tu We Th Fr Sa Su"),
+        "and takes nothing else with it:\n{without}"
+    );
+
+    // Same key back. A toggle that cannot be undone is a setting.
+    app.dispatch(Action::ToggleReader);
+    assert_eq!(render_at(&mut app, WIDE.0, 16), with);
+}
+
+#[test]
+fn hiding_the_sidebar_is_the_only_way_a_toggle_adds_anything() {
+    // 100 columns is under the 112 three panes need and over the 90 two need, so the reader is
+    // reachable there only by spending the calendar's 22 columns on it. That is the toggle
+    // working in the one direction it may: by removal.
+    let (_tmp, mut app) = bodies(&[("a note", "a body to look for")]);
+    let with = render_at(&mut app, 100, 16);
+    assert!(with.contains("Mo Tu We Th Fr Sa Su"));
+    assert!(!with.contains("a body to look for"));
+
+    app.dispatch(Action::ToggleSidebar);
+    let without = render_at(&mut app, 100, 16);
+    assert!(
+        !without.contains("Mo Tu We Th Fr Sa Su"),
+        "the calendar goes:\n{without}"
+    );
+    assert!(
+        without.contains("a body to look for"),
+        "and the reader fits in what it was using:\n{without}"
+    );
+}
+
+#[test]
+fn a_toggle_cannot_force_a_pane_into_a_frame_too_narrow_for_it() {
+    // 60 columns carries a list and nothing else. Asking for the panes back at that width must
+    // get nothing: the automatic rule wins, and a two-column reader painted over the list would
+    // be the toggle overriding it in the direction it may not.
+    let (_tmp, mut app) = bodies(&[("a note", "a body to look for")]);
+    let alone = render_at(&mut app, 60, 16);
+
+    for _ in 0..2 {
+        app.dispatch(Action::ToggleReader);
+        app.dispatch(Action::ToggleSidebar);
+        assert_eq!(
+            render_at(&mut app, 60, 16),
+            alone,
+            "60 columns is a list, whatever the toggles say"
+        );
+    }
+}
+
+#[test]
+fn the_calendar_dots_the_day_a_note_was_created() {
+    let (_tmp, mut app) = vault(&["a note"]);
+
+    // Asked of the app rather than of the system clock, so the test bucket and the sidebar's
+    // bucket are the same one; then the frame is rendered at noon on that day, which is the only
+    // clock at which the grid is showing the month the note is in.
+    let day = *app
+        .days_with_notes()
+        .iter()
+        .next()
+        .expect("a vault with one note has one day with a note");
+    let noon = day.and_hms_opt(12, 0, 0).unwrap().and_utc();
+    let frame = render_raw_with_clock(&mut app, WIDE.0, 20, noon);
+
+    // The first calendar in the sidebar is the dot-under variant, so the row after the one
+    // carrying the day's number is that day's dot row.
+    let rows = sidebar_rows(&frame);
+    let cell = format!("{:>2}", day.day());
+    let (row, at) = rows
+        .iter()
+        .enumerate()
+        .find_map(|(i, r)| r.iter().collect::<String>().find(&cell).map(|at| (i, at)))
+        .unwrap_or_else(|| panic!("the {cell} is not on the calendar at all:\n{frame}"));
+
+    assert_eq!(
+        rows[row + 1].get(at + 1),
+        Some(&'\u{2219}'),
+        "the dot must sit under the day it belongs to:\n{frame}"
+    );
+    assert_eq!(
+        rows.iter().flatten().filter(|c| **c == '\u{2219}').count(),
+        1,
+        "one day with notes, one dot — a second would be a heat map:\n{frame}"
+    );
+}
+
+#[test]
+fn the_calendar_marks_today_without_spending_a_column_on_it() {
+    let (_tmp, mut app) = vault(&["a note"]);
+    app.prepare_preview(ui::reader_text_width_for(app.panes(), WIDE.0, 20));
+
+    let backend = TestBackend::new(WIDE.0, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| ui::draw(frame, &app, clock()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // `clock()` is the 4th of September and the app's zone is UTC, so today is the 4th — in both
+    // calendars, which is 4 reversed cells' worth of two columns each.
+    let marked: String = (0..20)
+        .flat_map(|y| (0..22).map(move |x| (x, y)))
+        .filter(|at| {
+            buffer[*at]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        })
+        .map(|at| buffer[at].symbol().to_string())
+        .collect();
+
+    assert_eq!(
+        marked.replace(' ', ""),
+        "44",
+        "today is reverse video in both calendars and nothing else is: {marked:?}"
+    );
+}
+
+/// The sidebar's inner columns, one `Vec<char>` per row of the frame.
+///
+/// Indexed by *column* rather than by byte, because the frame's borders are three bytes each and
+/// the whole point of these assertions is which column a glyph landed in.
+fn sidebar_rows(frame: &str) -> Vec<Vec<char>> {
+    frame
+        .lines()
+        .map(|line| line.chars().skip(1).take(20).collect())
+        .collect()
 }
 
 /// A vault holding one thread and one note that quotes its root, synced and loaded.

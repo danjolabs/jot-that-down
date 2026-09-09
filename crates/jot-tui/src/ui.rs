@@ -4,7 +4,9 @@
 //! rendered frame is a function of [`App`], so a diff in the snapshot is a real visual change and
 //! never a timing artefact.
 
-use chrono::{DateTime, Utc};
+use std::collections::BTreeSet;
+
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use jot_core::query::{Ref, Row, State};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -13,7 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, ViewKind, sort_name};
+use crate::app::{App, Panes, ViewKind, sort_name};
 use crate::key::{Keymap, Mode, PREFIX_LABEL, Scope};
 
 /// Paint the whole frame.
@@ -23,9 +25,16 @@ pub fn draw(frame: &mut Frame, app: &App, now: DateTime<Utc>) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(frame.area());
 
-    let (list, reader) = split_main(chunks[0]);
-    draw_list(frame, list, app, now);
-    if let Some(reader) = reader {
+    // The sidebar comes off the frame first, and what is left is the main pane `split_main` has
+    // always been handed. That nesting is the whole of the three-pane layout: the reader splits
+    // the *main pane* rather than the frame, so `READER_MIN_FRAME` keeps its meaning exactly and
+    // simply applies to a smaller area.
+    let areas = split_frame(chunks[0], app.panes());
+    if let Some(sidebar) = areas.sidebar {
+        draw_sidebar(frame, sidebar, app, now);
+    }
+    draw_list(frame, areas.list, app, now);
+    if let Some(reader) = areas.reader {
         draw_reader(frame, reader, app);
     }
     draw_status(frame, chunks[1], app);
@@ -52,6 +61,86 @@ const LIST_MIN: u16 = 40;
 /// extra width actually buys something.
 const LIST_MAX: u16 = 56;
 
+/// Columns the sidebar occupies, its two border columns included.
+///
+/// Seven day cells of three columns each, less the separator the last cell does not need — 20 —
+/// plus the borders. Fixed rather than a fraction of the frame because a calendar is a *grid*: at
+/// 21 columns it is not a narrower month, it is a week with a day sliced off the end, and every
+/// row below the header lands one column out from the row above it.
+const SIDEBAR_WIDTH: u16 = 22;
+
+/// Narrower than this and the frame carries no sidebar.
+///
+/// [`LIST_MIN`] one pane out: the 22 columns of calendar plus the 40 a list needs to still be a
+/// list. Below this the sidebar is the thing to drop, for the same reason the reader is dropped
+/// below [`READER_MIN_FRAME`] — the list is what the surface is *for*, and a month is context
+/// beside it.
+const SIDEBAR_MIN_FRAME: u16 = SIDEBAR_WIDTH + LIST_MIN;
+
+/// Where each pane landed, with `None` for one this frame could not carry.
+///
+/// The list is not optional: it is the surface. Whatever else goes, it gets what is left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneAreas {
+    /// The calendar column, when there is room for it.
+    pub sidebar: Option<Rect>,
+    /// The row list. Always painted.
+    pub list: Rect,
+    /// The reader, when the main pane is wide enough for two bordered panels.
+    pub reader: Option<Rect>,
+}
+
+/// Divide the frame into sidebar, list and reader, in that order of subtraction.
+///
+/// # The drop order, and why it is expressed as nesting
+///
+/// **Reader first, then sidebar, then the list alone.** That order is not written out as a chain
+/// of `if`s: it falls out of doing the arithmetic in one direction. The sidebar comes off the
+/// frame, and the remainder is handed to [`split_main`] — which already drops the reader when it
+/// is under `READER_MIN_FRAME`. So a frame narrow enough to squeeze the main pane loses the
+/// reader before anything else is even considered, and only a frame too narrow for
+/// `SIDEBAR_MIN_FRAME` loses the sidebar as well.
+///
+/// | frame | sidebar | list | reader |
+/// | --- | --- | --- | --- |
+/// | 112+ | 22 | 40–56 | the rest |
+/// | 62–111 | 22 | the rest | — |
+/// | under 62 | — | the whole frame | — |
+///
+/// (Hide the sidebar and the reader comes back at 90, because the main pane is the frame again.)
+///
+/// # A toggle may only ever remove a pane
+///
+/// `panes` says what the user *wants*, and this function is what decides. Wanting a pane the
+/// width cannot carry gets nothing: pressing the reader's key at 60 columns must not paint a
+/// two-column panel over the list. The automatic rule wins, and the toggles are an escape hatch in
+/// the one direction — 22 columns of calendar is a quarter of an 80-column terminal, and there has
+/// to be a way to spend it on the list instead.
+#[must_use]
+pub fn split_frame(area: Rect, panes: Panes) -> PaneAreas {
+    let (sidebar, main) = if panes.sidebar && area.width >= SIDEBAR_MIN_FRAME {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+            .split(area);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, area)
+    };
+
+    let (list, reader) = if panes.reader {
+        split_main(main)
+    } else {
+        (main, None)
+    };
+
+    PaneAreas {
+        sidebar,
+        list,
+        reader,
+    }
+}
+
 /// Split the main region into the list and, when there is room, the reader beside it.
 ///
 /// Public because the run loop needs the reader's width *before* the draw: rendering the panel
@@ -75,15 +164,34 @@ pub fn split_main(area: Rect) -> (Rect, Option<Rect>) {
 ///
 /// The run loop's half of the contract in [`split_main`]. `frame_height` costs the status line;
 /// the panel's own borders cost two columns and two rows.
+///
+/// **Answers for the default pane set** — both side panes wanted — because the run loop holds a
+/// terminal size and not an [`App`], so this is the question it is able to ask. That is the right
+/// answer in the state the surface starts in and stays in until a toggle is pressed; anything
+/// holding the app's own [`Panes`] should ask [`reader_text_width_for`] instead. Getting it wrong
+/// costs a rewrap, not a broken frame: text wrapped for a narrower panel wraps early inside a
+/// wider one.
 #[must_use]
 pub fn reader_text_width(frame_width: u16, frame_height: u16) -> Option<u16> {
+    reader_text_width_for(Panes::default(), frame_width, frame_height)
+}
+
+/// [`reader_text_width`], for a caller that knows which panes are wanted.
+///
+/// The sidebar is 22 columns of the reader's budget, so the two questions have different answers
+/// the moment it is hidden — and between 90 and 112 columns they differ about whether there is a
+/// reader at all.
+#[must_use]
+pub fn reader_text_width_for(panes: Panes, frame_width: u16, frame_height: u16) -> Option<u16> {
     let area = Rect {
         x: 0,
         y: 0,
         width: frame_width,
         height: frame_height.saturating_sub(1),
     };
-    split_main(area).1.map(|r| r.width.saturating_sub(2))
+    split_frame(area, panes)
+        .reader
+        .map(|r| r.width.saturating_sub(2))
 }
 
 /// The reader panel: the focused note, styled by whatever [`crate::preview`] could borrow.
@@ -111,6 +219,206 @@ fn draw_reader(frame: &mut Frame, area: Rect, app: &App) {
     // own indentation, which reads as ragged nonsense in any fenced block.
     let lines: Vec<Line> = app.preview().to_vec();
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+// =============================================================================================
+//                        TEMPORARY — TWO CALENDARS, ONE OF THEM IS GOING AWAY
+//
+// The sidebar below renders the *same month twice*, on purpose and only for as long as it takes
+// to look at it. `stage6.md` settled the height question by building both variants and comparing
+// them at one width, against one vault, in one terminal:
+//
+//   * `calendar_dot_under`   — the dot on its own row under the day. 6 weeks x 2 rows, plus the
+//                              weekday header and the month in the block's title: 14 rows.
+//   * `calendar_dot_in_cell` — one row per week, the day itself carrying the fact.  8 rows.
+//
+// On a 24-row terminal, minus the status line, the first one is 61% of the sidebar's height spent
+// on one month. That is the trade being looked at.
+//
+// **Delete one of them.** Whichever loses, its builder, its unit tests and this banner go with
+// it, and `draw_sidebar` renders the survivor alone. Two calendars stacked in a sidebar is not a
+// feature and is not a fallback — it is scaffolding, and scaffolding left up is how a year-old
+// oddity gets explained to someone as "that's just how it is". The stage item is not done until
+// one of these is gone.
+// =============================================================================================
+
+/// The dot.
+///
+/// `∙` is U+2219 BULLET OPERATOR, East Asian **Neutral** — one column in every locale, checked in
+/// `every_calendar_glyph_is_one_column_in_every_locale` rather than assumed. The obvious
+/// candidates are traps: `·` (U+00B7), `•` (U+2022) and every box-drawing character are
+/// *Ambiguous* and render two columns under a CJK locale, which in a three-column day cell shifts
+/// the rest of the week sideways and breaks the grid the whole sidebar width was chosen for.
+const DOT: &str = "\u{2219}";
+
+/// Week rows the grid always draws, whatever the month needs.
+///
+/// A month spans four to six of them, and drawing only as many as it needs would make the
+/// sidebar's contents change height from month to month — which moves everything below it and, in
+/// the scaffolding above, moves the second calendar. Six is the worst case, so six is the budget
+/// and short months end on blank rows.
+const CALENDAR_WEEKS: usize = 6;
+
+/// The weekday header, and the source of the sidebar's width.
+///
+/// Monday first: ISO 8601's week, and the one [`chrono`] counts from. Joined by a single space
+/// this is exactly 20 columns — 7 cells of 2, 6 separators of 1 — which is [`SIDEBAR_WIDTH`]
+/// less its borders.
+const WEEKDAYS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+
+/// The sidebar: a month, twice, until the comparison above has been made.
+///
+/// `now` is the frame's clock and `app.zone()` the offset it is read in — the same discipline as
+/// everywhere else here. This module never asks the operating system what time it is or where it
+/// is: a rendered frame is a function of the state handed to it, which is what makes a snapshot
+/// worth taking. See [`App::zone`](crate::app::App::zone) for who supplies the offset.
+fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
+    let today = now.with_timezone(&app.zone()).date_naive();
+    let days = app.days_with_notes();
+
+    // The month goes in the title rather than in a row of its own: it costs no height, it is what
+    // a bordered box's title is for, and it leaves the two grids to be compared against each
+    // other rather than against two different headers.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", today.format("%b %Y")));
+
+    let mut lines = calendar_dot_under(today, days);
+    lines.push(Line::raw(""));
+    lines.extend(calendar_dot_in_cell(today, days));
+
+    // No `Wrap`: every line here is built to the pane's exact inner width, and wrapping one would
+    // fold a week onto the next row and desynchronise the grid from the header above it.
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The weeks of `anchor`'s month, Monday first, padded to [`CALENDAR_WEEKS`] rows.
+///
+/// `None` is a cell before the first or after the last of the month — drawn blank rather than
+/// filled with the neighbouring month's numbers, which would put dots on days this grid is not
+/// claiming to be about.
+fn month_grid(anchor: NaiveDate) -> Vec<[Option<NaiveDate>; 7]> {
+    let mut grid = vec![[None; 7]; CALENDAR_WEEKS];
+    // Day 1 exists in every month of every year, so this cannot fail; `with_day` is fallible for
+    // the 29ths and 31sts, not for this.
+    let Some(first) = anchor.with_day(1) else {
+        return grid;
+    };
+
+    let mut cell = first.weekday().num_days_from_monday() as usize;
+    let mut date = first;
+    while date.month() == first.month() {
+        if cell / 7 >= CALENDAR_WEEKS {
+            break;
+        }
+        grid[cell / 7][cell % 7] = Some(date);
+        cell += 1;
+        // `succ_opt` rather than `+ Duration::days(1)`: the end of `NaiveDate`'s range is a real
+        // value a caller can hand us, and running off it should end the month rather than panic.
+        match date.succ_opt() {
+            Some(next) => date = next,
+            None => break,
+        }
+    }
+    grid
+}
+
+/// The weekday header row, shared by both variants so they are compared on the same grid.
+fn weekday_header() -> Line<'static> {
+    Line::from(Span::styled(WEEKDAYS.join(" "), dim()))
+}
+
+/// Variant 1 — the dot on its own row, directly under the day it belongs to.
+///
+/// Two rows per week: the numbers, then the dots. The dot sits under the units digit, which is
+/// where the eye is already looking on a right-aligned number, and an empty day is two spaces
+/// rather than a placeholder — a grid of "no" marks says nothing and reads as noise.
+///
+/// Costs 13 rows plus the block's borders. That is the whole of the comparison this is here for.
+fn calendar_dot_under(today: NaiveDate, days: &BTreeSet<NaiveDate>) -> Vec<Line<'static>> {
+    let mut lines = vec![weekday_header()];
+
+    for week in month_grid(today) {
+        let mut numbers = Vec::new();
+        let mut dots = Vec::new();
+        for (i, cell) in week.iter().enumerate() {
+            if i > 0 {
+                numbers.push(Span::raw(" "));
+                dots.push(Span::raw(" "));
+            }
+            match cell {
+                None => {
+                    numbers.push(Span::raw("  "));
+                    dots.push(Span::raw("  "));
+                }
+                Some(day) => {
+                    numbers.push(Span::styled(
+                        format!("{:>2}", day.day()),
+                        day_style(*day, today),
+                    ));
+                    dots.push(Span::styled(
+                        if days.contains(day) {
+                            format!(" {DOT}")
+                        } else {
+                            "  ".to_string()
+                        },
+                        dim(),
+                    ));
+                }
+            }
+        }
+        lines.push(Line::from(numbers));
+        lines.push(Line::from(dots));
+    }
+    lines
+}
+
+/// Variant 2 — one row per week, the day number itself carrying the fact.
+///
+/// `stage6.md` offers two spellings for this, "a trailing glyph or a styled day number", and the
+/// arithmetic picks: a trailing glyph needs a third column in every cell, and 7 x 3 is 21 against
+/// the 20 the sidebar has inside its borders. Dropping the last separator — which is where the 20
+/// comes from — takes Sunday's glyph slot with it, so exactly one day of the week could never
+/// carry a dot. A styled number costs no columns at all and is legible at a glance, which is the
+/// only thing the dot was for.
+///
+/// Costs 7 rows plus the block's borders, against variant 1's 13.
+fn calendar_dot_in_cell(today: NaiveDate, days: &BTreeSet<NaiveDate>) -> Vec<Line<'static>> {
+    let mut lines = vec![weekday_header()];
+
+    for week in month_grid(today) {
+        let mut spans = Vec::new();
+        for (i, cell) in week.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" "));
+            }
+            match cell {
+                None => spans.push(Span::raw("  ")),
+                Some(day) => {
+                    let mut style = day_style(*day, today);
+                    if days.contains(day) {
+                        style = style.fg(Color::Cyan).add_modifier(Modifier::BOLD);
+                    }
+                    spans.push(Span::styled(format!("{:>2}", day.day()), style));
+                }
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// How a day number is painted before anything is known about its notes.
+///
+/// Today is reversed rather than bracketed or arrowed: a two-column cell has no room for a
+/// decoration, and every glyph that would fit is one column of the grid that some locale renders
+/// as two. Reverse video costs nothing and cannot move a column.
+fn day_style(day: NaiveDate, today: NaiveDate) -> Style {
+    if day == today {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+    }
 }
 
 /// The row list, which serves all four `Row` views.
@@ -147,8 +455,10 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
     let inner = area.width.saturating_sub(2) as usize;
 
     // Both columns are measured against the rows actually on screen rather than fixed. An id is
-    // eight characters until a burst of notes shares a millisecond and forces nine; a meta cell is
-    // three characters for a lone note and thirteen for a branching week-old thread. Sizing to the
+    // thirteen characters — the whole millisecond timestamp, which is where the TUI has floored
+    // since stage 5 and where `jot ls` now floors too — until a burst of notes shares a
+    // millisecond and forces a fourteenth; a meta cell is three characters for a lone note and
+    // thirteen for a branching week-old thread. Sizing to the
     // widest present is what keeps the age beside the title instead of a fixed guess away from it
     // — which was the visible complaint: a right-aligned column in an 80-column frame puts the
     // time an inch of whitespace from the title it belongs to.
@@ -733,6 +1043,267 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    /// A frame `width` columns wide, tall enough that height never decides anything.
+    fn frame(width: u16) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 20,
+        }
+    }
+
+    /// A date that exists, spelled where the test can read it.
+    fn on(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("a real date")
+    }
+
+    #[test]
+    fn the_panes_drop_in_the_settled_order_as_the_frame_narrows() {
+        // Reader first, then sidebar, then the list alone. Checked one column either side of each
+        // boundary, because a drop order is only a decision at the boundary.
+        let all = split_frame(frame(112), Panes::default());
+        assert_eq!(all.sidebar.map(|r| r.width), Some(SIDEBAR_WIDTH));
+        assert_eq!(all.list.width, LIST_MIN);
+        assert_eq!(
+            all.reader.map(|r| r.width),
+            Some(112 - SIDEBAR_WIDTH - LIST_MIN)
+        );
+
+        let two = split_frame(frame(111), Panes::default());
+        assert!(
+            two.reader.is_none(),
+            "one column short of three panes, the reader is what goes"
+        );
+        assert_eq!(two.sidebar.map(|r| r.width), Some(SIDEBAR_WIDTH));
+        assert_eq!(two.list.width, 111 - SIDEBAR_WIDTH);
+
+        let two = split_frame(frame(62), Panes::default());
+        assert_eq!(two.sidebar.map(|r| r.width), Some(SIDEBAR_WIDTH));
+        assert_eq!(
+            two.list.width, LIST_MIN,
+            "62 is the sidebar plus a list's floor"
+        );
+
+        let one = split_frame(frame(61), Panes::default());
+        assert!(
+            one.sidebar.is_none() && one.reader.is_none(),
+            "and one column below that, the sidebar goes too"
+        );
+        assert_eq!(
+            one.list.width, 61,
+            "the list is never dropped: it is the surface"
+        );
+    }
+
+    #[test]
+    fn a_toggle_only_ever_removes_a_pane() {
+        // Wanting everything at 60 columns gets a list, not a two-column reader painted over it.
+        // The automatic rule wins; the toggles are an escape hatch in one direction only.
+        let narrow = split_frame(frame(60), Panes::default());
+        assert!(narrow.sidebar.is_none() && narrow.reader.is_none());
+        assert_eq!(narrow.list.width, 60);
+
+        let hidden = Panes {
+            sidebar: false,
+            ..Panes::default()
+        };
+        let no_sidebar = split_frame(frame(100), hidden);
+        assert!(no_sidebar.sidebar.is_none());
+        assert!(
+            no_sidebar.reader.is_some(),
+            "100 columns carries no reader beside a sidebar and does without one — which is the \
+             only way a toggle adds anything, and it adds it by taking something away"
+        );
+
+        let no_reader = split_frame(
+            frame(112),
+            Panes {
+                reader: false,
+                ..Panes::default()
+            },
+        );
+        assert!(no_reader.reader.is_none());
+        assert_eq!(
+            no_reader.list.width,
+            112 - SIDEBAR_WIDTH,
+            "with the reader away the list takes the whole main pane"
+        );
+    }
+
+    #[test]
+    fn the_width_the_run_loop_asks_for_is_the_width_the_panel_gets() {
+        // The run loop holds a terminal size and no `App`, so it asks the default-pane question.
+        // That has to agree with what is painted in the default state, or the highlighter wraps
+        // text for a panel of a different width.
+        let painted = split_frame(frame(112), Panes::default()).reader.unwrap();
+        assert_eq!(reader_text_width(112, 21), Some(painted.width - 2));
+        assert_eq!(reader_text_width(111, 21), None);
+
+        // And the app-aware answer differs the moment the sidebar is hidden, which is why the
+        // second entry point exists.
+        let hidden = Panes {
+            sidebar: false,
+            ..Panes::default()
+        };
+        assert_eq!(reader_text_width(100, 21), None);
+        assert!(reader_text_width_for(hidden, 100, 21).is_some());
+    }
+
+    #[test]
+    fn the_sidebar_is_exactly_as_wide_as_the_grid_it_carries() {
+        // The constant is derived from the calendar, not chosen for it. If the header ever grows
+        // a column — a week-number gutter, a wider weekday abbreviation — this is what says so.
+        assert_eq!(
+            WEEKDAYS.join(" ").width() + 2,
+            SIDEBAR_WIDTH as usize,
+            "seven cells of two columns, six separators, and two borders"
+        );
+    }
+
+    #[test]
+    fn the_month_grid_is_always_six_weeks_and_starts_on_the_right_weekday() {
+        let grid = month_grid(on(2026, 9, 4));
+        assert_eq!(
+            grid.len(),
+            CALENDAR_WEEKS,
+            "a grid whose height followed the month would move everything under it"
+        );
+        assert_eq!(grid[0][0], None, "September 2026 opens on a Tuesday");
+        assert_eq!(grid[0][1], Some(on(2026, 9, 1)));
+        assert_eq!(grid[4][2], Some(on(2026, 9, 30)));
+        assert!(
+            grid[5].iter().all(Option::is_none),
+            "a five-week month ends on a blank row rather than October's numbers"
+        );
+
+        // August 2026 opens on a Saturday and runs 31 days, which is the six-week worst case the
+        // height budget was chosen against.
+        let long = month_grid(on(2026, 8, 15));
+        assert_eq!(long[0][5], Some(on(2026, 8, 1)));
+        assert_eq!(long[5][0], Some(on(2026, 8, 31)));
+    }
+
+    #[test]
+    fn a_month_grid_at_the_end_of_time_does_not_panic() {
+        // `NaiveDate::MAX` is a value a caller can hand us — `days_with_notes` is bounded by it —
+        // and running off the end of the calendar must end the month rather than the process.
+        let grid = month_grid(NaiveDate::MAX);
+        assert!(grid.iter().flatten().any(Option::is_some));
+    }
+
+    #[test]
+    fn every_calendar_row_is_exactly_the_sidebars_inner_width() {
+        // A row one column wide of the pane wraps, and a wrapped week desynchronises every row
+        // below it from the header above it.
+        let today = on(2026, 9, 4);
+        let days = BTreeSet::from([on(2026, 9, 9), on(2026, 9, 30)]);
+        let inner = SIDEBAR_WIDTH as usize - 2;
+
+        for line in calendar_dot_under(today, &days)
+            .into_iter()
+            .chain(calendar_dot_in_cell(today, &days))
+        {
+            assert_eq!(line.width(), inner, "`{line}` is not {inner} columns");
+        }
+    }
+
+    #[test]
+    fn the_dot_sits_under_the_day_it_belongs_to() {
+        let today = on(2026, 9, 4);
+        let days = BTreeSet::from([on(2026, 9, 9)]);
+        let lines: Vec<String> = calendar_dot_under(today, &days)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+
+        // Header, then two rows per week. The 9th is the Wednesday of the second week, so it
+        // occupies columns 6 and 7 of the numbers row.
+        assert_eq!(&lines[3][6..8], " 9");
+        assert_eq!(
+            lines[4].chars().nth(7),
+            Some('\u{2219}'),
+            "the dot goes under the units digit, where the eye already is: `{}`",
+            lines[4]
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .flat_map(|l| l.chars())
+                .filter(|c| *c == '\u{2219}')
+                .count(),
+            1,
+            "one note, one day, one dot — a count would be a heat map"
+        );
+    }
+
+    #[test]
+    fn a_month_with_no_notes_gets_no_dots_and_no_placeholders() {
+        let today = on(2026, 9, 4);
+        let rendered: String = calendar_dot_under(today, &BTreeSet::new())
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            !rendered.contains(DOT),
+            "an empty month draws nothing, rather than a grid of `no` marks: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn both_calendars_mark_today_and_neither_spends_a_column_on_it() {
+        let today = on(2026, 9, 4);
+        let days = BTreeSet::new();
+
+        for lines in [
+            calendar_dot_under(today, &days),
+            calendar_dot_in_cell(today, &days),
+        ] {
+            let marked: Vec<String> = lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .filter(|span| span.style.add_modifier.contains(Modifier::REVERSED))
+                .map(|span| span.content.to_string())
+                .collect();
+            assert_eq!(
+                marked,
+                [" 4"],
+                "today is reverse video: a bracket or an arrow would cost a column the grid does \
+                 not have, and every glyph that fits is two columns in some locale"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_calendars_differ_in_height_by_the_rows_the_dot_costs() {
+        // The whole point of rendering both: 13 rows against 7, before the block's borders and the
+        // month in its title. On a 24-row terminal that difference is most of the sidebar.
+        let today = on(2026, 9, 4);
+        let days = BTreeSet::new();
+        assert_eq!(
+            calendar_dot_under(today, &days).len(),
+            1 + CALENDAR_WEEKS * 2
+        );
+        assert_eq!(calendar_dot_in_cell(today, &days).len(), 1 + CALENDAR_WEEKS);
+    }
+
+    #[test]
+    fn every_calendar_glyph_is_one_column_in_every_locale() {
+        // The same property the marker column has, and the same trap: `·`, `•` and every
+        // box-drawing character are East Asian Ambiguous and render two columns under a CJK
+        // locale, which in a three-column day cell shifts the rest of the week sideways.
+        assert_eq!(DOT.width(), 1);
+        assert_eq!(
+            UnicodeWidthStr::width_cjk(DOT),
+            1,
+            "`{DOT}` widens under a CJK locale and would break the grid"
+        );
+        for day in WEEKDAYS {
+            assert_eq!(day.width(), 2);
+            assert_eq!(UnicodeWidthStr::width_cjk(day), 2);
+        }
     }
 
     #[test]

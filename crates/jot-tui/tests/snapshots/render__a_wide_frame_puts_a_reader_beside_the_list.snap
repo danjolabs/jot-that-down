@@ -2,15 +2,15 @@
 source: crates/jot-tui/tests/render.rs
 expression: frame
 ---
-┌ timeline — every note ───────────────────┐┌ id---------------------------------- ──────────────────────────┐
-│   id-----------  the note in focus  ahead││# the note in focus                                             │
-│   id-----------  older              ahead││                                                                │
-│                                          ││the body of the focused note                                    │
-│                                          ││                                                                │
-│                                          ││                                                                │
-│                                          ││                                                                │
-│                                          ││                                                                │
-│                                          ││                                                                │
-│                                          ││                                                                │
-└──────────────────────────────────────────┘└────────────────────────────────────────────────────────────────┘
- 1/2  Space  n new  r reply  q quote  e edit  x trash  ·  Tab view  f flat  / search  ·  ? help  q quit
+┌ Sep 2026 ──────────┐┌ timeline — every note ───────────────┐┌ id---------------------------------- ──────────┐
+│Mo Tu We Th Fr Sa Su││   id-----------  the note in …  [age]││# the note in focus                             │
+│    1  2  3  4  5  6││   id-----------  older          [age]││                                                │
+│                    ││                                      ││the body of the focused note                    │
+│ 7  8  9 10 11 12 13││                                      ││                                                │
+│                    ││                                      ││                                                │
+│14 15 16 17 18 19 20││                                      ││                                                │
+│                    ││                                      ││                                                │
+│21 22 23 24 25 26 27││                                      ││                                                │
+│                    ││                                      ││                                                │
+└────────────────────┘└──────────────────────────────────────┘└────────────────────────────────────────────────┘
+ 1/2  Space  n  r  q  e  x  ·  Tab  f  [  ]  /  ·  ?  q

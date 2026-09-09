@@ -14,9 +14,9 @@
 //! it is the one that takes the keyboard — see [`ViewKind::next`]. Thread detail is the one view
 //! shaped differently, and it is the one that gets its own state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, Offset, Utc};
 use jot_core::note::NoteId;
 use jot_core::query::{Draft, Edit, FileSort, Row, SearchQuery, State, TimelineQuery};
 use jot_core::workspace::Workspace;
@@ -62,6 +62,35 @@ impl ViewKind {
     }
 }
 
+/// Which side panes the user has asked to see.
+///
+/// A *want*, not a fact. [`crate::ui::split_frame`] is what decides, and it may refuse: a pane
+/// whose minimum width is not there is dropped whatever this says. So a toggle can only ever take
+/// a pane away, never force one in at 60 columns — the automatic drop order wins, which is the
+/// rule stage 6 settled and the reason this is two booleans in `App` rather than a layout `App`
+/// computes for itself.
+///
+/// Lives here rather than in [`crate::ui`] because it is *state*: it survives a redraw, it is
+/// what a keypress changes, and rendering reads it the way rendering reads every other field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Panes {
+    /// The calendar column on the left.
+    pub sidebar: bool,
+    /// The reader beside the list.
+    pub reader: bool,
+}
+
+impl Default for Panes {
+    /// Both on. The width rule is what usually decides, and a surface that opens with its panes
+    /// hidden makes their keys undiscoverable — you cannot toggle off something you never saw.
+    fn default() -> Self {
+        Panes {
+            sidebar: true,
+            reader: true,
+        }
+    }
+}
+
 /// A transient message in the status line.
 ///
 /// Carries no expiry instant: a `Toast` is cleared by the next action rather than by a timer,
@@ -96,16 +125,19 @@ impl Toast {
 ///
 /// Thirteen characters of the hyphenated form — `01a06b65-d51d` — is exactly the UUIDv7's leading
 /// 48 bits, which is where the timestamp ends and randomness begins (see [`jot_core::shortid`]).
-/// Deliberately five wider than the CLI's floor of eight, and the reason is the column rather than
-/// the id: a `jot ls` row is printed once and scrolls away, while this one sits in a list under a
-/// moving cursor, where a width that changes with the vault's contents makes the titles beside it
-/// jump. Flooring at the timestamp boundary makes it a *fixed* column in every vault that does not
-/// capture twice in one millisecond.
+/// **The CLI floors at thirteen too**, since stage 6 widened `output::MIN_ID_WIDTH` for the same
+/// reason: eight hex characters are a value shared across roughly a minute of captures, so they
+/// identify nothing. The two surfaces therefore print the *same string* for the same note, which
+/// is what makes an id read off one paste into the other.
+///
+/// The reason this constant exists separately is the column rather than the id: a `jot ls` row is
+/// printed once and scrolls away, while this one sits in a list under a moving cursor, where a
+/// width that changes with the vault's contents makes the titles beside it jump. Flooring at the
+/// timestamp boundary makes it a *fixed* column in every vault that does not capture twice in one
+/// millisecond.
 ///
 /// It stays a genuine prefix and stays unique — [`Workspace::abbreviations`] grows it past the
-/// floor when it has to — so an id read off the browser still goes straight into `jot show`. And
-/// it is a *longer* prefix than the CLI prints, never a shorter one, so the two surfaces cannot
-/// disagree about a note.
+/// floor when it has to — so an id read off the browser still goes straight into `jot show`.
 const MIN_SHORT_ID: usize = 13;
 
 /// Something the run loop must do that [`App`] cannot.
@@ -140,6 +172,17 @@ pub struct App {
     flat: bool,
     /// Files: the sort order `s` cycles.
     sort: FileSort,
+    /// Which side panes are wanted. See [`Panes`].
+    panes: Panes,
+    /// The offset days are read in. See [`App::with_zone`].
+    zone: FixedOffset,
+    /// The calendar's dots: every day that has an active note on it, in [`App::zone`].
+    ///
+    /// Recomputed by [`App::reload`] rather than per frame, which is the only place the answer
+    /// can change. It is one entry per day of capture — 365 for a year of daily use — so the
+    /// whole vault is asked for at once and the sidebar takes the month it needs out of it; a
+    /// month-bounded query would have to be redone the moment the calendar can be paged.
+    days: BTreeSet<NaiveDate>,
     /// Search: what has been typed so far.
     query: String,
     mode: Mode,
@@ -196,6 +239,12 @@ impl App {
             // is a reply to — is the thing worth seeing. `f` still gets the roots-only view.
             flat: true,
             sort: FileSort::default(),
+            panes: Panes::default(),
+            // UTC until a caller says otherwise, and deliberately not the machine's zone: `App`
+            // reading its own offset would make a rendered frame depend on the environment the
+            // test binary happens to run in. See [`App::with_zone`].
+            zone: Utc.fix(),
+            days: BTreeSet::new(),
             query: String::new(),
             mode: Mode::Normal,
             keymap: Keymap::new(),
@@ -213,6 +262,34 @@ impl App {
         };
         app.reload();
         app
+    }
+
+    /// Read days in `zone` rather than in UTC.
+    ///
+    /// The calendar is local by definition and `created_at` is UTC by definition — it is decoded
+    /// from a UUIDv7 — so a note captured at 23:30 local falls on the *next* UTC day and would be
+    /// dotted on the wrong square. Somebody has to supply the offset, and it is not this: `App`
+    /// holds no clock, for the same reason [`crate::ui`] is handed `now` instead of calling
+    /// `Utc::now()`. A surface that reads its own zone answers differently in two processes on one
+    /// machine and makes every snapshot depend on the `TZ` of whoever runs the suite.
+    ///
+    /// So the offset arrives from the caller — `Local::now().offset().fix()` in a run loop — and
+    /// the default is UTC, which is wrong by at most a day and is at least the *same* wrong answer
+    /// everywhere.
+    ///
+    /// A [`FixedOffset`] rather than a named zone, and the cost is worth stating: notes from the
+    /// other side of a daylight-saving change are bucketed by today's offset, so one hour either
+    /// side of local midnight can land on the neighbouring day for half the year.
+    /// [`Workspace::days_with_notes`] is generic over [`chrono::TimeZone`] and would give the
+    /// per-instant answer for a caller holding a real zone; taking one here would mean `App`
+    /// resolving `Local` at every reload, which is the environment read this avoids.
+    #[must_use]
+    pub fn with_zone(mut self, zone: FixedOffset) -> Self {
+        self.zone = zone;
+        // The day set was computed in the old offset by `App::new`, and every date in it may have
+        // moved.
+        self.reload();
+        self
     }
 
     /// Use `highlighter` for the reader panel instead of the plain default.
@@ -276,6 +353,14 @@ impl App {
 
         // Rebuilt here rather than per row: see [`App::abbrev`].
         self.abbrev = self.ws.abbreviations(MIN_SHORT_ID);
+
+        // And the calendar's dots, on the same schedule and for the same reason: this is every
+        // point at which the set of notes can have changed, and a frame is drawn ten times a
+        // second. The whole vault, because the answer is one date per day of capture and the
+        // sidebar can then draw any month without another read.
+        self.days = self
+            .ws
+            .days_with_notes(NaiveDate::MIN..=NaiveDate::MAX, &self.zone);
     }
 
     /// Bring the reader panel up to date for the focused note at `width` text columns.
@@ -288,6 +373,16 @@ impl App {
     /// key comparison is all that runs, and the highlighter is only asked when the answer would
     /// actually differ.
     pub fn prepare_preview(&mut self, width: Option<u16>) {
+        // A hidden reader is not rendered into, so rendering for it is a highlighter — possibly a
+        // subprocess — spawned for a panel nobody asked for. The run loop cannot know this: it
+        // holds a terminal size and asks [`crate::ui::reader_text_width`], which answers for the
+        // default pane set.
+        if !self.panes.reader {
+            self.preview.clear();
+            self.preview_key = None;
+            return;
+        }
+
         let Some(width) = width.filter(|w| *w > 0) else {
             self.preview.clear();
             self.preview_key = None;
@@ -370,6 +465,14 @@ impl App {
                 self.reload();
                 self.toast = Some(Toast::info(format!("sort: {}", sort_name(self.sort))));
             }
+
+            // Layout, not content, and deliberately silent. `App` does not know the frame's
+            // width — the toggle is a *want* that `ui::split_frame` may refuse at 60 columns — so
+            // a toast saying "reader shown" would be the same class of lie as a message naming an
+            // unbound key. What the keys do is in `?` and on the footer, and the effect is the
+            // whole screen changing shape, which needs no announcement when it happens.
+            Action::ToggleSidebar => self.panes.sidebar = !self.panes.sidebar,
+            Action::ToggleReader => self.panes.reader = !self.panes.reader,
 
             Action::Search => {
                 self.view = ViewKind::Search;
@@ -594,7 +697,7 @@ impl App {
     }
 
     /// A note's id as the list and `jot ls` both print it: the shortest prefix unique in this
-    /// vault, floored at eight.
+    /// vault, floored at `MIN_SHORT_ID`.
     ///
     /// An id the table does not know falls back to the full UUID, for the same reason the CLI's
     /// does — there is nothing to be unique *against* for a note the vault does not hold, and a
@@ -628,6 +731,28 @@ impl App {
     #[must_use]
     pub fn view(&self) -> ViewKind {
         self.view
+    }
+
+    /// Which side panes the user wants. What is actually painted is
+    /// [`crate::ui::split_frame`]'s decision.
+    #[must_use]
+    pub fn panes(&self) -> Panes {
+        self.panes
+    }
+
+    /// The offset days are bucketed and rendered in. See [`App::with_zone`].
+    #[must_use]
+    pub fn zone(&self) -> FixedOffset {
+        self.zone
+    }
+
+    /// Every day that has an active note on it, in [`App::zone`] — the calendar's dots.
+    ///
+    /// Read from the set [`App::reload`] built, never recomputed here: this is called once per
+    /// frame per calendar, and the answer only changes when the notes do.
+    #[must_use]
+    pub fn days_with_notes(&self) -> &BTreeSet<NaiveDate> {
+        &self.days
     }
 
     /// Whether the timeline is showing every note rather than roots only.
@@ -862,6 +987,116 @@ mod tests {
     /// How many renders have been asked for.
     fn calls(counter: &Calls) -> usize {
         counter.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn the_pane_toggles_flip_a_want_and_touch_nothing_else() {
+        let (_tmp, mut app) = vault(&["a note"]);
+        assert_eq!(
+            app.panes(),
+            Panes::default(),
+            "both panes are on to begin with"
+        );
+
+        app.dispatch(Action::ToggleReader);
+        assert_eq!(
+            app.panes(),
+            Panes {
+                sidebar: true,
+                reader: false
+            }
+        );
+        app.dispatch(Action::ToggleSidebar);
+        assert_eq!(
+            app.panes(),
+            Panes {
+                sidebar: false,
+                reader: false
+            }
+        );
+
+        // Off and on again is where it started: a toggle is not a mode.
+        app.dispatch(Action::ToggleReader);
+        app.dispatch(Action::ToggleSidebar);
+        assert_eq!(app.panes(), Panes::default());
+        assert_eq!(app.selected(), 0, "layout does not move the cursor");
+        assert!(
+            app.toast().is_none(),
+            "and says nothing: `App` does not know whether the frame is wide enough to honour \
+             the want, so a toast announcing a pane would sometimes be announcing nothing"
+        );
+    }
+
+    #[test]
+    fn a_hidden_reader_is_not_rendered_into() {
+        // The run loop asks every frame, with a width computed for the default pane set — it
+        // cannot know the panel is away. Each render may be a `bat` per frame, so this is the
+        // difference between a hidden panel costing nothing and costing everything.
+        let (_tmp, mut app) = vault(&["one"]);
+        let counter = counting(&mut app);
+
+        app.prepare_preview(Some(40));
+        assert_eq!(calls(&counter), 1);
+
+        app.dispatch(Action::ToggleReader);
+        app.prepare_preview(Some(40));
+        assert_eq!(calls(&counter), 1, "a hidden panel is not rendered for");
+        assert!(app.preview().is_empty());
+        assert_eq!(app.preview_id(), None);
+
+        app.dispatch(Action::ToggleReader);
+        app.prepare_preview(Some(40));
+        assert_eq!(calls(&counter), 2, "and it comes back when the panel does");
+    }
+
+    #[test]
+    fn the_calendars_day_set_follows_the_vault_across_a_reload() {
+        let (_tmp, mut app) = vault(&["a note"]);
+
+        let days = app.days_with_notes().clone();
+        assert_eq!(days.len(), 1, "one note, captured on one day: {days:?}");
+        let day = *days.iter().next().unwrap();
+        assert!(
+            (day - Utc::now().date_naive()).num_days().abs() <= 1,
+            "a note captured now lands on today, give or take the offset the test runs in: {day}"
+        );
+
+        app.dispatch(Action::Trash);
+        assert!(
+            app.days_with_notes().is_empty(),
+            "a dot is an offer to filter the timeline, and the timeline does not show trashed \
+             notes — a dot backed only by them selects to an empty list"
+        );
+
+        app.dispatch(Action::Undo);
+        assert_eq!(
+            app.days_with_notes(),
+            &days,
+            "and it comes back with the note, because the set is recomputed on reload"
+        );
+    }
+
+    #[test]
+    fn the_day_a_note_lands_on_follows_the_zone_the_caller_supplied() {
+        // The whole reason the offset is a parameter. `created_at` is UTC — it is decoded from a
+        // UUIDv7 — and the calendar is local, so a capture at 23:30 local is tomorrow in UTC and
+        // would be dotted on the wrong square. Kiritimati is the furthest ahead there is, which
+        // makes the difference visible for most of the day rather than for half an hour of it.
+        let (_tmp, app) = vault(&["a note"]);
+        let created = app.focused().unwrap().note.created_at.unwrap();
+        let zone = FixedOffset::east_opt(14 * 3600).unwrap();
+
+        let app = app.with_zone(zone);
+        assert_eq!(
+            app.days_with_notes(),
+            &BTreeSet::from([created.with_timezone(&zone).date_naive()]),
+            "the dot lands on the local day, whatever the id says"
+        );
+        assert_eq!(
+            app.zone(),
+            zone,
+            "and the render reads the same offset back"
+        );
     }
 
     #[test]

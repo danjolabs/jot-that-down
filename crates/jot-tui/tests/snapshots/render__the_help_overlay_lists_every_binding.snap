@@ -2,29 +2,29 @@
 source: crates/jot-tui/tests/render.rs
 expression: "render_at(&mut app, 72, 26)"
 ---
-┌ timeline — every note ───────────────────────────────────────────────┐
-│   id---------┌ keys — any key to close ──────────────┐               │
-│              │  j         move down                  │               │
+┌ Sep 2026 ──────────┐┌ timeline — every note ─────────────────────────┐
+│Mo Tu We Th Fr┌ keys — any key to close ──────────────┐               │
+│    1  2  3  4│  j         move down                  │               │
 │              │  k         move up                    │               │
-│              │  g         first row                  │               │
+│ 7  8  9 10 11│  g         first row                  │               │
 │              │  G         last row                   │               │
-│              │  Enter     open the thread            │               │
+│14 15 16 17 18│  Enter     open the thread            │               │
 │              │  u         up to the parent           │               │
-│              │  Tab       timeline → files → trash   │               │
+│21 22 23 24 25│  Tab       timeline → files → trash   │               │
 │              │  Space n   new note                   │               │
-│              │  Space r   reply to the focused note  │               │
+│28 29 30      │  Space r   reply to the focused note  │               │
 │              │  Space q   quote the focused note     │               │
 │              │  Space e   edit in $EDITOR            │               │
 │              │  s         cycle sort                 │               │
 │              │  f         flat / roots only          │               │
-│              │  Space x   move to the trash          │               │
-│              │  Space U   undo the last trash        │               │
-│              │  /         search                     │               │
-│              │  ?         this help                  │               │
+│Mo Tu We Th Fr│  [         sidebar on / off           │               │
+│    1  2  3  4│  ]         reader on / off            │               │
+│ 7  8  9 10 11│  Space x   move to the trash          │               │
+│14 15 16 17 18│  Space U   undo the last trash        │               │
+│21 22 23 24 25│  /         search                     │               │
+│28 29 30      │  ?         this help                  │               │
 │              │  Esc       back, then quit            │               │
 │              │  q         quit                       │               │
 │              │                                       │               │
-│              │                                       │               │
-│              └───────────────────────────────────────┘               │
-└──────────────────────────────────────────────────────────────────────┘
- 1/1  Space  n  r  q  e  x  ·  Tab  f  /  ·  ?  q
+└──────────────└───────────────────────────────────────┘───────────────┘
+ 1/1  Space  n  r  q  e  x  ·  Tab  f  [  ]  /  ·  ?  q

@@ -61,6 +61,10 @@ pub enum Action {
     CycleSort,
     /// Toggle the timeline between roots-only and flat.
     ToggleFlat,
+    /// Show or hide the sidebar, which is the left pane.
+    ToggleSidebar,
+    /// Show or hide the reader, which is the right pane.
+    ToggleReader,
     /// Move the focused note to the trash.
     Trash,
     /// Undo the last trash, while the toast is up.
@@ -299,7 +303,7 @@ impl Keymap {
 ///
 /// A `static` rather than an inline `&[..]` because the rows are `const fn` calls, which are
 /// const-evaluable but block rvalue static promotion — the array needs a name to live in.
-static BINDINGS: [Binding; 19] = {
+static BINDINGS: [Binding; 21] = {
     use Action as A;
     // One row per *action*, not per key. Pairing "j / k" on one line reads more compactly, but it
     // leaves `MoveUp` and `Bottom` named by no row — and then `?` documents half of what the keymap
@@ -360,6 +364,31 @@ static BINDINGS: [Binding; 19] = {
             "flat",
             Scope::Timeline,
             A::ToggleFlat,
+        ),
+        // Two panes, two keys, chosen for *where they are* rather than what they hold. `[` is the
+        // left pane and `]` is the right one, which stays true when the sidebar stops being a
+        // calendar and becomes a calendar with a thread graph under it. Letters were the obvious
+        // alternative and both are taken in a way that would misread: `s` is the sort, and a bare
+        // `r` beside `Space r` would put two different `r`s on one footer separated only by a
+        // prefix marker — the exact shape of the drift that left the undo key unreachable for a
+        // whole stage.
+        //
+        // Neither writes to the vault, so neither sits behind the prefix. That rule is stated both
+        // ways in `every_write_is_behind_the_prefix_and_nothing_else_is`, and these are the first
+        // bindings added since it was written that had to be checked against it.
+        b(
+            "[",
+            "sidebar on / off",
+            "sidebar",
+            Scope::Always,
+            A::ToggleSidebar,
+        ),
+        b(
+            "]",
+            "reader on / off",
+            "reader",
+            Scope::Always,
+            A::ToggleReader,
         ),
         b(
             "Space x",
@@ -466,6 +495,8 @@ fn resolve_normal(key: KeyEvent, plain: bool) -> Resolved {
         KeyCode::Tab => A::NextView,
         KeyCode::Char('s') => A::CycleSort,
         KeyCode::Char('f') => A::ToggleFlat,
+        KeyCode::Char('[') => A::ToggleSidebar,
+        KeyCode::Char(']') => A::ToggleReader,
         KeyCode::Char('q') => A::Quit,
         KeyCode::Char('/') => A::Search,
         KeyCode::Char('?') => A::Help,
@@ -876,6 +907,28 @@ mod tests {
         // `?` and `q` are pinned rather than in the main run.
         let pinned: Vec<&str> = Keymap::footer_pinned().map(|b| b.keys).collect();
         assert_eq!(pinned, ["?", "q"]);
+    }
+
+    #[test]
+    fn the_pane_toggles_are_pressable_without_the_prefix_and_are_on_the_bar() {
+        // Neither changes the vault, so neither sits behind `Space` — the rule the module opens
+        // on, which `every_write_is_behind_the_prefix_and_nothing_else_is` states both ways.
+        assert_eq!(type_keys("["), Resolved::Act(Action::ToggleSidebar));
+        assert_eq!(type_keys("]"), Resolved::Act(Action::ToggleReader));
+
+        // On the bar because they are keys nobody would guess, which is what the bar is for. `?`
+        // gets them for free: it renders the same table.
+        let bar = footer(Scope::Timeline);
+        for keys in ["[", "]"] {
+            assert!(bar.contains(&keys), "`{keys}` must be on the bar: {bar:?}");
+            let binding = BINDINGS
+                .iter()
+                .find(|b| b.keys == keys)
+                .unwrap_or_else(|| panic!("`{keys}` is bound but undocumented"));
+            assert!(!binding.is_prefixed());
+            assert_eq!(binding.group, Group::View);
+            assert!(!binding.destructive && !binding.needs_row);
+        }
     }
 
     #[test]
