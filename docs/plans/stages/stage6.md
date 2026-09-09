@@ -65,10 +65,10 @@ is a starting point read off the source, not a verified diagnosis — confirm it
   the width of every human-readable listing, so the snapshot expectations in `crates/jot-cli` move
   with it. `shortid::MIN_WIDTH` stays 8: it is the registry's floor too, and workspace ids are a
   much smaller set.
-- **Open.** Two readings of the request, and they are not the same change. (a) *Widen the id* to
-  the full timestamp prefix, as above — one constant, no new column. (b) *Decode the timestamp*
-  into a rendered creation time column, which is a different thing and overlaps the relative age
-  the row already ends with. Written here as (a); confirm before implementing.
+- **Settled 2026-09-09, at the user's direction: reading (a).** Widen the id to the full timestamp
+  prefix — one constant, no new column. The alternative, decoding the timestamp into a rendered
+  creation-time column, is a different change and overlaps the relative age the row already ends
+  with.
 
 ### `jot --help` should group its commands rather than list fifteen of them flat
 
@@ -129,10 +129,11 @@ The three platforms differ, read off the pinned `directories` 6.0.0:
 | macOS | `~/Library/Application Support/danjolabs.jot/` | `mac.rs:90` joins the triple into one bundle-id component |
 | Windows | `%APPDATA%\danjolabs\jot\config\` | `win.rs:98` keeps organization and application as two components |
 
-**Open, and the only real question here: keep platform-native paths, or force the XDG shape
-everywhere?** `directories` is already a dependency and platform-native is the more correct answer
-off Linux; one predictable path is the more explicable one, and this is a tool with one user. Cheap
-either way — exactly one function resolves it.
+**Settled 2026-09-09, at the user's direction: keep the platform-native paths.** `directories`
+stays, and the three rows above are the answer on their respective platforms rather than something
+to be normalised away. On the machine this is dogfooded on that is `~/.config/jot/`, which is what
+was wanted; the other two are what those platforms expect, and overriding them would be this tool
+inventing a convention for platforms it is not being used on.
 
 **A test in that module is wrong on macOS, and this item is where it gets fixed.**
 `default_path_ends_in_workspaces_toml` (`registry.rs:641`) asserts that some component of the path
@@ -249,9 +250,66 @@ twice.
     confirms. The TUI needs a confirmation the keymap can represent — a modal state, not a second
     prefix — and it must not be dismissible by the same key that armed it.
 
+### "parent is hidden" says a key will help when it cannot
+
+- **Observed.** Pressing `u` on a row whose parent is not in the list toasts `parent is hidden — f
+  shows every note`. In the one state that message can actually appear, it is false: `f` will not
+  show the parent, because the parent does not exist.
+- **Why that is the only state.** The message is guarded by "timeline, roots-only", and roots-only
+  filters on `Row::is_root`, which is `!parent.is_some_and(Ref::exists)`
+  (`crates/jot-core/src/query.rs:378`); `Ref::exists` is true for both `Present` and `Trashed`
+  (`:96`). So a row listed in roots-only whose `reply_to` is `Some` must have a parent that is
+  **`Deleted`** — purged. A present parent would have made the row a non-root and kept it off the
+  list; a trashed one likewise. Flat mode lists more notes; it cannot list one that was purged.
+- **Expected.** The message says what is actually true — the parent was purged and is not coming
+  back — which is a thing stage 2 already has a vocabulary for: `Ref::Deleted`, "the id is all that
+  remains".
+- **Repro.** Purge a note that has a reply, then press `u` on the reply in the roots-only timeline.
+- **Where it lives.** `crates/jot-tui/src/app.rs`, `up_to_parent`.
+- **Found by** the implementer fixing the undo message, while looking for a way to test that
+  branch — it could not reach the state the sentence describes, because there isn't one. Same family
+  as the bug above: a message asserting something the surface does not check. The key in it is now
+  taken from the binding table, so what is left is the *sentence*, not the spelling.
+
+---
+
 ---
 
 ## TUI — improvements
+
+### Nothing on screen says how many views there are, or which one this is
+
+- **Observed.** The surface has three views and two of them have modes, and none of that is stated
+  anywhere except in the `?` overlay:
+  - **timeline** — every note (default), or thread heads only (toggled with `f`)
+  - **files** — sorted by title, created, or edited (cycled with `s`)
+  - **trash**
+
+  `Tab` cycles between them, so the way to find out how many there are is to press it until
+  something looks familiar, and the way to find out which mode a view is in is to remember what you
+  last pressed. The footer offers the keys but never says what the current state *is*.
+- **Expected.** The set of views is visible, the current one is marked, and the current view's mode
+  is shown beside it — so "where am I, what else is there, and what is this list actually showing"
+  are all answerable without pressing anything.
+- **Why it is an improvement and not a bug.** The surface does exactly what stage 5 specified. The
+  specification assumed a reader who had just read the key table, which is true once and false every
+  day after.
+- **Where it lives.** `crates/jot-tui/src/ui.rs`, and whatever holds the current mode in
+  `crates/jot-tui/src/app.rs` (`view`, `flat`, `sort` are all there already — this reads them, it
+  does not add state).
+- **Constraints.**
+  - The mode belongs *with* the view it qualifies, not in a separate status field. `files` sorted by
+    title and `timeline` showing roots-only are the same kind of fact and should read the same way.
+  - It must not become a second way to change view. This is an indicator; `Tab`, `f` and `s` remain
+    the way things change. (Whether that stays true once the sidebar exists is the focus question
+    recorded under the layout item.)
+  - Whatever draws it is generated from the same enumeration the cycle uses, so a fourth view cannot
+    be added without appearing here — the rule the keymap already follows for `?`.
+- **Open.** Where it goes: a strip at the top of the main pane, or a segment of the existing status
+  line. The status line is already the busiest row on screen and drops labels to fit, which argues
+  for the strip.
+
+---
 
 ### The lists should be a table — id, title, created, edited — with the reader on a toggle
 
@@ -283,9 +341,11 @@ twice.
   - **Thread-agnostic still applies.** A workspace whose schema declares no `relation:*` entry has
     no replies and no parents; the table must not reserve a gutter for columns that are always
     empty there.
-- **Open.** Which columns, at which widths, and what drops first as the frame narrows. Absolute
-  timestamps or relative ages for `created` / `edited` — relative is what the row shows today, and
-  two relative ages side by side (`2d` / `2d`) may say less than one does.
+- **Settled 2026-09-09, at the user's direction: `created` absolute, `edited` relative.** Two
+  relative ages side by side (`2d` / `2d`) say less than one does; an absolute creation time is the
+  fact that does not change, and a relative edit time is the one you read as "how stale is this".
+- **Open.** Which columns beyond those four, at which widths, and what drops first as the frame
+  narrows.
 - **Superseded in part by the next item.** The three-pane layout puts this table in the middle
   pane and adds a second thing competing for width. The toggle is still right; the width budget
   below is where it gets decided.
@@ -376,8 +436,17 @@ columns of gutter, because the gutter is only as wide as there are live lanes.
   of the vertical axis no longer being a timeline.
 
 undotree chose chronological because for an undo history time *is* the subject. For a conversation
-it probably is not: you read a branch, not a minute. **Recommended: subtree order.** Decide before
-this is dispatched — it is the difference between two renderers, not a flag.
+it probably is not: you read a branch, not a minute — which was the recommendation here.
+
+**Settled 2026-09-09, at the user's direction: chronological.** Which is the same order the
+timeline already reads in, and the same order the sweep gets for free from UUIDv7. The idle-lane
+cost stands and is accepted.
+
+**And deferred, at the same direction.** The graph is not built in this round. When it is, it goes
+**below the calendar in the sidebar**, and it **renders only while toggled** rather than occupying
+that space permanently — which materially changes the height budget the calendar was measured
+against, and is the reason the sidebar's empty space is being left empty rather than filled.
+Everything above stays as written; nothing here is cancelled.
 
 ---
 
@@ -438,8 +507,14 @@ six week rows. Putting the dot on its own line under each row doubles them:
 - **dot in the cell**, as a trailing glyph or a styled day number — **8 rows**
 
 On a 24-row terminal, minus the status line, 14 rows is 61% of the sidebar's height spent on one
-month. Worth knowing before choosing; the two-row version is what was asked for and it is the one
-that leaves the sidebar with nothing else in it.
+month.
+
+**Settled 2026-09-09, at the user's direction: build both, stacked top-down, and look at them.**
+The sidebar renders the dot-under variant above the dot-in-cell variant so the two can be compared
+in the same terminal, at the same width, against the same vault. This is **evaluation scaffolding
+and is temporary** — say so in the code, because a second calendar left in by accident is the kind
+of thing that survives a year. One of the two is deleted once the comparison has been made, and the
+item is not done until it has been.
 
 **Constraints this inherits.**
 
@@ -480,12 +555,15 @@ whatever is being hit daily.
 
 - [ ] TUI: undo's key is spelled the same everywhere it is named, and offered where the offer stands.
 - [ ] TUI: restore and purge in the trash view, purge behind a confirmation.
+- [ ] TUI: `up_to_parent`'s "parent is hidden" message, which can only fire when the parent is purged.
 - [ ] CLI: `jot ls` ids at the TUI's floor.
 - [ ] CLI: grouped `--help`, generated from the derive rather than written twice.
 - [ ] A `config.toml` beside the registry, with one owner for OS paths and an environment override.
 - [ ] Core: `default_path`'s shape test, which asserts a path component macOS does not produce.
+- [ ] TUI: a view indicator — which view, what else there is, what mode this one is in.
 - [ ] TUI: table layout for the list views, and a key that hides the reader.
-- [ ] TUI: thread detail as a lane graph, root at top, beside the existing reader.
+- [ ] ~~TUI: thread detail as a lane graph~~ — **deferred within this stage**; sweep order settled
+      as chronological, placement settled as below the calendar and only while toggled.
 - [ ] Core: which days have notes, as a read the TUI can ask for.
 - [ ] TUI: the three-pane layout, with a drop order for the side panes and a calendar in the sidebar.
 - [ ] Docs: `stage5.md`'s thread-detail section, which now describes a view that is not being built.
@@ -526,15 +604,12 @@ whatever is being hit daily.
 
 ## Open questions
 
-- `jot ls` — widen the id, or decode the timestamp into its own column? (Reading (a) is written up.)
 - Undo, restore, and purge: three operations, and only undo has a key today. Which of them belong
   behind the `Space` prefix, and does restore-under-cursor make session-scoped undo redundant?
-- Absolute or relative times in the table's `created` / `edited` columns.
-- The `--help` groups, and which side of the capture/read line `edit` falls on.
-- Whether the config ships with a `jot config` command or as a file alone, and whether it may ever
-  be scoped per workspace.
-- Platform-native config paths, or the XDG shape on every platform.
-- Thread graph sweep order: chronological or subtree. Recommended subtree; this one blocks dispatch.
+- The `--help` groups, and which side of the capture/read line `edit` falls on. **Parked until the
+  layout work lands**, at the user's direction, along with the config's shape (`jot config` command
+  or file alone, and whether it may ever be scoped per workspace).
 - What the graph draws where a thread has a hole — deferred on purpose, and still owed.
 - Which key moves focus between the sidebar and the table, given `Tab` already cycles views.
-- Calendar height: dot under the day (14 rows) or dot in the cell (8).
+- Where the view indicator goes: a strip above the table, or a segment of the status line.
+- Calendar height — being answered by building both and looking at them.
