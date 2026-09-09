@@ -23,8 +23,39 @@ use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-/// The floor on an abbreviated id's width. Readability only — uniqueness may push it longer.
-pub const MIN_ID_WIDTH: usize = 8;
+/// The floor on an abbreviated note id: the whole millisecond timestamp, and no less.
+///
+/// Thirteen characters of the hyphenated form — `01a03d60-0000` — are exactly a UUIDv7's leading
+/// 48 bits, which is where the timestamp ends and randomness begins (see [`jot_core::shortid`],
+/// whose module docs open on this). The old floor of eight covered only the top 32 of those bits:
+/// one shared value per roughly 65 seconds, so a vault captured in one sitting printed the same
+/// string on every row and told you nothing you did not already know. Thirteen is the first width
+/// at which two notes captured a second apart look different, and at which a printed id carries
+/// its own capture time.
+///
+/// It is also the floor the TUI uses (`MIN_SHORT_ID`), so an id read out of `jot ls` is the same
+/// string the browser shows for that note. The two constants are deliberately equal and there is
+/// no mechanism holding them so: they are in different crates, and neither depends on the other.
+///
+/// A floor only. [`Snapshot::abbreviations`](jot_core::snapshot::Snapshot::abbreviations) pushes it
+/// up whenever thirteen characters are not unique — a burst of same-millisecond captures — and
+/// never pulls it down, so what is printed can always be handed back to a resolver.
+pub const MIN_ID_WIDTH: usize = 13;
+
+/// The floor on an abbreviated *workspace* id, which is a different number for a real reason.
+///
+/// A workspace id is **UUIDv4** where a note id is v7 — minted that way deliberately, and
+/// `Manifest::id` in `jot-core` records why: nothing decodes a workspace's creation time or sorts
+/// on it, and the id is written into a `workspace.toml` people commit. A v4 is random from its
+/// first bit, so the timestamp-prefix argument behind [`MIN_ID_WIDTH`] simply does not apply here:
+/// eight characters separate every workspace anyone will ever register, and thirteen would be five
+/// characters of noise in a column read next to a name and a path.
+///
+/// So this stays at the conventional floor, and says so by naming it rather than by repeating the
+/// number. Vaults created before the v4 switch carry a v7 id and a stale prefix table would widen
+/// for them — which is the abbreviation rule doing its job, not a reason to raise the floor for
+/// everyone.
+pub const MIN_WORKSPACE_ID_WIDTH: usize = jot_core::shortid::MIN_WIDTH;
 
 /// How ids are printed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -464,15 +495,19 @@ mod tests {
     use chrono::Duration;
 
     /// A colourless style whose abbreviation table knows the fixture note.
+    ///
+    /// The table is built the way the real one is — through `shortid::abbreviate` at
+    /// [`MIN_ID_WIDTH`] — rather than from a hand-written string, so a change to the floor cannot
+    /// leave these tests asserting against a width the CLI no longer prints.
     fn plain() -> Style {
         Style {
             color: false,
             width: IdWidth::Abbreviated,
-            abbreviations: Arc::new(
-                [(meta(None).id, "01a03d60".to_owned())]
-                    .into_iter()
-                    .collect(),
-            ),
+            abbreviations: jot_core::shortid::abbreviate([meta(None).id.into()], MIN_ID_WIDTH)
+                .into_iter()
+                .map(|(id, short)| (NoteId::from(id), short))
+                .collect::<BTreeMap<_, _>>()
+                .into(),
         }
     }
 
@@ -536,8 +571,36 @@ mod tests {
     }
 
     #[test]
+    fn the_id_floor_is_the_whole_millisecond_timestamp_and_stops_there() {
+        // 48 bits of timestamp are twelve hex characters, and the hyphenated form puts a hyphen
+        // after the first eight of them — so the timestamp ends at character 13 and the prefix
+        // ends on a hex digit rather than on a hyphen. A floor of 12 or 14 would be a mistake in
+        // opposite directions: one short of the whole timestamp, or one into the randomness.
+        assert_eq!(MIN_ID_WIDTH, 13);
+        let short = plain().show(meta(None).id);
+        assert_eq!(short, "01a03d60-0000");
+        assert!(
+            !short.ends_with('-'),
+            "`{short}` would read as a truncation"
+        );
+        assert!(meta(None).id.to_string().starts_with(&short));
+    }
+
+    #[test]
+    fn a_workspace_id_keeps_the_conventional_floor_because_it_is_a_v4() {
+        // The two floors differ on purpose: a v4 is random from its first bit, so there is no
+        // timestamp prefix to get past and eight characters separate a registry's worth of
+        // workspaces. If these ever become equal it should be a decision, not a drift.
+        assert_eq!(MIN_WORKSPACE_ID_WIDTH, 8);
+        // A `const` block, so raising the workspace floor to meet the note floor stops the build
+        // rather than a test run — both are compile-time constants and there is nothing to wait
+        // for.
+        const { assert!(MIN_WORKSPACE_ID_WIDTH < MIN_ID_WIDTH) };
+    }
+
+    #[test]
     fn json_always_carries_full_ids_even_when_the_human_output_is_short() {
-        assert_eq!(plain().show(meta(None).id).len(), 8);
+        assert_eq!(plain().show(meta(None).id).len(), MIN_ID_WIDTH);
 
         let value = meta_json(&meta(Some("t")));
         assert_eq!(

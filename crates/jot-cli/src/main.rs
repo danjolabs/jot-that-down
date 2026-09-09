@@ -37,7 +37,7 @@ use jot_core::query::{Draft, Edit, FileSort, Resolution, SearchQuery, State, Tim
 use jot_core::registry::Entry;
 use jot_core::shortid;
 use jot_core::workspace::Workspace;
-use output::{IdWidth, MIN_ID_WIDTH, Style};
+use output::{IdWidth, MIN_ID_WIDTH, MIN_WORKSPACE_ID_WIDTH, Style};
 use serde_json::json;
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -958,10 +958,12 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
             } else if entries.is_empty() {
                 eprintln!("jot: no registered workspaces — try `jot ws new <path>`");
             } else {
-                // Workspace ids are UUIDv7 like note ids, so they carry the same timestamp prefix
-                // and need the same treatment: two workspaces created in one minute would share
-                // eight characters. The set to be unique within is the registry.
-                let short = shortid::abbreviate(entries.iter().map(|e| e.id()), MIN_ID_WIDTH);
+                // Not `MIN_ID_WIDTH`: a workspace id is v4, so it is random from its first bit and
+                // has no timestamp prefix to get past — see `MIN_WORKSPACE_ID_WIDTH`. The set to
+                // be unique within is the registry, which is a handful of entries rather than a
+                // vault's worth of notes.
+                let short =
+                    shortid::abbreviate(entries.iter().map(|e| e.id()), MIN_WORKSPACE_ID_WIDTH);
                 for entry in entries {
                     let id_text = match style.width {
                         IdWidth::Long => entry.id().to_string(),

@@ -930,6 +930,64 @@ fn a_printed_short_id_can_always_be_handed_straight_back() {
     }
 }
 
+#[test]
+fn ls_prints_the_whole_millisecond_timestamp_in_the_id_column() {
+    // Eight characters of a UUIDv7 are all timestamp and nothing else: every note captured in the
+    // same minute printed the same string, which is the failure `shortid`'s module docs open on.
+    // Thirteen is where the timestamp ends and randomness begins, so this pins that the CLI's
+    // floor clears it — and clears it *on a hex digit*, since character 9 of the hyphenated form
+    // is a hyphen and a prefix ending there would read as a truncation bug.
+    let vault = Vault::new();
+    for i in 0..3 {
+        vault.new_note(&["-t", &format!("note {i}"), "-m", "x"]);
+    }
+
+    let full: Vec<String> = vault
+        .json(&["ls", "--flat"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_owned())
+        .collect();
+
+    let listing = vault.run_short(&["ls", "--flat"]);
+    let shorts: Vec<&str> = listing
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert_eq!(shorts.len(), 3, "{listing}");
+
+    for short in shorts {
+        assert!(
+            short.len() >= 13,
+            "`{short}` stops inside the timestamp:\n{listing}"
+        );
+        assert!(!short.ends_with('-'), "`{short}`");
+        assert!(
+            full.iter().any(|id| id.starts_with(short)),
+            "`{short}` is a prefix of none of {full:?}"
+        );
+    }
+}
+
+#[test]
+fn ws_ls_keeps_the_eight_character_floor_that_ls_no_longer_uses() {
+    // The two floors differ deliberately. A workspace id is a v4 — random from its first bit — so
+    // it has no timestamp prefix to get past, and widening it to match `jot ls` would spend five
+    // more columns to say nothing. Notes captured together can push past their floor; a lone
+    // workspace cannot, so this is an equality rather than a bound.
+    let vault = Vault::new();
+    let row = vault.run_short(&["ws", "ls"]);
+    let short = row_id(row.lines().next().unwrap());
+    assert_eq!(short.len(), 8, "{row}");
+
+    let id = vault.json(&["ws", "ls"])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(id.starts_with(short), "`{short}` is not a prefix of {id}");
+}
+
 // =============================================================================================
 // Workspace resolution
 // =============================================================================================

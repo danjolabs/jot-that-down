@@ -23,17 +23,26 @@ would treat a change to a database schema.
 ## Short ids are *not* in JSON, and why
 
 `jot` prints an abbreviated id in human output — for notes, and for workspaces in
-`jot workspace list`. It is
-not a fixed eight characters, and it is not in the JSON.
+`jot workspace list`. It is not a fixed width, and it is not in the JSON.
 
 Git's short ids work because a SHA is random from its first bit. **A UUIDv7's leading 48 bits are a
 millisecond timestamp**, so eight hex characters cover only the top 32 of them — one shared value
 per roughly 65 seconds. Notes captured in the same minute share their first eight characters almost
 always, which is exactly when you are most likely to be referring to one of them. `jot` therefore
 computes the shortest prefix that is unique *within the set it is shown beside* — the notes in a
-vault, or the workspaces in the registry — floored at 8, the way git actually does it. That width is
-a property of the set at a moment in time, so it is a display convenience only. Scripts use the full
-id, which every document below carries.
+vault, or the workspaces in the registry — the way git actually does it.
+
+**The floor differs by what is being abbreviated, because the two id schemes differ.**
+
+- **Notes are UUIDv7**, so the floor is **13**: the whole millisecond timestamp, the first width at
+  which two notes captured a second apart look different. It is the same floor the TUI uses, so an
+  id read out of `jot ls` is the string the browser shows for that note.
+- **Workspaces are UUIDv4** — minted that way deliberately, so nothing leaks a vault's creation date
+  into a `workspace.toml` people commit — and a v4 is random from its first bit. The
+  timestamp-prefix problem does not arise, so the floor stays at the conventional **8**.
+
+That width is a property of the set at a moment in time, so it is a display convenience only.
+Scripts use the full id, which every document below carries.
 
 ## `notemeta`
 
