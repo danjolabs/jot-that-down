@@ -53,9 +53,11 @@
 //! read *before* the rest of the manifest is deserialized, so a future manifest that also adds
 //! required keys still reports "written by a newer version" rather than an unhelpful parse error.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
+use chrono::{NaiveDate, TimeZone};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
@@ -1205,6 +1207,24 @@ impl Workspace {
     #[must_use]
     pub fn trashed(&self) -> Vec<Row> {
         self.snapshot.trashed()
+    }
+
+    /// The days in `days`, read in `zone`, that have at least one active note created on them.
+    ///
+    /// The calendar's dots, and the answer to a question a surface may not compute for itself: the
+    /// vault is core's to scan, and "which days have notes" is a read over it like any other. See
+    /// [`Snapshot::days_with_notes`] for why the zone is a parameter rather than something core
+    /// reads from the environment, and why a trashed note puts no dot on its day.
+    ///
+    /// Answered from the snapshot `sync()` already built, so it is not a `Result`: there is
+    /// nothing here left to fail.
+    #[must_use]
+    pub fn days_with_notes<Tz: TimeZone>(
+        &self,
+        days: RangeInclusive<NaiveDate>,
+        zone: &Tz,
+    ) -> BTreeSet<NaiveDate> {
+        self.snapshot.days_with_notes(days, zone)
     }
 
     /// Notes whose body links to this one.
@@ -3324,6 +3344,35 @@ mod lifecycle_tests {
         assert_eq!(links.len(), 1, "extraction never consults the index");
         assert!(matches!(links[0].1, Ref::Deleted(_)));
         assert_eq!(ws.backlinks(target.id).len(), 1, "the edge still exists");
+    }
+
+    // ------------------------------------------------------------------------------ calendar
+
+    /// The calendar's dots, read through the same object the surface holds. Delegation is the
+    /// small part; what this pins is that the read follows the vault — a dot appears when a note
+    /// is captured and goes away when it is trashed, without the caller asking for a rescan,
+    /// because the calendar is redrawn from a snapshot that the write already updated.
+    #[test]
+    fn the_days_with_notes_read_follows_a_note_through_trash_and_restore() {
+        let (_tmp, mut ws) = workspace();
+        let note = ws.create(Draft::new("a thought")).unwrap();
+        let zone = chrono::FixedOffset::east_opt(9 * 3600).expect("a real offset");
+        let day = note
+            .created_at()
+            .expect("a minted id is a v7")
+            .with_timezone(&zone)
+            .date_naive();
+
+        assert_eq!(ws.days_with_notes(day..=day, &zone), BTreeSet::from([day]));
+
+        ws.trash(note.id).unwrap();
+        assert!(
+            ws.days_with_notes(day..=day, &zone).is_empty(),
+            "a trashed note leaves no dot on a day the timeline would show as empty"
+        );
+
+        ws.restore(note.id).unwrap();
+        assert_eq!(ws.days_with_notes(day..=day, &zone), BTreeSet::from([day]));
     }
 
     // --------------------------------------------------------------------- sync and repair

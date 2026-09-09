@@ -54,8 +54,9 @@ use crate::link;
 use crate::note::{Note, NoteId, NoteMeta};
 use crate::query::{FileSort, Page, Ref, Resolution, Row, SearchQuery, State, TimelineQuery};
 use crate::thread::{Thread, TreeNode};
-use chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, HashSet};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 // =============================================================================================
@@ -861,6 +862,84 @@ impl Snapshot {
             .collect()
     }
 
+    // -------------------------------------------------------------------------------- calendar
+
+    /// The days in `days`, read in `zone`, that have at least one **active** note created on them.
+    ///
+    /// This is the calendar's dots. A `BTreeSet` rather than a count per day, because the only
+    /// question the sidebar asks is "does this square get a dot", and a count is a heat map — which
+    /// `stage6.md` rules out by name. It is a set rather than 31 booleans so that the answer does
+    /// not have to be re-derived for a different month grid, and it iterates in date order for
+    /// free.
+    ///
+    /// # Why the caller supplies the zone
+    ///
+    /// `created_at` is decoded from a UUIDv7 and is therefore UTC, while a calendar is local by
+    /// definition: a note captured at 23:30 local can fall on the *next* UTC day, and bucketing it
+    /// in UTC puts the dot on the wrong square. So a zone has to come from somewhere — and core
+    /// does not read it from the environment, for the same reason [`Snapshot`] holds no clock.
+    /// A read that consults ambient state answers differently in two processes on one machine, is
+    /// untestable without setting `TZ` for the whole test binary, and hides a second source of
+    /// time inside a function whose whole job is bucketing time. The TUI already draws the line
+    /// here — `App` does not read the clock, and `now` is passed into `ui::draw` — so the offset
+    /// arrives the same way `now` does.
+    ///
+    /// Generic over [`TimeZone`] rather than taking a [`FixedOffset`](chrono::FixedOffset) on
+    /// purpose. A caller holding `Local` can pass it straight through and gets the offset that was
+    /// in force *at each note's instant*; flattening to one offset first would bucket last winter's
+    /// notes with this summer's rule, which is wrong by an hour for half the year in most of the
+    /// world and wrong by a day for anything captured near midnight. `Utc` and `FixedOffset` still
+    /// satisfy the bound, so a caller that genuinely wants a fixed shift keeps it.
+    ///
+    /// # Why the conversion only ever goes UTC → local
+    ///
+    /// Converting a stored instant into a zone is total: every UTC instant has exactly one local
+    /// date. Going the other way is not — a local midnight can be skipped or repeated by a DST
+    /// transition — so this function never constructs one. That is also why the bound is a pair of
+    /// [`NaiveDate`]s rather than a pair of instants: a *day* range compares dates to dates and
+    /// needs no local midnight at all.
+    ///
+    /// # Why a trashed note puts no dot on its day
+    ///
+    /// Because the dot is an offer. Selecting a day filters the timeline to it, and the timeline
+    /// does not show trashed notes — so a dot backed only by trashed notes is a square you can
+    /// select to get an empty list, which is the same defect as a message naming a key that is not
+    /// bound. Trashing a day's last note removes its dot on the next redraw — the write already
+    /// updated the snapshot this reads — which is what "trashed" means everywhere else in this
+    /// surface, rather than a mark that outlives the notes behind it. The trash view is not
+    /// day-ordered and would not be helped by a calendar over it; if it ever is, this grows a
+    /// caller and then a parameter, rather than carrying a knob nobody passes.
+    ///
+    /// A note whose id is not a UUIDv7 has no creation time and so has no day — the same rule
+    /// `in_window` follows for the timeline's date filters, and for the same reason: an invented
+    /// day is worse than an absent one.
+    ///
+    /// # Cost
+    ///
+    /// One pass over the records, one date conversion per active note. There is no index table
+    /// behind this and no reason for one: a month is 31 squares, the whole-vault answer is one
+    /// entry per day of capture (3650 for a decade of daily use), and stage 4 measured
+    /// `timeline(50)` on a 10k-note vault at 1.8 ms. It is recomputed on reload, not per frame.
+    ///
+    /// A range whose start is after its end matches nothing, and yields an empty set rather than
+    /// an error: it is a bound, not a request. The whole-vault answer is
+    /// `NaiveDate::MIN..=NaiveDate::MAX`, which needs no separate entry point for the same reason
+    /// it needs no index: it is the same single pass with the filter always true.
+    #[must_use]
+    pub fn days_with_notes<Tz: TimeZone>(
+        &self,
+        days: RangeInclusive<NaiveDate>,
+        zone: &Tz,
+    ) -> BTreeSet<NaiveDate> {
+        self.records
+            .values()
+            .filter(|record| record.state == State::Active)
+            .filter_map(|record| record.meta.created_at)
+            .map(|created| created.with_timezone(zone).date_naive())
+            .filter(|day| days.contains(day))
+            .collect()
+    }
+
     // ----------------------------------------------------------------------------------- links
 
     /// The shortest prefix that identifies each note unambiguously, keyed by id.
@@ -973,6 +1052,7 @@ pub(crate) fn mtime(path: &Path) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
     use crate::workspace::Workspace;
+    use chrono::FixedOffset;
     use std::fmt::Write as _;
 
     const A: &str = "01a03d60-0000-7000-8000-00000000000a";
@@ -1667,6 +1747,206 @@ mod tests {
                 .search(&SearchQuery::new("distinctive"))
                 .is_empty()
         );
+    }
+
+    // -------------------------------------------------------------------------------- calendar
+
+    /// A note id whose UUIDv7 timestamp is exactly `at`.
+    ///
+    /// The constants above are hand-written ids with arbitrary timestamps, which is fine for
+    /// ordering and useless for a calendar: these tests are *about* the instant, so it has to be
+    /// stated. The first 48 bits of a v7 UUID are milliseconds since the epoch, which is the first
+    /// twelve hex digits of the hyphenated form; `7` is the version nibble and `8` the variant.
+    fn id_at(at: &str) -> NoteId {
+        let millis = DateTime::parse_from_rfc3339(at)
+            .expect("a test timestamp")
+            .timestamp_millis();
+        let hex = format!("{:012x}", u64::try_from(millis).expect("after the epoch"));
+        format!("{}-{}-7000-8000-000000000000", &hex[..8], &hex[8..])
+            .parse()
+            .expect("a well-formed v7 id")
+    }
+
+    fn day(date: &str) -> NaiveDate {
+        date.parse().expect("a test date")
+    }
+
+    /// A vault holding one bare note per id, with any id in `trashed` written into `.jot/.trash/`.
+    ///
+    /// Separate from [`vault`] because that one takes `&'static str` ids from the constants above,
+    /// and these ids are computed from a timestamp.
+    fn day_vault(ids: &[NoteId], trashed: &[NoteId]) -> (tempfile::TempDir, Workspace) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = Workspace::init(tmp.path()).unwrap();
+        for id in ids {
+            let dir = if trashed.contains(id) {
+                ws.trash_dir()
+            } else {
+                ws.root().to_path_buf()
+            };
+            std::fs::write(dir.join(format!("{id}.md")), "---\n---\n\n").unwrap();
+        }
+        (tmp, ws)
+    }
+
+    fn days(snap: &Snapshot, from: &str, to: &str, offset_hours: i32) -> Vec<NaiveDate> {
+        let zone = FixedOffset::east_opt(offset_hours * 3600).expect("a real offset");
+        snap.days_with_notes(day(from)..=day(to), &zone)
+            .into_iter()
+            .collect()
+    }
+
+    /// The whole point of taking a zone. `23:30Z` is the 8th in UTC and the 9th at +09:00, half an
+    /// hour after local midnight — bucket it in UTC and the dot lands on the wrong square.
+    #[test]
+    fn a_capture_just_after_local_midnight_lands_on_the_local_day_east_of_utc() {
+        let id = id_at("2026-09-08T23:30:00Z");
+        assert_eq!(
+            id.created_at().unwrap().date_naive(),
+            day("2026-09-08"),
+            "in UTC this is the 8th, which is the wrong answer for a +09:00 calendar"
+        );
+        let (_tmp, ws) = day_vault(&[id], &[]);
+        assert_eq!(
+            days(&scan(&ws), "2026-09-01", "2026-09-30", 9),
+            vec![day("2026-09-09")]
+        );
+    }
+
+    /// The other direction, because an off-by-one that is right for +09:00 can be wrong for
+    /// −05:00. `03:30Z` is the 9th in UTC and 22:30 on the 8th at −05:00.
+    #[test]
+    fn a_capture_just_before_local_midnight_lands_on_the_local_day_west_of_utc() {
+        let id = id_at("2026-09-09T03:30:00Z");
+        assert_eq!(
+            id.created_at().unwrap().date_naive(),
+            day("2026-09-09"),
+            "in UTC this is the 9th, which is the wrong answer for a -05:00 calendar"
+        );
+        let (_tmp, ws) = day_vault(&[id], &[]);
+        assert_eq!(
+            days(&scan(&ws), "2026-09-01", "2026-09-30", -5),
+            vec![day("2026-09-08")]
+        );
+    }
+
+    /// One vault, three zones, three answers — which is only possible if the zone is genuinely a
+    /// parameter rather than a constant somewhere in the pass.
+    #[test]
+    fn the_same_note_falls_on_a_different_day_in_a_different_zone() {
+        let (_tmp, ws) = day_vault(&[id_at("2026-09-08T23:30:00Z")], &[]);
+        let snap = scan(&ws);
+        assert_eq!(
+            days(&snap, "2026-09-01", "2026-09-30", 0),
+            [day("2026-09-08")]
+        );
+        assert_eq!(
+            days(&snap, "2026-09-01", "2026-09-30", 9),
+            [day("2026-09-09")]
+        );
+        assert_eq!(
+            days(&snap, "2026-09-01", "2026-09-30", -5),
+            [day("2026-09-08")]
+        );
+    }
+
+    /// The bound is on the *local* day, not on the UTC instant the local day happens to start at.
+    /// An implementation that turned the range into a UTC window and filtered records by it would
+    /// keep this note, because its UTC day is inside the window and its local day is not.
+    #[test]
+    fn the_range_bounds_the_local_day_not_the_utc_one() {
+        let (_tmp, ws) = day_vault(&[id_at("2026-09-08T23:30:00Z")], &[]);
+        let snap = scan(&ws);
+        assert!(
+            days(&snap, "2026-09-01", "2026-09-08", 9).is_empty(),
+            "at +09:00 this note was captured on the 9th, which the range excludes"
+        );
+        assert_eq!(
+            days(&snap, "2026-09-09", "2026-09-30", 9),
+            [day("2026-09-09")]
+        );
+    }
+
+    #[test]
+    fn the_range_includes_both_of_its_ends_and_nothing_outside_them() {
+        let ids = [
+            id_at("2026-09-07T12:00:00Z"),
+            id_at("2026-09-08T12:00:00Z"),
+            id_at("2026-09-09T12:00:00Z"),
+            id_at("2026-09-10T12:00:00Z"),
+        ];
+        let (_tmp, ws) = day_vault(&ids, &[]);
+        let snap = scan(&ws);
+        assert_eq!(
+            days(&snap, "2026-09-08", "2026-09-09", 0),
+            vec![day("2026-09-08"), day("2026-09-09")]
+        );
+        assert_eq!(
+            days(&snap, "2026-09-08", "2026-09-08", 0),
+            vec![day("2026-09-08")]
+        );
+    }
+
+    #[test]
+    fn a_range_whose_start_is_after_its_end_matches_nothing_rather_than_erroring() {
+        let (_tmp, ws) = day_vault(&[id_at("2026-09-08T12:00:00Z")], &[]);
+        assert!(days(&scan(&ws), "2026-09-30", "2026-09-01", 0).is_empty());
+    }
+
+    /// A day is a dot, never a count: the sidebar is not a heat map.
+    #[test]
+    fn several_notes_on_one_day_are_one_entry() {
+        let ids = [
+            id_at("2026-09-08T01:00:00Z"),
+            id_at("2026-09-08T12:00:00Z"),
+            id_at("2026-09-08T23:00:00Z"),
+        ];
+        let (_tmp, ws) = day_vault(&ids, &[]);
+        assert_eq!(
+            days(&scan(&ws), "2026-09-01", "2026-09-30", 0),
+            [day("2026-09-08")]
+        );
+    }
+
+    /// Selecting a day filters the timeline, and the timeline hides trashed notes — so a dot with
+    /// nothing live behind it is a square you can select to get an empty list.
+    #[test]
+    fn a_day_whose_only_note_is_trashed_gets_no_dot() {
+        let id = id_at("2026-09-08T12:00:00Z");
+        let (_tmp, ws) = day_vault(&[id], &[id]);
+        assert!(days(&scan(&ws), "2026-09-01", "2026-09-30", 0).is_empty());
+    }
+
+    #[test]
+    fn a_day_keeps_its_dot_while_one_active_note_remains() {
+        let trashed = id_at("2026-09-08T09:00:00Z");
+        let live = id_at("2026-09-08T10:00:00Z");
+        let (_tmp, ws) = day_vault(&[trashed, live], &[trashed]);
+        assert_eq!(
+            days(&scan(&ws), "2026-09-01", "2026-09-30", 0),
+            [day("2026-09-08")]
+        );
+    }
+
+    /// A v4 id encodes no instant, so the note has no day. It is not bucketed under the epoch and
+    /// it is not bucketed under today — the same rule the timeline's date filters follow.
+    #[test]
+    fn a_note_whose_id_encodes_no_time_has_no_day() {
+        let v4: NoteId = "1a3c8f52-6d1e-4a7b-9c2f-0d5e6a7b8c9d".parse().unwrap();
+        assert_eq!(v4.created_at(), None, "the fixture must be a v4 id");
+        let (_tmp, ws) = day_vault(&[v4], &[]);
+        let snap = scan(&ws);
+        assert_eq!(snap.len(), 1, "the note is in the vault, just undated");
+        assert!(
+            snap.days_with_notes(NaiveDate::MIN..=NaiveDate::MAX, &Utc)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_empty_vault_has_no_days() {
+        let (_tmp, ws) = day_vault(&[], &[]);
+        assert!(days(&scan(&ws), "2026-09-01", "2026-09-30", 0).is_empty());
     }
 
     // ----------------------------------------------------------------------------------- links
