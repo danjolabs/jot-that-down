@@ -438,6 +438,14 @@ impl App {
     }
 
     /// Move the focused note to the trash, and offer to undo it.
+    ///
+    /// **The undo key is asked of the keymap, never spelled here.** Both messages below used to
+    /// name a bare `U`, which is unbound in [`Mode::Normal`] — the binding is `Space U`, behind the
+    /// prefix with every other write — so the one instruction on screen for taking back a mistake
+    /// did nothing when followed, and did it silently. [`Keymap::keys_for`] makes the sentence and
+    /// the binding the same fact, the way `?` is generated from the table rather than typed twice.
+    /// When nothing is bound to the action the offer leaves the message rather than becoming a
+    /// guess: a shorter sentence costs the reader a lookup, a wrong one costs them the note.
     fn trash_focused(&mut self) {
         let Some(row) = self.focused() else {
             self.nothing_focused("trash");
@@ -445,7 +453,10 @@ impl App {
         };
         // Trashing what is already trashed is `restore`'s job, not this key's.
         if row.state == State::Trashed {
-            self.toast = Some(Toast::info("already in the trash — U restores it"));
+            self.toast = Some(Toast::info(match Keymap::keys_for(Action::Undo) {
+                Some(keys) => format!("already in the trash — {keys} restores it"),
+                None => "already in the trash".into(),
+            }));
             return;
         }
 
@@ -455,7 +466,10 @@ impl App {
             Ok(()) => {
                 self.undo = Some(id);
                 self.reload();
-                self.toast = Some(Toast::info(format!("trashed `{title}` — U to undo")));
+                self.toast = Some(Toast::info(match Keymap::keys_for(Action::Undo) {
+                    Some(keys) => format!("trashed `{title}` — {keys} to undo"),
+                    None => format!("trashed `{title}`"),
+                }));
             }
             Err(err) => self.toast = Some(Toast::error(format!("cannot trash: {err}"))),
         }
@@ -502,9 +516,13 @@ impl App {
             Some(at) => self.selected = at,
             // The parent exists but this list is not showing it — the timeline's roots-only mode
             // is the usual reason. Switching to flat is what makes it reachable, and saying so is
-            // more use than a silent no-op.
+            // more use than a silent no-op. The key comes from the table for the same reason the
+            // undo offer does: `f` is right today, and hand-spelled keys are right until they move.
             None if self.view == ViewKind::Timeline && !self.flat => {
-                self.toast = Some(Toast::info("parent is hidden — f shows every note"));
+                self.toast = Some(Toast::info(match Keymap::keys_for(Action::ToggleFlat) {
+                    Some(keys) => format!("parent is hidden — {keys} shows every note"),
+                    None => "parent is hidden".into(),
+                }));
             }
             None => self.toast = Some(Toast::info("parent is not in this list")),
         }
@@ -805,6 +823,7 @@ pub fn sort_name(sort: FileSort) -> &'static str {
 mod tests {
     use super::*;
     use crate::compose::testing::Canned;
+    use crate::key::{PREFIX_LABEL, Resolved, type_keys};
     use jot_core::query::Draft;
     use tempfile::TempDir;
 
@@ -1146,6 +1165,70 @@ mod tests {
             "and selects it, so undo lands where the mistake happened"
         );
         assert_eq!(app.undoable(), None, "the offer is spent");
+    }
+
+    /// Every key a message offers, pressed through the keymap the event loop dispatches on.
+    ///
+    /// `message` is a toast that names `action`'s key. The check is not that the two strings match
+    /// — they matched all through stage 5, when both said `U` and nothing in normal mode was bound
+    /// to it — but that the spelling *in the sentence the user reads* resolves to the action when
+    /// typed, prefix step and all. `type_keys` is the same parser `key.rs` presses its own table
+    /// with, so there is one notion of what a key spelling means.
+    ///
+    /// It also refuses the bare suffix. `Space U` contains `U`, so a message that named both would
+    /// pass a `contains` check while telling the reader to press the half that does nothing; the
+    /// spelling is cut out of the message and the remainder must not name the key again. That is
+    /// why these tests give their notes titles with no capital letters in them.
+    fn offers_a_working_key(message: &str, action: Action) {
+        let keys = Keymap::keys_for(action).expect("the action is bound and documented");
+        assert!(
+            message.contains(keys),
+            "`{message}` does not spell the key as `{keys}`"
+        );
+        assert_eq!(
+            type_keys(keys),
+            Resolved::Act(action),
+            "`{message}` offers `{keys}`, which does not do it"
+        );
+
+        let bare = keys.strip_prefix(PREFIX_LABEL).unwrap_or(keys);
+        assert!(
+            !message.replace(keys, "").contains(bare),
+            "`{message}` also names the bare `{bare}`, which is unbound"
+        );
+    }
+
+    #[test]
+    fn the_trash_toast_offers_the_key_that_actually_undoes_it() {
+        let (_tmp, mut app) = vault(&["a mistake"]);
+        app.dispatch(Action::Trash);
+
+        let message = app
+            .toast()
+            .expect("trashing says what it did")
+            .message
+            .clone();
+        offers_a_working_key(&message, Action::Undo);
+    }
+
+    #[test]
+    fn trashing_what_is_already_trashed_offers_the_same_key() {
+        let (_tmp, mut app) = vault(&["a mistake"]);
+        app.dispatch(Action::Trash);
+
+        // Tab round to the trash and press `x` on the row that is already there.
+        for _ in 0..2 {
+            app.dispatch(Action::NextView);
+        }
+        app.dispatch(Action::Trash);
+
+        let message = app
+            .toast()
+            .expect("a key that does nothing must say why")
+            .message
+            .clone();
+        assert!(message.contains("already in the trash"));
+        offers_a_working_key(&message, Action::Undo);
     }
 
     #[test]

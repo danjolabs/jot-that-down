@@ -244,6 +244,23 @@ impl Keymap {
         &BINDINGS
     }
 
+    /// How `action` is spelled, for anything on screen that has to name the key.
+    ///
+    /// The same table `?` renders, asked the other way round: given the thing, which keys do it.
+    /// Every sentence that offers a key goes through this instead of spelling one in a format
+    /// string, because a spelling in a format string has no way of noticing when the binding moves.
+    /// The trash toast said `U` for the whole of stage 5 while [`resolve_prefixed`] wanted
+    /// `Space U`, so the only instruction on screen for taking back a mistake did nothing at all
+    /// when followed — not even an error, since an unbound key is silent by design.
+    ///
+    /// `None` for the actions no row names: [`Action::Insert`] and the rest of the text-field
+    /// vocabulary, which nothing advertises because nothing needs told about them. A caller that
+    /// gets `None` should drop the offer from its message rather than invent a key for it.
+    #[must_use]
+    pub fn keys_for(action: Action) -> Option<&'static str> {
+        BINDINGS.iter().find(|b| b.action == action).map(|b| b.keys)
+    }
+
     /// The bindings the status-line footer should offer, grouped, for `scope`.
     ///
     /// Yields the [`Group::Write`] run first and the [`Group::View`] run after it, whatever order
@@ -505,6 +522,54 @@ fn resolve_input(key: KeyEvent, plain: bool) -> Resolved {
     }
 }
 
+/// Type a binding's spelling — `"j"`, `"Enter"`, `"Space U"` — at a fresh keymap.
+///
+/// Lives out here rather than in the test module below because [`crate::app`]'s tests need it too.
+/// A message that offers a key is only correct if *pressing what it says* produces the action, and
+/// the only honest way to check that is to run the message's own spelling back through the resolver
+/// the event loop dispatches on — prefix step included. Comparing the message against another
+/// string would have passed happily the entire time the undo toast advertised an unbound `U`.
+///
+/// Panics on a spelling it cannot type, which is the right answer for a test helper: a binding
+/// whose `keys` this cannot parse is one no test can press either.
+#[cfg(test)]
+pub(crate) fn type_keys(keys: &str) -> Resolved {
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    let mut km = Keymap::new();
+    let rest = match keys.strip_prefix(PREFIX_LABEL) {
+        Some(rest) => {
+            assert_eq!(
+                km.resolve(press(PREFIX), Mode::Normal),
+                Resolved::Armed,
+                "`{keys}` is written with the prefix but pressing it did not arm"
+            );
+            rest
+        }
+        None => keys,
+    };
+
+    let code = match rest {
+        "Enter" => KeyCode::Enter,
+        "Tab" => KeyCode::Tab,
+        "Esc" => KeyCode::Esc,
+        _ => {
+            let mut chars = rest.chars();
+            let c = chars
+                .next()
+                .unwrap_or_else(|| panic!("`{keys}` names no key at all"));
+            assert!(
+                chars.next().is_none(),
+                "`{keys}` is not a single key this helper knows how to type"
+            );
+            KeyCode::Char(c)
+        }
+    };
+    km.resolve(press(code), Mode::Normal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,32 +781,55 @@ mod tests {
     #[test]
     fn every_documented_binding_resolves_to_an_action() {
         for binding in Keymap::bindings() {
-            let mut km = Keymap::new();
-
-            // Every entry names a single key, except the prefixed ones.
-            let resolved = match binding.keys {
-                keys if keys.starts_with(PREFIX_LABEL) => {
-                    assert_eq!(km.resolve(press(' '), Mode::Normal), Resolved::Armed);
-                    let suffix = binding.footer_key().chars().next().expect("a suffix key");
-                    km.resolve(press(suffix), Mode::Normal)
-                }
-                "Enter" => km.resolve(press_code(KeyCode::Enter), Mode::Normal),
-                "Tab" => km.resolve(press_code(KeyCode::Tab), Mode::Normal),
-                "Esc" => km.resolve(press_code(KeyCode::Esc), Mode::Normal),
-                keys => {
-                    let first = keys.chars().next().expect("a binding names a key");
-                    km.resolve(press(first), Mode::Normal)
-                }
-            };
-
             assert_eq!(
-                resolved,
+                type_keys(binding.keys),
                 Resolved::Act(binding.action),
                 "`{}` is documented as {} but did not resolve to it",
                 binding.keys,
                 binding.description
             );
         }
+    }
+
+    /// The table answers "how is this spelled?" with something the keymap will actually accept.
+    ///
+    /// [`Keymap::keys_for`] is what every message naming a key is built from, so a wrong answer
+    /// here reappears as a toast telling the user to press a dead key. Pressing the answer is the
+    /// load-bearing half: a spelling that merely *looks* like the binding — `U` for `Space U` —
+    /// passes any string comparison and fails the only test that matters, which is a keyboard.
+    #[test]
+    fn keys_for_answers_with_a_spelling_the_keymap_resolves() {
+        for binding in Keymap::bindings() {
+            let keys = Keymap::keys_for(binding.action).unwrap_or_else(|| {
+                panic!(
+                    "`{}` is in the table but keys_for cannot find it",
+                    binding.keys
+                )
+            });
+            assert_eq!(
+                keys, binding.keys,
+                "one row per action, or keys_for answers for the wrong one"
+            );
+            assert_eq!(
+                type_keys(keys),
+                Resolved::Act(binding.action),
+                "keys_for({:?}) says `{keys}`, which does not do it",
+                binding.action
+            );
+        }
+
+        // Undo in particular, because it is the one a message offers by name, and because the
+        // bare suffix was what that message used to say.
+        assert_eq!(Keymap::keys_for(Action::Undo), Some("Space U"));
+        assert_eq!(
+            type_keys("U"),
+            Resolved::Unbound,
+            "the bare key stays unbound; the message must never spell it that way"
+        );
+
+        // Nothing invents a key for the text-field vocabulary.
+        assert_eq!(Keymap::keys_for(Action::Insert('x')), None);
+        assert_eq!(Keymap::keys_for(Action::Backspace), None);
     }
 
     /// Every key the footer would offer in `scope`, with something focused.
