@@ -4,5 +4,5 @@ Cargo.lock.bak
 *.pdb
 
 .direnv/
-# Agent worktrees created by the orchestration pipeline (orchestration.md).
+# Agent worktrees (Agent tool isolation: worktree).
 .claude/worktrees/

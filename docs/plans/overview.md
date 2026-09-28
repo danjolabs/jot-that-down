@@ -71,7 +71,7 @@ jot-that-down/
     jot-core/                 # domain, vault I/O, index, thread algebra
     jot-tui/                  # ratatui views (lib)
     jot-cli/                  # bin `jot`; depends on core + tui
-    jot-acceptance/           # executable acceptance criteria; owned by the verifier
+    jot-acceptance/           # executable acceptance criteria
   apps/                       # DEFERRED — nothing here yet; see docs/plans/todo/desktop.md
     desktop/
       src-tauri/              # Tauri v2 backend, thin wrapper over jot-core
@@ -152,8 +152,8 @@ Three deliberate departures from the sketch:
 A deferred plan keeps its content and loses its number. It has no `Depends on` because nothing
 depends on it — that is what made it safe to move.
 
-[`orchestration.md`](orchestration.md) covers how these stages get executed and verified — the agent
-roles, the model routing, the three gates, and the criteria no orchestrator can close.
+[`orchestration.md`](orchestration.md) covers how work gets done — a lead agent, implementer subagents,
+a Codex review of every turn, and your review before anything is committed.
 
 Stages 1–2 are one continuous piece of work — nothing is user-visible until stage 3. Resist the urge
 to skip ahead: every shortcut taken in 1–3 is paid for three times over in everything after.

@@ -8,7 +8,7 @@ desktop app is deferred to `docs/plans/todo/desktop.md` and is **not** stage 6.
 
 - `docs/plans/overview.md` — locked decisions, architecture, conventions
 - `docs/plans/stages/stage<N>.md` — the stage being worked on
-- `docs/plans/orchestration.md` — how stages get executed and verified
+- `docs/plans/orchestration.md` — the workflow: lead agent, implementer subagents, Codex review, user review
 - `docs/plans/todo/` — plans that left the numbered stages. Deferred, not cancelled, and not work
   in progress: read one only when it is being scheduled again.
 
@@ -49,7 +49,8 @@ cargo install --path crates/jot-cli --locked
 - Markdown files are the source of truth. The index is derived and disposable.
 - No cascading trash, no cascading delete, no foreign keys. Dangling references are a designed state.
 - Frontmatter keys we don't recognize are preserved verbatim on every write.
-- `crates/jot-acceptance/` is read-only to implementers. Appeal, don't edit.
+- `crates/jot-acceptance/` may be added to; changing or deleting an existing assertion is called out
+  in the report, never done quietly to get to green.
 - Use the LSP tools when they're available, in preference to grep, for anything the language server
   answers better: finding references before a rename, locating a definition, checking a type. A
   `FrontmatterSchema` is 81 references across 8 files and `findReferences` is the honest way to

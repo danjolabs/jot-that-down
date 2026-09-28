@@ -1,539 +1,78 @@
 # Orchestration
 
-How a stage gets executed and proved done rather than declared done.
-
-Read `overview.md` first — its locked decisions, conventions, and core API surface are the contract
-this document works against.
-
-## Two modes, and how to choose
-
-Stages 1–4 ran **dispatched**: a planner, implementers in waves, an integrator, a verifier. Stage 5
-ran **inline**: one agent planning and implementing in conversation with you, committing in small
-waves. Both are supported. Neither is the default — the choice is made per stage, out loud, and
-recorded in that stage's run log.
-
-| | Dispatched | Inline |
-| --- | --- | --- |
-| Who writes code | implementer subagents | the agent you are talking to |
-| Parallelism | up to three implementers | none |
-| Your involvement | at the gates | continuous |
-| Cost per unit of work | higher — each agent re-derives context from cold | lower |
-| Audit trail | breakdown, dispatch, verification, log | the commit history, and a log at seal |
-| Rule 1 (below) | held | **not held** |
-| Rule 2 (below) | held | held only if a verifier is used |
-
-**Choose dispatched** when the work splits cleanly into parallel pieces with disjoint file
-ownership, when getting it wrong is expensive and invisible, or when you want the independent
-verification that is the whole point of the structure. Stage 4's index was exactly this: three
-tasks, one foundation, and a bug that only an agent who had not written the implementation would
-have found.
-
-**Choose inline** when the work is one connected thing that resists being cut into disjoint pieces,
-when you want to steer it as it happens, or when the feedback loop matters more than the audit
-trail. Stage 5's TUI was this: keymap, state, and rendering are one design, and three of the
-decisions in it changed *because you saw the result and said so*. A dispatched wave would have
-taken those corrections a round trip each.
-
-The honest summary: **dispatched buys verification, inline buys iteration speed.** A stage whose
-failure would be silent wants the first. A stage whose value you can see on screen wants the second.
-
-**Hybrid is a real third option and was stage 4's actual shape** — orchestrator implementing inline,
-verifier subagent for phases A and B. It gives up rule 1 and keeps rule 2, which is the trade worth
-making when the implementation is small enough to hold in one head but the criteria are worth an
-adversary. Prefer it to full inline whenever the stage has acceptance criteria that can be written
-before the code.
-
-Whichever is chosen, **the three gates do not change.** They are what "done" means, and they are
-described once, below, for both modes.
-
-## The two rules
-
-Everything in dispatched mode follows from two rules. If a situation is ambiguous, resolve it by
-these.
-
-1. **The orchestrator never writes code.** It plans, dispatches, adjudicates, and seals. The moment
-   it patches something itself, that change has no independent verifier — the one thing this whole
-   structure exists to guarantee.
-2. **Whoever implements does not judge.** Acceptance tests are written by a different agent than the
-   one implementing, live in a path implementers cannot edit, and are the contract. An implementer who
-   believes an acceptance test is wrong files an appeal; it does not get to edit its way to green.
-
-Rule 2 is aimed at the dominant failure mode of agent-run projects: the implementer quietly weakens
-the test until the suite passes, and every downstream stage builds on a lie.
-
-### What inline mode gives up, stated plainly
-
-Rule 1 is gone by construction: the agent writing the code is the one deciding whether it is right.
-Rule 2 is gone too unless a verifier is dispatched separately. That is a real loss and should not be
-papered over — stage 4's schema-fingerprint bug was found by a verifier who had not written the
-implementation, and an inline stage would have shipped it.
-
-What partially replaces it, and what does not:
-
-- **You are in the loop continuously.** Three of stage 5's decisions were corrections you made after
-  seeing the result. That is a form of independent judgment the dispatched flow gets only at gates —
-  but it is judgment about *what was asked for*, not about whether the code is quietly wrong.
-- **Tests written before the implementation still work inline.** Writing the assertion first is a
-  discipline, not an agent boundary. It is weaker — the same head writes both — but it is not
-  nothing, and it is free.
-- **The mechanical gate is unchanged and is mode-independent.** Exit codes do not care who typed.
-- **Nothing replaces the mutation spot-check.** If a stage's correctness is not visible on screen,
-  inline mode has no answer for it, and that is the signal to dispatch a verifier even if
-  everything else stays inline.
-
-**The rule for choosing, in one line:** if you cannot tell by looking whether it works, do not run it
-inline without a verifier.
+How work gets done in this repo. Deliberately small: one lead agent, implementer subagents, a Codex
+review, and you. The heavier harness used for stages 1–6 (planner, integrator, verifier, scribe,
+wave plans, run artifacts) was dropped on 2026-09-28; `docs/runs/` keeps its history.
 
 ## Roles
 
-Five agent definitions in `.claude/agents/`. Fewer types, sharper boundaries.
-
-**These are dispatched-mode roles.** Inline mode collapses planner, implementer, integrator and
-scribe into the one agent in the conversation; only the verifier is worth dispatching separately,
-and the hybrid shape above is exactly that. The role descriptions still matter inline — they name
-the *jobs* that have to happen, and an inline agent that skips the integrator's job has skipped
-running the gate, not saved a step.
-
-### `stage-planner` — opus
-
-```yaml
----
-name: stage-planner
-description: Decompose one stage doc into a dispatchable wave plan with file ownership and model routing.
-model: opus
-tools: Read, Grep, Glob, Bash, Write
----
-```
-
-Reads `docs/plans/stages/stage<N>.md`, `overview.md`, and the current repo state. Emits
-`docs/runs/stage<N>/breakdown.md`: a task DAG, an explicit **file ownership set** per task,
-which tasks are parallel-safe, and a recommended model per task with a one-line reason. Writes no
-production code.
-
-Its most valuable output is negative: which tasks *cannot* run in parallel, and why.
-
-### `implementer` — opus by default, sonnet when routed
-
-```yaml
----
-name: implementer
-description: Implement one task inside a declared file ownership set. Writes unit tests. Never touches acceptance tests.
-model: opus
-tools: Read, Grep, Glob, Edit, Write, Bash, LSP
----
-```
-
-Receives: the stage doc, the locked decisions from `overview.md`, its single task, and its file
-ownership set. Not the design conversation, not other tasks, not the whole plan. Returns a diff
-summary and the tests it added.
-
-Hard constraints in its prompt: may not edit outside its ownership set; may not edit
-`crates/jot-acceptance/`; may not add a dependency without owning `Cargo.toml` this wave.
-
-`LSP` is there for the same reason the ownership set is: a rename whose references were found by
-grep is a rename that missed one. `AGENTS.md` carries the caveat — rust-analyzer's diagnostics go
-stale mid-refactor, so the mechanical gate below is what decides, never the language server.
-
-### `verifier` — opus, always
-
-```yaml
----
-name: verifier
-description: Turn a stage's acceptance criteria into executable tests, then try to falsify the implementation.
-model: opus
-tools: Read, Grep, Glob, Edit, Write, Bash, LSP
----
-```
-
-Owns `crates/jot-acceptance/` exclusively. Two phases per stage, described below. Never fixes
-production code — it reports, and a fixer wave does the work. Giving the verifier write access to the
-implementation collapses it back into rule 2's failure mode.
-
-**Never route verification to sonnet.** The verifier's entire value is skepticism about work that
-looks finished; that is exactly the judgment worth paying for, even on a stage that looks mechanical.
-
-### `integrator` — sonnet
-
-```yaml
----
-name: integrator
-description: Merge a wave's work, resolve conflicts, run the full mechanical gate, report failures verbatim.
-model: sonnet
-tools: Read, Grep, Glob, Edit, Bash
----
-```
-
-Runs the mechanical gate and reports raw output. Deliberately not opus: this job is
-*reporting what the tools said*, and an eager model that starts fixing failures blurs the roles.
-
-### `scribe` — sonnet
-
-```yaml
----
-name: scribe
-description: Write the run log and fold verified learnings back into the plan docs.
-model: sonnet
-tools: Read, Grep, Glob, Edit, Write
----
-```
-
-Writes `docs/runs/stage<N>/log.md` and applies plan-doc corrections that Fable has already approved —
-`overview.md`'s definition of done, item 4. It applies decisions; it does not make them.
-
-## Model routing
-
-The heuristic: **route by the shape of the task's failure mode.**
-
-- Failure would be **wrong** — a subtly incorrect invariant, a schema that can't represent a needed
-  state, an ordering bug that surfaces in a year → **opus**.
-- Failure would be **incomplete** — a missing flag, an unformatted table, a fixture that's too small,
-  caught immediately by the gate → **sonnet**.
-
-| Work | Model | Why |
-| --- | --- | --- |
-| Stage decomposition | opus | Getting the parallel/sequential split wrong corrupts a whole wave. |
-| Frontmatter round-trip, atomic writes (S1) | opus | Silent data mangling; the expensive failure. |
-| Index schema, scanner, rebuild (S2) | opus | The derived-index invariant is the project's foundation. |
-| Thread algebra, lifecycle (S3) | opus | The crown jewel. Property-tested, and wrong is invisible. |
-| Workspace resolution (S4) | opus | A note captured into the wrong vault is silently lost. |
-| `$EDITOR` handoff on Windows (S4/S5) | opus | Platform-specific, in the core loop. |
-| Watcher, debounce, coalescing (S5) | opus | Concurrency; failure is intermittent. |
-| Capture-overlay latency, the seam (S6) | opus | The seam is the thing S6 is most likely to break. |
-| Path identity, rename detection (S7) | opus | Genuinely hard; most of the stage's cost. |
-| Cargo workspace, CI yaml, toolchain pinning | sonnet | Bounded, obviously right or obviously broken. |
-| `clap` wiring from a written surface | sonnet | The surface is already specified in S4. |
-| Shell completions, `--json` serializers | sonnet | Mechanical once shapes are fixed. |
-| Synthetic vault generators, fixtures | sonnet | Volume work with a clear spec. |
-| TS type generation glue (S6) | sonnet | Codegen plumbing. |
-| Frontend component scaffolding (S6) | sonnet | Layout from a described shell. |
-| Run logs, plan-doc edits | sonnet | Applying approved decisions. |
-
-Roughly: stages 1–2 and 4 are almost entirely opus, stage 3 splits, stages 5–6 have the most sonnet-shaped
-work, stage 7 returns to opus.
-
-**Escape hatch.** If a sonnet-routed task comes back twice with the gate failing, re-dispatch it to
-opus rather than a third time. Two failures is evidence the task was misrouted, not that the agent
-was unlucky.
-
-## Acceptance tests come first
-
-The pivot the whole design turns on.
-
-`crates/jot-acceptance/` — excluded from the workspace's `default-members`, so red tests never block
-implementers running `cargo test`, and run explicitly:
-
-```bash
-cargo test -p jot-acceptance --features stage2
-```
-
-**Phase A — before any implementer is dispatched.** The verifier translates the stage doc's
-Acceptance section into executable tests, written against the core API contract in `overview.md`.
-They compile-fail or fail red at first; that is correct.
-
-Phase A has a second, underrated payoff: if the verifier cannot write a test against the stage doc,
-the stage doc is underspecified. Finding that out before three implementers are running is worth the
-day it costs.
-
-**Phase B — after the wave integrates.** The verifier:
-
-1. Runs the Phase A suite and reports pass/fail **per named criterion**, quoting output.
-2. Probes beyond the written list — the criteria are a floor, not a ceiling.
-3. Runs the **mutation spot-check**: in a throwaway worktree, deliberately breaks each behavior the
-   stage claims (invert a comparison, drop a field on write, skip the hash check) and confirms the
-   acceptance test *fails*. A test that stays green against a broken implementation is worth less
-   than no test, because it manufactures confidence.
-
-Skipping the mutation check is the tempting shortcut and the one that lets a vacuous suite through.
-
-## The stage loop
-
-```text
-  ┌─ 0. gate in ── previous stage tagged, tree clean, branch stage/<N>-<slug>
-  │
-  ├─ 1. plan ───── stage-planner (opus) → docs/runs/stage<N>/breakdown.md
-  │                 Fable reviews; surfaces the wave plan to the user
-  │
-  ├─ 2. phase A ── verifier (opus) writes acceptance tests, red
-  │
-  ├─ 3. waves ──── implementers, parallel within a wave, disjoint ownership
-  │                 ▲                                            │
-  ├─ 4. integrate ─ integrator (sonnet): fmt, clippy -D warnings, │
-  │                 cargo test, stage invariants → raw output     │
-  │                                                              │
-  ├─ 5. gate ────── mechanical  ∧  phase B  ∧  /code-review high  │
-  │                                                              │
-  ├─ 6. adjudicate ─ any FAIL → fixer wave ──────────────────────┘
-  │                  (max 3 rounds, then escalate to the user)
-  │
-  └─ 7. seal ────── merge, tag stage<N>, scribe writes log.md,
-                    plan docs updated, human checkpoints listed
-```
-
-### The three gates
-
-All three must pass, **in both modes**. They are what "done" means; the mode only changes who runs
-them. Inline, the orchestrator runs the mechanical gate itself and `/code-review` still applies —
-what it cannot supply on its own is phase B, which is the one gate that needs an adversary.
-
-They fail differently on purpose, which is why there are three.
-
-| Gate | Who | Judgment involved | Catches |
-| --- | --- | --- | --- |
-| Mechanical | integrator (sonnet) | none — exit codes | broken builds, lint, regressions |
-| Phase B | verifier (opus) | high — adversarial | criteria met in letter but not spirit; vacuous tests |
-| Review | `/code-review high` on the stage diff | moderate | seam violations, N+1s, duplication, dead paths |
-
-The seam rule from `overview.md` — surfaces never touch the filesystem or SQLite — is a standing
-review item from stage 3 onward, and is worth a grep in the review prompt:
-`rusqlite|std::fs` under `crates/jot-cli` and `crates/jot-tui` should return nothing but the
-`$EDITOR` scratch file and the registry's parent directory — four lines, all in `jot-cli`, all
-outside the vault. `crates/README.md` names them, so a fifth is the regression to look for.
-`apps/desktop/src-tauri` joins the grep if the [deferred desktop plan](todo/desktop.md) is ever
-built; until then it matches nothing.
-
-### Adjudication
-
-- Verifier and implementer disagree → **verifier wins by default**. The implementer may appeal once,
-  in writing, with evidence. Fable decides; if it can't, that is a user escalation, not a coin flip.
-- A task that wants to change a locked decision in `overview.md` → **stop and escalate.** Locked
-  decisions are locked. An agent discovering a good reason to revisit one is valuable information and
-  a conversation, not a unilateral edit.
-- Three failed fix rounds → escalate with the verifier's report, not a summary of it.
-
-## Parallelism, and where it actually bites
-
-Disjoint file ownership is necessary but not sufficient in a Cargo workspace. Three real collisions:
-
-- **`Cargo.toml`.** Two agents adding dependencies conflict on every wave. Fix: exactly one task per
-  wave owns dependency manifests. The planner allocates it, usually to the first task that needs a
-  new crate.
-- **The `target/` lock.** Concurrent `cargo test` runs serialize on the build lock, so "parallel"
-  agents queue anyway and each one's feedback loop lengthens. Fix: give test-heavy tasks
-  `isolation: "worktree"`, which brings its own `target/`.
-- **The index schema.** In stage 4, migrations, scanner, and queries all depend on the schema. Land
-  the schema alone in wave 1; the other two are genuinely parallel afterward.
-
-**Worktree or in place?** In place when ownership is disjoint and the task is small — it avoids merge
-work. `isolation: "worktree"` when a task runs the full suite, is exploratory and might be discarded,
-or is the mutation spot-check (which deliberately breaks the build).
-
-Practical ceiling: **three concurrent implementers**. Beyond that, integration and adjudication cost
-more than the parallelism saves, and Fable's attention becomes the bottleneck rather than the work.
-
-## Context hygiene
-
-- Subagents' tool output stays out of Fable's context — that is the point of dispatching. Fable reads
-  **artifacts** in `docs/runs/stage<N>/`, never transcripts.
-- Each agent receives its stage doc, the locked-decisions table, its task, and its ownership set.
-  It does not receive the design conversation. `docs/conversation/initial.md` is history; the plan docs are
-  the specification, and if something in the conversation matters it belongs in a plan doc.
-- Use `SendMessage` to continue an agent that already has the context — a fixer round on the task it
-  just implemented. A fresh `Agent` call re-derives everything from cold.
-- Reserve `subagent_type: "fork"` for the rare task that genuinely needs the design history. Prefer
-  fixing the plan doc instead.
-
-## Artifacts
-
-```text
-docs/runs/stage<N>/
-  breakdown.md      # planner: task DAG, ownership, model routing
-  dispatch.md       # who got what, which model, which wave
-  verification.md   # phase B: per-criterion verdict, quoted output, mutation results
-  review.md         # /code-review findings and dispositions
-  log.md            # what happened, deviations, decisions, timings
-```
-
-The audit trail is what lets a fresh session — or a different model — resume mid-stage without
-re-litigating settled ground. Write it as you go, not at the end.
-
-## Attribution
-
-The per-commit half of the audit trail. Two trailers appear in this repo's history: `Assisted-by:`,
-described below, and `Claude-Session:`, which the user has chosen to have added to every commit,
-anchoring it to the Claude Code session that produced it. `.claude/settings.local.json` sets
-`attribution.commit` to `""`, so the one trailer genuinely absent from this repo's history is
-`Co-Authored-By`.
-
-**One `Assisted-by:` per commit, and it records the orchestrator.** Subagents do not commit — they
-hand work back and Fable lands it — so the trailer describes the tool and configuration of whoever
-actually created the commit object. Which agent did the underlying work is
-`docs/runs/stage<N>/dispatch.md`'s job, and it does that job better than a trailer can.
-
-This is not merely a tidiness rule. An agent can report its own model and effort with certainty; it
-can only ever *guess* another agent's. A per-agent trailer therefore invites exactly the confident
-wrong attribution this section warns against, and multiplies it by the number of agents on the
-commit. A single self-reported line is the only part of the trailer that is honest by construction.
-
-Claude Code's attribution setting has no variables for model, effort, or thinking, so the trailer is
-written by the orchestrator itself at commit time.
-
-```text
-Assisted-by: <tool> <model-id>:<effort>[ thinking]
-```
-
-| Field | Default | Values |
-| --- | --- | --- |
-| `tool` | `claude-code` | the agentic coding tool — `claude-code`, `codex`, `cursor`, `aider` … |
-| `model-id` | `claude-opus-5` | whatever id that tool reports: `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`, `claude-haiku-4-5-20251001`, `gpt-5.4` … |
-| `effort` | `high` | `low`, `medium`, `high`, `xhigh`, `max` |
-| `thinking` | omitted | the literal token `thinking` when extended thinking was on |
-
-```text
-Assisted-by: claude-code claude-opus-5:xhigh thinking
-Assisted-by: claude-code claude-sonnet-5:high
-Assisted-by: claude-code claude-fable-5:high thinking
-Assisted-by: codex gpt-5.4:high thinking
-```
-
-The `tool` field earns its place here specifically: the `codex@openai-codex` plugin is enabled in
-your global settings, so this repo can genuinely produce commits from two different tools, and
-`claude-opus-5` versus `gpt-5.4` is not enough to tell them apart on its own.
-
-**Defaults come from settings, not from habit.** Your global `effortLevel` is `high`, with
-`claude-opus-5` overridden to `medium` — which is why `high` is the table's default and why an Opus
-commit reads `medium`. If those settings change, the defaults in this table change with them.
-
-**Checked 2026-09-02 and it had drifted**: this paragraph said the Opus override was `xhigh`, and
-`.claude/settings.json` says `medium`. A trailer copied from the table rather than from the file
-would have been a confident wrong attribution — exactly what the section above warns about — so
-read the setting at commit time rather than trusting this sentence.
-
-**One deviation from the sketch.** `claude code` and `Opus 5` both contain spaces, which makes the
-fields ambiguous to split. Hyphenating the tool and using the model *id* keeps every token space-free
-and the trailer machine-readable, at the cost of `claude-opus-5` reading less nicely than `Opus 5`.
-Worth it — a trailer nobody can parse is a comment.
-
-**The subagent role is deliberately absent.** `implementer` versus `verifier` is recorded in
-`docs/runs/stage<N>/dispatch.md`, which is authoritative anyway; putting it in the trailer would compete
-with the `tool` field for the same slot. If you later want it visible in `git log`, add it as its own
-trailer (`Assisted-role: verifier`) rather than crowding this one.
-
-`thinking` is redundant at `high` and above, where effort already implies it. It earns its place only
-on a low-effort run that still had thinking on; keep it anyway, because an explicit token is cheaper
-to read than an inferred one.
-
-### What the trailer is and isn't
-
-An agent's account of its own configuration is **not verifiable from git**. With
-`attribution.commit` empty there is no harness-generated trailer to cross-check against, so
-everything git knows about who did the work is self-reported.
-
-The single-trailer rule narrows what is being claimed rather than fixing this. The orchestrator
-reports only itself, which is the one configuration it actually knows — but nothing stops it
-misreporting that either, and no hook can catch it.
-
-So: `docs/runs/stage<N>/dispatch.md` is authoritative for **who did the work**, because Fable writes it at
-dispatch time from what it actually passed to the `Agent` call. The trailer answers a narrower
-question — **who committed** — and the two are deliberately different facts. A commit whose trailer
-says `claude-opus-5` may contain work from three sonnet implementers; that is not a contradiction,
-and dispatch.md is where you go to find out.
-
-**The trailer can no longer disagree with dispatch.md**, because after this change they no longer
-describe the same thing. What replaces that cross-check is weaker and worth naming: a dispatch-log
-row written at seal rather than at dispatch time cannot be validated against anything.
-
-If an agent genuinely doesn't know its own effort or thinking state, it omits the trailer. It does
-not guess. A confident wrong attribution is worse than an absent one, for the same reason "tests
-pass" without a platform is not a fact.
-
-### Mechanics
-
-- **Exactly one `Assisted-by:` line per commit.** A commit touched by an implementer, a fixer round
-  and a verifier still carries one — the orchestrator's — because the orchestrator is what made the
-  commit. Do not repeat the trailer per agent.
-- Stage 1's history predates this rule and carries several commits with one line per contributing
-  agent. Those are left as they are; rewriting merged history to satisfy a documentation change
-  would cost more than the inconsistency does.
-- This does **not** stack with `Co-Authored-By:`. That trailer is disabled by
-  `.claude/settings.local.json`, which is a deliberate choice worth keeping: `Co-Authored-By` claims
-  authorship and lights up GitHub's contributor UI, while `Assisted-by:` records a tool and its
-  configuration. If you ever want the GitHub-visible one back, set `attribution.commit` rather than
-  hand-writing the trailer.
-- Append it as a real trailer rather than hand-typed body text, so `git interpret-trailers` sees it:
-
-  ```bash
-  git commit -m "stage 1: frontmatter round-trip" \
-    --trailer "Assisted-by: claude-code claude-opus-5:high thinking"
-  ```
-
-- Audit a stage's history:
-
-  ```bash
-  git log stage1..stage2 --format='%h %(trailers:key=Assisted-by,valueonly,separator=%x2C )'
-  ```
-
-- A `commit-msg` hook can reject a commit with no `Assisted-by:` trailer — cheap, and it catches the
-  forgetful case rather than the dishonest one. Configure it with the `update-config` skill.
-
-## What Fable cannot verify
-
-Every stage has criteria no orchestrator can close. Naming them up front prevents the quiet failure
-where an agent marks a stage complete on the strength of the checks it happened to be able to run.
-
-| Stage | Human checkpoint |
-| --- | --- |
-| 1–3 | none — fully mechanizable, which is why they come first |
-| 4 | **One week of real capture.** The stage is not done when tests pass; it is done when a week of your actual notes has gone through it without loss. |
-| 5 | Rendering in Windows Terminal; scroll feel at 10k notes; whether `$EDITOR` handoff is pleasant rather than merely functional. |
-| 6 | Global hotkey behavior under real OS conditions; deep-link registration; whether capture *feels* under three seconds. |
-| 7 | The scope check in `stage7.md` — whether **rename detection** is worth its cost, or whether noticing `<uuid>.md` became `<uuid>_a_slug.md` is a nicety to drop. That is a judgment about your own habits, and no agent should make it. (This row used to ask whether `plain` workspaces were symmetry for its own sake. `plain` was deleted in the pre-stage-4 refactor and `stage7.md` records that the type system answered that question, so the row named a checkpoint that no longer exists; rename detection is what is actually left needing a human call.) |
-
-Stage 5's terminal work is partly reachable: drive the TUI through a pty and snapshot the ratatui
-buffer, which covers layout and state transitions. What it cannot cover is whether it feels good.
-
-Stages 3 and 5 are also where the plan stops being trustworthy. `stage3.md` says to let a week of
-dogfooding reorder everything after it — that instruction is addressed to Fable as much as to you.
-When real use contradicts stages 5–7, the plan docs get rewritten before the next stage is planned;
-they are not a schedule to be defended.
-
-## Automation worth adding
-
-- A `PostToolUse` hook running `cargo fmt` and `cargo clippy` on edited Rust files, so agents
-  self-correct before the gate rather than round-tripping through the integrator. Configure with the
-  `update-config` skill.
-- CI matrix on Windows and Linux from stage 1 — the atomic-write behavior genuinely differs, and a
-  Linux-only gate would pass on a Windows bug.
-- Local runs are Windows (your machine), CI covers Linux. Note which one produced any given green
-  result in the run log; "tests pass" without a platform is not a fact.
-
-## First dispatch, concretely
-
-Stage 1, wave by wave, as it was actually run — corrected at seal from an earlier sketch that put
-the verifier at wave 0, before the cargo workspace existed. That could not have worked:
-`crates/jot-acceptance` is a crate in a workspace nothing had created yet, and phase A's tests need
-module paths — `jot_core::note::NoteId`, and so on — that nobody had fixed. Phase A moves to wave 2,
-concurrent with the crate-error-taxonomy work, once wave 1's scaffold gives it a crate to `use`
-against. The rule phase A protects — no implementer of *behavior under test* runs before the tests
-exist — still holds either way: wave 1 and the rest of wave 2 land no stage-1 behavior, only
-scaffolding, manifests, and an error taxonomy.
-
-```text
-wave 1   implementer (sonnet) cargo workspace, rust-toolchain, CI matrix
-                             owns Cargo.toml, .github/, rust-toolchain.toml
-                             ── alone: it owns the manifests ──
-
-wave 2   implementer (opus)   deps, YAML/time crate decision, error taxonomy
-                             owns Cargo.toml, Cargo.lock, crates/jot-core/src/error.rs
-         verifier (opus)     phase A: acceptance tests from stage1.md
-                             owns crates/jot-acceptance/
-                             ── parallel: disjoint ownership; phase A is expected to fail to
-                                compile regardless of what the other task lands ──
-
-wave 3   implementer (opus)   NoteId, Note, NoteMeta, frontmatter types
-                             owns crates/jot-core/src/{note,frontmatter}.rs
-         implementer (opus)   atomic write, filename parsing, enumeration
-                             owns crates/jot-core/src/fs.rs
-         implementer (sonnet) workspace registry
-                             owns crates/jot-core/src/registry.rs
-                             ── parallel: disjoint, no new deps; error.rs is frozen after wave 2 ──
-
-wave 4   implementer (opus)   init / open / discover, workspace.toml
-                             owns crates/jot-core/src/workspace.rs
-
-gate     integrator (sonnet)  fmt, clippy -D warnings, cargo test
-         verifier (opus)      phase B + mutation spot-check
-         /code-review high    on the stage/1-vault-foundations diff
-```
-
-Note what wave 1 costs: it is sonnet, it is alone, and it blocks everything. That is correct —
-scaffolding is cheap to do and expensive to redo, and nothing parallelizes before the workspace exists.
+- **Lead** — the session you talk to. Runs on the smartest model available: Fable, falling back to
+  Opus when Fable is not (`.claude/settings.json` sets `fable`; `/model opus` if it is unavailable).
+  Reads the plan docs, splits the work, dispatches implementers, runs the gate, requests the review,
+  and writes the summary. It does not write production code itself.
+- **`implementer`** (`.claude/agents/implementer.md`, opus) — one per task. Implements, writes unit
+  tests, runs the gate, reports. Does not commit.
+- **Codex** — reviews every implementation turn. Independent of the model that wrote the code, which
+  is the point.
+- **You** — review the summary, then approve, redirect, or ask for fixes. Nothing is committed
+  before you have seen it.
+
+## The loop
+
+One *turn* is one round of implementation, however many implementers it took.
+
+1. **Plan.** The lead reads `overview.md` and the relevant stage doc, splits the work into tasks,
+   and states the split in a few lines. Tasks that run in parallel must not share files — give
+   each a file list. Only one task per turn touches `Cargo.toml` / `Cargo.lock`.
+2. **Implement.** Dispatch one `implementer` per task via the `Agent` tool (parallel when their
+   files are disjoint, at most three at once). Continue an implementer with `SendMessage` for
+   follow-ups instead of spawning a fresh one.
+3. **Gate.** When the turn's implementers are done, the lead runs:
+
+   ```sh
+   cargo fmt --check
+   cargo clippy --workspace --all-targets -- -D warnings
+   cargo test --workspace
+   cargo test -p jot-acceptance --all-features
+   ```
+
+   A red gate goes back to the implementer that owns the failure before review — Codex's time is
+   wasted on code that does not build.
+4. **Codex review.** On the uncommitted working tree:
+
+   ```sh
+   node "$(printf '%s\n' ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | sort -V | tail -1)" \
+     review --wait --scope working-tree
+   ```
+
+   For a focused or more skeptical pass, `adversarial-review --wait --scope working-tree "<focus>"`.
+   Run it in the background (`run_in_background`) if the diff is large. Do not fix anything yet.
+5. **Summarize for the user.** One message, in this shape:
+
+   - **Changes** — per task: what changed and why, files touched, tests added.
+   - **Gate** — pass/fail for each command; failures quoted, not paraphrased.
+   - **Codex review** — each finding with severity and location, plus the lead's verdict on it
+     (agree / disagree and why / unsure). Codex's own wording for anything the lead disagrees with.
+   - **Deviations and open questions** — where the work left the plan, anything that needs a
+     decision, any acceptance test that was changed.
+
+6. **User decides.** Fix findings (back to step 2, then review again), or approve. On approval the
+   lead commits, one commit per coherent change, and writes back to the plan docs anything learned
+   that contradicts them (`overview.md`, definition of done, item 4).
+
+## Standing rules
+
+These outlive the harness; they are in `AGENTS.md` and repeated in the implementer prompt.
+
+- Locked decisions in `overview.md` are locked. A reason to revisit one is a question for the user.
+- Surfaces never touch the filesystem or SQLite. Worth a grep in every review:
+  `rusqlite|std::fs` under `crates/jot-cli` and `crates/jot-tui` should return only the four
+  `jot-cli` lines named in `crates/README.md`.
+- `crates/jot-acceptance/` is the executable form of each stage's acceptance criteria. Implementers
+  may add to it; changing or deleting an existing assertion must be called out in the report and
+  in the summary, never done quietly to get to green.
+
+## What no agent can verify
+
+Some criteria need you: whether the TUI feels right, a week of real capture without loss, rename
+detection being worth its cost (stage 7). The summary lists these rather than marking them done.

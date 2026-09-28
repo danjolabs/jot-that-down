@@ -7,7 +7,7 @@ Four crates. One of them knows what a note is; the rest are ways of looking at o
 | [`jot-core`](jot-core/README.md) | ~14k | lib | The domain, the vault I/O, the index, the thread algebra. Everything jot knows how to do. |
 | [`jot-tui`](jot-tui/README.md) | ~3.9k | lib | The terminal reading surface. No `fn main`, on purpose. |
 | [`jot-cli`](jot-cli/README.md) | ~2.5k | **bin** | `jot`. The only executable in the workspace. |
-| `jot-acceptance` | — | lib | Stage acceptance criteria, executable. Owned by the verifier; read-only to implementers. |
+| `jot-acceptance` | — | lib | Stage acceptance criteria, executable. Existing assertions change only with review. |
 
 ## The stack
 

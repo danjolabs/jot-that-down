@@ -168,8 +168,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-`crates/jot-acceptance` is the executable form of each stage's acceptance criteria. It is
-deliberately owned by a different agent than the implementation, so the tests cannot be weakened to
+`crates/jot-acceptance` is the executable form of each stage's acceptance criteria. Changing or
+deleting an existing assertion is always called out for review, so the tests are not weakened to
 fit the code — see [`docs/plans/orchestration.md`](docs/plans/orchestration.md).
 
 ### Dependencies
