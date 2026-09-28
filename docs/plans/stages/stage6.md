@@ -305,9 +305,13 @@ twice.
     recorded under the layout item.)
   - Whatever draws it is generated from the same enumeration the cycle uses, so a fourth view cannot
     be added without appearing here — the rule the keymap already follows for `?`.
-- **Open.** Where it goes: a strip at the top of the main pane, or a segment of the existing status
-  line. The status line is already the busiest row on screen and drops labels to fit, which argues
-  for the strip.
+- **Revised 2026-09-28, and the item shrank.** The list panel's block title already reads
+  `timeline — every note` — that is stage 5's, not new — so *"which view is this, and what mode is it
+  in"* is **already answered**. What is missing is only the other half: nothing says what else
+  exists. So this is an edit to a title that is already there, not a strip to be designed, and it
+  should stay in the title rather than becoming a second place to look.
+- **Open.** How to name the other views without spending the title's width on them, given the title
+  already carries view and mode and the panel can be 40 columns wide.
 
 ---
 
@@ -412,6 +416,17 @@ columns of gutter, because the gutter is only as wide as there are live lanes.
   assumes every note in the thread resolves. **It is a deferral, not an answer** — dangling
   references are a designed state in this app, so the graph will meet one. Revisit before the view
   is called done.
+
+**Built 2026-09-28 in `bcb5f4e`**, with three judgements the plan had left open and which are argued
+in that commit: `t` to toggle rather than a third bracket (`[` and `]` name panes of the *frame*, and
+the graph is a panel inside one); a six-lane cap that **folds** into the last drawn column rather than
+dropping rows, because the list is what carries the focus and the art is not; and an over-tall thread
+windowing on the focus with `+n above` / `+n below`, where a marker may never displace the focus row.
+
+**One thing it left stale.** `Action::Open` — `Enter` — still toasts `thread detail is not built yet`,
+which `t` has arguably made untrue. Deliberately not changed in that commit: what `Enter` should do now
+that a thread view exists is its own question, and the honest answers include "the same as `t`",
+"nothing, remove the key", and "open the thread *in the main pane*, which is what stage 5 meant".
 
 **Consequences to record elsewhere.**
 
@@ -534,6 +549,26 @@ graph goes.
   must happen in local time. The surface already has the shape for this — `App` does not read the
   clock and `now` is passed into `ui::draw` (`crates/jot-tui/src/app.rs:68`) — so the offset arrives
   the same way rather than becoming a second source of time.
+
+  **Built, with one compromise still live.** `Workspace::days_with_notes` is generic over
+  `chrono::TimeZone` on purpose, so a caller holding `Local` gets the offset in force at *each note's
+  own instant*. `App::with_zone` takes a `FixedOffset` and flattens that away, because holding a real
+  zone would mean `App` consulting the system timezone database on every reload — the environment read
+  the design avoids. The cost, documented where it happens: notes from the other side of a
+  daylight-saving change can land on the neighbouring day within an hour of midnight, for half the
+  year. A tradeoff, not a settled decision; revisit if a dot ever looks wrong.
+
+- **What a selected day *means* is not built, and is the harder half.** This item says "`TimelineQuery`
+  carries `since` and `until`, so a day is a bounded pair" — true, but a day only becomes a bounded
+  pair after a **local date → UTC instant** conversion, and that is the direction that is *not* total.
+  A local midnight can be skipped (spring forward) or repeated (fall back), so the conversion returns
+  a mapped result with `None` and `Ambiguous` cases somebody has to decide. Left unowned this becomes
+  an `.unwrap()` and a panic in someone's timezone.
+
+  Two ways out, and it is a decision rather than a patch because it changes a struct three surfaces
+  build: either `TimelineQuery::on_day(day, zone)` in core with the gap/ambiguity policy written down,
+  or `TimelineQuery` carries the **local day itself** and core buckets on the UTC → local direction —
+  which never constructs a local midnight at all. The second is recommended.
 - **Core owns the query.** Surfaces never touch SQLite, so "which days have notes" is a new
   `jot-core` read, not a scan in the TUI. That makes it a **core change**, and stage 5's lesson
   about discovering `FileSort` mid-TUI applies exactly: schedule it with the wave that owns core,
@@ -557,23 +592,31 @@ graph goes.
 
 ## Work
 
-Filled in once the buckets are settled. Ordering: bugs before improvements, and within the bugs,
-whatever is being hit daily.
+Ordering: bugs before improvements, and within the bugs, whatever is being hit daily. The run log
+is `docs/runs/stage6/log.md`.
 
-- [ ] TUI: undo's key is spelled the same everywhere it is named, and offered where the offer stands.
-- [ ] TUI: restore and purge in the trash view, purge behind a confirmation.
+- [x] TUI: undo's key is spelled the same everywhere it is named — `7631b83`. **Half done:** the
+      messages are derived from the keymap; whether `Space U` is *offered* where the offer stands is
+      still open, because it is coupled to the trash keys below.
+- [ ] TUI: restore and purge in the trash view, purge behind a confirmation. **Blocked on naming the
+      keys.** The oldest unfixed item here and the one being hit daily.
 - [ ] TUI: `up_to_parent`'s "parent is hidden" message, which can only fire when the parent is purged.
-- [ ] CLI: `jot ls` ids at the TUI's floor.
-- [ ] CLI: grouped `--help`, generated from the derive rather than written twice.
+- [x] CLI: `jot ls` ids at the TUI's floor — `1d55a94`. Workspace ids stayed at 8; they are v4.
+- [ ] CLI: grouped `--help`, generated from the derive rather than written twice. Parked.
 - [ ] A `config.toml` beside the registry, with one owner for OS paths and an environment override.
+      Parked.
 - [ ] Core: `default_path`'s shape test, which asserts a path component macOS does not produce.
-- [ ] TUI: a view indicator — which view, what else there is, what mode this one is in.
-- [ ] TUI: table layout for the list views, and a key that hides the reader.
-- [ ] TUI: thread detail as a lane graph — chronological, root at top, in the sidebar below the
-      calendar and only while toggled.
-- [ ] Core: which days have notes, as a read the TUI can ask for.
-- [ ] TUI: the three-pane layout, with a drop order for the side panes and a calendar in the sidebar.
-- [ ] Docs: `stage5.md`'s thread-detail section, which now describes a view that is not being built.
+- [ ] TUI: a view indicator. **Smaller than written** — see the item.
+- [ ] TUI: table layout for the list views. The reader's toggle landed with the layout; the columns
+      did not.
+- [x] TUI: thread detail as a lane graph — `bcb5f4e`. Chronological, root at top, in the sidebar
+      below the calendar, on `t`.
+- [x] Core: which days have notes, as a read the TUI can ask for — `ecbd08b`.
+- [x] TUI: the three-pane layout, with a drop order for the side panes and a calendar — `40d1fc4`,
+      and `bcb5f4e` deleted the calendar variant that lost.
+- [x] Docs: `stage5.md`'s thread-detail section, now marked superseded, with its key table pointing
+      here for the keys this stage added.
+- [ ] Day selection: what a dot is *for*. Blocked — see the calendar item's local-midnight note.
 
 ## Acceptance
 
@@ -616,6 +659,12 @@ whatever is being hit daily.
 - The `--help` groups, and which side of the capture/read line `edit` falls on. **Parked until the
   layout work lands**, at the user's direction, along with the config's shape (`jot config` command
   or file alone, and whether it may ever be scoped per workspace).
-- What the graph draws where a thread has a hole — deferred on purpose, and still owed.
+- What the graph draws where a thread has a hole — deferred on purpose, and still owed. Now deferred
+  *in code* as well: core truncates `ancestors` at the first missing note and never descends through
+  one, so a purged mid-thread note yields a smaller graph rooted at the highest ancestor that still
+  resolves. It will look wrong the first time something is purged mid-thread.
+- What `Enter` does now that `t` shows a thread.
+- Whether `App` should hold a real timezone rather than a `FixedOffset` — see the calendar item.
+- The local-midnight policy that day filtering needs.
 - Which key moves focus between the sidebar and the table, given `Tab` already cycles views.
 - Where the view indicator goes: a strip above the table, or a segment of the status line.

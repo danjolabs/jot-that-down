@@ -73,7 +73,11 @@ A split view: list on the left, reader on the right.
 
 ### Thread detail
 
-The stage 2 projections, rendered:
+**Superseded, 2026-09-28. This view was specified here, never built here, and stage 6 built something
+else.** See `stage6.md`, *Thread detail as a lane graph, in the shape of `undotree`*. Kept rather than
+deleted because the reasoning below is still the reasoning — only the rendering changed.
+
+What was specified: the stage 2 projections, rendered as three sections.
 
 - **Ancestors** above, linear, collapsed past three to `… 4 earlier notes`.
 - **Focus** in the middle, full body.
@@ -82,6 +86,22 @@ The stage 2 projections, rendered:
 - A quoted note is embedded as a single nested card; `Enter` on it navigates rather than expanding.
 
 Branching is what distinguishes this from a linear reader — make forks visible and cheap to fold.
+
+**What replaced it, and why.** A `git log --graph`-style lane gutter beside one row per note: one
+list, one cursor, one scroll, where this was three layouts with three scroll behaviours and a cursor
+that meant something different in each. Ancestors became the first few rows of the trunk lane rather
+than a section with its own collapse rule, so the sentence above about collapsing past three is now a
+display rule on one lane. The final sentence held all the way through — making forks visible and cheap
+to fold is exactly what the lane graph is for — which is why this section is marked rather than
+removed.
+
+**Two details of the above did not survive**, and both are deliberate:
+
+- **`segments()` is not what gets rendered.** Stage 2's form 2 was named here as the rendering form; a
+  lane graph wants a topological sweep over `TreeNode` instead. Both projections remain in core,
+  tested and correct, with other callers.
+- **The quoted note is not in the graph.** A tree plus cross-lane quote edges is a DAG render. Quotes
+  stayed where the reader panel already puts them.
 
 ### Search and trash
 
@@ -114,6 +134,12 @@ Branching is what distinguishes this from a linear reader — make forks visible
 | `?` | help overlay |
 | `q` | quit |
 | `Esc` | back, then quit |
+
+**This table is stage 5's and is not maintained here.** Stage 6 added `[` and `]` to hide the sidebar
+and the reader, and `t` to show the thread graph; it also corrected `Space U`, which every message on
+screen used to spell as a bare `U`. The keymap in `crates/jot-tui/src/key.rs` is the single source of
+truth — `?` and the footer are both generated from it — so read that, or press `?`, rather than
+trusting this table.
 
 **Every key that writes sits behind the `Space` prefix, and nothing else does.** A browser is a
 thing you read in, and one where a mistyped `x` trashes the note under the cursor spends its whole
