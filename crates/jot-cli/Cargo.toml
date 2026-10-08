@@ -11,18 +11,20 @@ name = "jot"
 path = "src/main.rs"
 
 [dependencies]
-jot-core = { path = "../jot-core" }
+jot-core = { workspace = true }
 jot-tui = { path = "../jot-tui" }
 
 anyhow = { workspace = true }
 chrono = { workspace = true }
-clap = { workspace = true }
-clap_complete = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 
+clap = { version = "4.5", features = ["derive", "env"] }
+clap_complete = "4.5"
+
 [dev-dependencies]
-assert_cmd = { workspace = true }
-predicates = { workspace = true }
 tempfile = { workspace = true }
+
+assert_cmd = "2.0"
+predicates = "3.1"

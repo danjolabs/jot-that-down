@@ -11,19 +11,23 @@ name = "jot_core"
 path = "src/lib.rs"
 
 [dependencies]
-blake3 = { workspace = true }
 chrono = { workspace = true }
-directories = { workspace = true }
-indexmap = { workspace = true }
-markdown = { workspace = true }
-notify = { workspace = true }
-rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
-yaml_serde = { workspace = true }
+
+blake3 = "1.8"
+directories = "6.0.0"
+indexmap = { version = "2.14", features = ["serde"] }
+markdown = "1.0.0"
+# The watcher lives in core, not in the TUI: the desktop surface needs the same change events, and a
+# surface that grew its own would be domain logic on the wrong side of the seam. That surface is
+# deferred (docs/plans/todo/desktop.md), which changes when it is built and not where this belongs.
+notify = "8.0"
+rusqlite = { version = "0.40", features = ["bundled"] }
+thiserror = "2.0.20"
+yaml_serde = "0.10.7"
 
 [dev-dependencies]
 tempfile = { workspace = true }

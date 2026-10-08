@@ -13,15 +13,24 @@ path = "src/lib.rs"
 # A library with no `main`, deliberately. It cannot open a workspace of its own — `jot-cli` hands
 # it one — which is what keeps the seam enforceable at the crate boundary rather than by discipline.
 [dependencies]
-jot-core = { path = "../jot-core" }
+jot-core = { workspace = true }
 
-ansi-to-tui = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
-ratatui = { workspace = true }
-unicode-width = { workspace = true }
+
+# `bat` speaks ANSI, ratatui speaks spans. This is the translator, and it is the reason the reader
+# can borrow a syntax highlighter instead of growing one.
+ansi-to-tui = "8.0"
+# `crossterm` is deliberately absent: ratatui re-exports the exact version it was built against as
+# `ratatui::crossterm`, and a second direct pin is how a terminal app ends up linking two
+# incompatible `KeyEvent` types that differ only in a private field.
+ratatui = "0.30"
+# Terminal cell width for CJK and emoji. ratatui measures its own spans, but the reader wraps
+# markdown before ratatui sees it, and wrapping on `char` count draws a broken frame in any vault
+# with a non-Latin title.
+unicode-width = "0.2"
 
 [dev-dependencies]
-insta = { workspace = true }
-unicode-width = { workspace = true }
 tempfile = { workspace = true }
+
+insta = { version = "1.48", features = ["filters"] }

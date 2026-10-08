@@ -15,7 +15,7 @@ path = "src/lib.rs"
 # off. `cargo clippy --workspace --all-targets` in CI builds this crate with default features and
 # must stay clean; the red suite lives entirely behind `--features stage1b`.
 [dependencies]
-jot-core = { path = "../jot-core", optional = true }
+jot-core = { workspace = true, optional = true }
 
 [features]
 default = []

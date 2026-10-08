@@ -4,51 +4,29 @@ members = ["crates/*"]
 default-members = ["crates/jot-core", "crates/jot-tui", "crates/jot-cli"]
 
 [workspace.package]
-version = "0.0.6-g"
+version = "0.0.6-h"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/danjolabs/jot-that-down"
 
+# Only dependencies used by two or more members live here. One used by a single member is declared
+# in that member's own manifest, and moves here when a second member needs it.
 [workspace.dependencies]
-blake3 = "1.8"
+# Workspace members.
+jot-core = { path = "crates/jot-core" }
+
 chrono = { version = "0.4.45", default-features = false, features = [
     "clock",
     "serde",
     "std",
 ] }
-directories = "6.0.0"
-indexmap = { version = "2.14", features = ["serde"] }
-markdown = "1.0.0"
-# The watcher lives in core, not in the TUI: the desktop surface needs the same change events, and a
-# surface that grew its own would be domain logic on the wrong side of the seam. That surface is
-# deferred (docs/plans/todo/desktop.md), which changes when it is built and not where this belongs.
-notify = "8.0"
-rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-thiserror = "2.0.20"
 toml = "1.1"
 uuid = { version = "1.26", features = ["serde", "v4", "v7"] }
-yaml_serde = "0.10.7"
 
 # Surfaces only. None of these may reach `jot-core`
-# `bat` speaks ANSI, ratatui speaks spans. This is the translator, and it is the reason the reader
-# can borrow a syntax highlighter instead of growing one.
-ansi-to-tui = "8.0"
 anyhow = "1.0"
-clap = { version = "4.5", features = ["derive", "env"] }
-clap_complete = "4.5"
-# `crossterm` is deliberately absent: ratatui re-exports the exact version it was built against as
-# `ratatui::crossterm`, and a second direct pin is how a terminal app ends up linking two
-# incompatible `KeyEvent` types that differ only in a private field.
-ratatui = "0.30"
-# Terminal cell width for CJK and emoji. ratatui measures its own spans, but the reader wraps
-# markdown before ratatui sees it, and wrapping on `char` count draws a broken frame in any vault
-# with a non-Latin title.
-unicode-width = "0.2"
 
 # Dev only.
-assert_cmd = "2.0"
-insta = { version = "1.48", features = ["filters"] }
-predicates = "3.1"
 tempfile = "3.27"
