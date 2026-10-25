@@ -26,14 +26,19 @@ The two views named in `docs/conversation/initial.md`, plus the three supporting
 - **A two-slot marker leads every row.** Slot one is where the note sits or what is wrong with
   where it sits: `⌫` trashed, `⚠` parent not where it should be (red purged, yellow trashed), `↳` a
   reply, `⚑` a thread head, blank for a note on its own. Slot two is `❯` when the note quotes
-  another. Both slots are reserved on every row, so the id column never moves.
+  another. Both slots are reserved on every row, so the id column never moves. **Stage 6 put a
+  two-column selection lane in front of them** — a line from the selected note's `◉` to its
+  parent's `►` — see the table item in `stage6.md`.
 
-  Every glyph is East Asian **Neutral** — one column in any locale. That is checked, not assumed:
-  `◆`, `★`, `┬`, `¶` and `"` are all Ambiguous and render two columns under a CJK locale, which in
-  a fixed-width cell is a broken frame in exactly the vault most likely to have wide titles.
+  Every slot glyph is East Asian **Neutral** — one column in any locale. That is checked, not
+  assumed: `◆`, `★`, `┬`, `¶` and `"` are all Ambiguous and render two columns under a CJK locale.
+  The lane's `╭ │ ╰` are box-drawing and Ambiguous too; the user accepted that on 2026-10-25, by the
+  same rule as the thread graph and the frame borders — a terminal that widens box-drawing has
+  already widened the frame. The test checks one column at the default width.
 - The meta column carries what has accumulated around a note: replies, then how many notes quote
   it, then the age. It degrades to the age alone rather than clipping — the age is the one thing on
-  a row that nothing else on screen implies.
+  a row that nothing else on screen implies. **Superseded in stage 6** by the table's `counts`,
+  `created` and `edited` columns.
 - Day separators.
 - Keyset pagination on UUIDv7; loads more as you scroll, never a page number.
 

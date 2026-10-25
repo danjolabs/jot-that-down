@@ -342,17 +342,39 @@ twice.
     and it is the reason the abbreviation table is rebuilt per reload rather than per row.
   - **Every glyph stays East Asian Neutral.** Box-drawing a table is where Ambiguous-width
     characters get in, and a two-column glyph in a fixed cell breaks the frame under a CJK locale.
+    **Relaxed 2026-10-25 for box-drawing** — see the graph item's gutter bullet.
   - **Thread-agnostic still applies.** A workspace whose schema declares no `relation:*` entry has
     no replies and no parents; the table must not reserve a gutter for columns that are always
     empty there.
 - **Settled 2026-09-09, at the user's direction: `created` absolute, `edited` relative.** Two
   relative ages side by side (`2d` / `2d`) say less than one does; an absolute creation time is the
   fact that does not change, and a relative edit time is the one you read as "how stale is this".
-- **Open.** Which columns beyond those four, at which widths, and what drops first as the frame
-  narrows.
+- **Open, until the build below.** Which columns beyond those four, at which widths, and what drops
+  first as the frame narrows.
 - **Superseded in part by the next item.** The three-pane layout puts this table in the middle
   pane and adds a second thing competing for width. The toggle is still right; the width budget
   below is where it gets decided.
+
+**Built 2026-10-26 in `96925c7`.** A header row over `id`, `title`, `counts`, `created` and
+`edited`. `created` reads `Oct 25` in the current year and `Oct 2025` before it, in the calendar's
+zone; `edited` is a relative age. As the pane narrows, `counts` drops first, then the time the view
+is *not* sorted by, then the title clips — so the files view's `edited` sort keeps `edited` longest.
+The marker column in front is five columns: two for the selection lane, then the relation slot, the
+quote slot and a space.
+
+- **The selection lane — settled 2026-10-26, at the user's direction.** The selected row carries
+  `◉`. When its parent is a row in the current list, a line runs to the parent's `►`: `╭` at the
+  upper end, `╰` at the lower, `│` between — so in the newest-first timeline it runs downward. One
+  link only, to the parent; nothing to replies. It is worked out over the whole list, so a parent
+  scrolled off screen leaves the line running to the pane's edge. No parent in the list — a root, a
+  trashed parent, a search that leaves it out — means no line, and `◉` alone. Replies show `↳`
+  again; a two-column `╰►` stood in for it for a day.
+- **The reader starts closed — settled 2026-10-26, at the user's direction.** `]` opens it, and the
+  `] reader` hint in the status line keeps it discoverable. This answers the config item's "whether
+  the reader starts open" for now, as a default rather than a setting.
+- **Known limitation.** The table's offset is recomputed from the selection every frame, so once the
+  list scrolls the selected row sits on the bottom edge — and in the timeline its parent is then
+  always below it, off screen. A scroll margin would fix that; not built.
 
 ---
 
@@ -423,10 +445,15 @@ the graph is a panel inside one); a six-lane cap that **folds** into the last dr
 dropping rows, because the list is what carries the focus and the art is not; and an over-tall thread
 windowing on the focus with `+n above` / `+n below`, where a marker may never displace the focus row.
 
+**Changed 2026-10-25 in `96925c7`, at the user's direction.** Box-drawing glyphs in two-column lanes,
+jj style — `●` node, `◉` focus, `│` lane, `┊` fold, and `├ ┤ ┼ ╮ ╭ ┬ ─` where lanes fork — and
+**always on**: `t` is gone, along with the toggle state. The six-lane cap and its fold stand; at two
+columns a lane, six lanes take 12 of the sidebar's 28 inner columns.
+
 **One thing it left stale.** `Action::Open` — `Enter` — still toasts `thread detail is not built yet`,
-which `t` has arguably made untrue. Deliberately not changed in that commit: what `Enter` should do now
-that a thread view exists is its own question, and the honest answers include "the same as `t`",
-"nothing, remove the key", and "open the thread *in the main pane*, which is what stage 5 meant".
+which the graph has arguably made untrue. Deliberately not changed in that commit: what `Enter` should
+do now that a thread view exists is its own question, and the honest answers include "nothing, remove
+the key" and "open the thread *in the main pane*, which is what stage 5 meant".
 
 **Consequences to record elsewhere.**
 
@@ -435,11 +462,14 @@ that a thread view exists is its own question, and the honest answers include "t
   Both projections stay in core, still tested, still correct — but `stage5.md`'s thread-detail
   section is now describing a view that is not being built, and should say so rather than be left
   to contradict this one.
-- **Only ASCII in the gutter.** Checked with `unicodedata.east_asian_width`: `*`, `|`, `/`, `\` are
-  Narrow, while `●`, `│`, `╱`, `╲` and every box-drawing character in U+2500–U+2573 are
-  **Ambiguous** — two columns under a CJK locale, which in a fixed-width gutter is the broken frame
-  stage 5's marker column was designed to avoid. undotree offers the Unicode set as an option; do
-  not take it.
+- **Only ASCII in the gutter — reversed 2026-10-25, at the user's direction.** Checked with
+  `unicodedata.east_asian_width`: `*`, `|`, `/`, `\` are Narrow, while `●`, `│`, `╱`, `╲` and every
+  box-drawing character in U+2500–U+2573 are **Ambiguous** — two columns under a CJK locale, which in
+  a fixed-width gutter is the broken frame stage 5's marker column was designed to avoid. The
+  reversal's reason: the frame's own borders are box-drawing, so a terminal that widens them has
+  broken the frame before the gutter gets a say; and the terminals that draw box-drawing themselves
+  (Ghostty, kitty, WezTerm) join the lines without seams. The tests check one column at the default
+  width, not CJK-narrow.
 
 **Open, and it is the one that decides how this reads.** In what order are nodes swept?
 
@@ -459,12 +489,13 @@ cost stands and is accepted.
 
 **Placed below the calendar in the sidebar, and rendered only while toggled.** Not permanently
 resident: that is what keeps the sidebar's height budget honest once the calendar has taken 13 of
-its rows.
+its rows. **Superseded 2026-10-25, at the user's direction: always rendered.**
 
 **Un-deferred 2026-09-09**, after the calendar comparison — the space it needs is exactly the space
 deleting the losing calendar freed.
 
-**The sidebar is 22 columns, 20 inside its borders, so this is a minimap and not a reading view.**
+**The sidebar is 30 columns, 28 inside its borders, so this is a minimap and not a reading view.**
+(22 and 20 until 2026-10-25, when the user widened it at the reader's expense.)
 A lane gutter plus a truncated title is what fits. The question it answers is "where am I in this
 thread", and the reader panel goes on answering "what is this one". Two panels, two questions —
 which is the same division the reader already has with the list.
@@ -505,19 +536,21 @@ unchanged; they simply apply to a smaller area. One subtraction, no new geometry
 
 | | columns | where the number comes from |
 | --- | --- | --- |
-| sidebar | **22** | 7 day cells × 3 columns − 1, plus two border columns |
+| sidebar | **30** | 7 day cells × 4 columns, plus two border columns |
 | main pane, table alone | **40** | `LIST_MIN` |
 | main pane, table + reader | **90** | `READER_MIN_FRAME`, unchanged |
-| frame, sidebar + table | **62** | |
-| frame, all three | **112** | |
+| frame, sidebar + table | **70** | `SIDEBAR_MIN_FRAME` |
+| frame, all three | **120** | |
 
-So the reader appears once the frame reaches **112 columns**, and below that the main pane keeps the
+So the reader appears once the frame reaches **120 columns**, and below that the main pane keeps the
 table alone — which is the rule already in the code, one pane deeper. At 80 columns, still the
-default almost everywhere, you get sidebar plus table with 18 columns spare.
+default almost everywhere, you get sidebar plus table with 10 columns spare. (The sidebar was 22
+columns of 3-column day cells, and all three panes fit at 112, until the user widened it on
+2026-10-25. The list keeps its 40–56 clamp, so the extra width came out of the reader.)
 
 **Two toggles and a drop order.** The reader already drops itself when the main pane is under 90;
-the sidebar needs the same treatment and the same escape hatch, because 22 columns is a quarter of
-an 80-column terminal spent on one month. Decide the order once — reader first, then sidebar, then
+the sidebar needs the same treatment and the same escape hatch, because 30 columns is more than a
+third of an 80-column terminal spent on one month. Decide the order once — reader first, then sidebar, then
 the table alone — and make both togglable so the rule can be overridden in the direction that
 *removes* a pane, never the one that forces one in.
 
@@ -541,7 +574,7 @@ graph goes.
 **Constraints this inherits.**
 
 - **The dot glyph is one more width trap.** Checked with `unicodedata.east_asian_width`: `·`
-  (U+00B7) and `•` (U+2022) are **Ambiguous** — two columns under a CJK locale, which in a 3-column
+  (U+00B7) and `•` (U+2022) are **Ambiguous** — two columns under a CJK locale, which in a 4-column
   day cell breaks the grid. `∙` (U+2219) and `◦` (U+25E6) are Neutral, and `.` is Narrow. Use one of
   those three.
 - **Days are local, note ids are UTC.** `created_at` comes from a UUIDv7 and is UTC; a calendar is
@@ -607,10 +640,10 @@ is `docs/runs/stage6/log.md`.
       Parked.
 - [ ] Core: `default_path`'s shape test, which asserts a path component macOS does not produce.
 - [ ] TUI: a view indicator. **Smaller than written** — see the item.
-- [ ] TUI: table layout for the list views. The reader's toggle landed with the layout; the columns
-      did not.
+- [x] TUI: table layout for the list views — `96925c7`, with `created` and `edited`, the selection
+      lane in the marker column, and the reader starting closed.
 - [x] TUI: thread detail as a lane graph — `bcb5f4e`. Chronological, root at top, in the sidebar
-      below the calendar, on `t`.
+      below the calendar. Box-drawing, always on, in a 30-column sidebar since `96925c7`.
 - [x] Core: which days have notes, as a read the TUI can ask for — `ecbd08b`.
 - [x] TUI: the three-pane layout, with a drop order for the side panes and a calendar — `40d1fc4`,
       and `bcb5f4e` deleted the calendar variant that lost.
@@ -630,9 +663,10 @@ is `docs/runs/stage6/log.md`.
   reader comes back on the same key.
 - A thread with a fork renders as one list with a lane gutter, the root at the top, and `j` / `k`
   moving through it the way they move through every other view.
-- A thread with no forks renders as a straight column two glyphs wide, and reads no worse than an
-  indented list would.
-- The gutter contains no character wider than one column under a CJK locale.
+- A thread with no forks renders as a straight column one lane — two columns — wide, and reads no
+  worse than an indented list would.
+- Every gutter character is one column at the default width. (Under a CJK locale box-drawing widens
+  along with the frame's borders; accepted 2026-10-25.)
 - Selecting a day in the calendar narrows the table to notes created on that day, in local time,
   including one captured within an hour of local midnight.
 - At 80 columns the layout drops panes in the defined order rather than squeezing all three, and
@@ -663,7 +697,7 @@ is `docs/runs/stage6/log.md`.
   *in code* as well: core truncates `ancestors` at the first missing note and never descends through
   one, so a purged mid-thread note yields a smaller graph rooted at the highest ancestor that still
   resolves. It will look wrong the first time something is purged mid-thread.
-- What `Enter` does now that `t` shows a thread.
+- What `Enter` does now that the sidebar always shows the thread.
 - Whether `App` should hold a real timezone rather than a `FixedOffset` — see the calendar item.
 - The local-midnight policy that day filtering needs.
 - Which key moves focus between the sidebar and the table, given `Tab` already cycles views.
