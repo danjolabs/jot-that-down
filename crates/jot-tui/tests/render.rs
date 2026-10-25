@@ -4,8 +4,8 @@
 //! at a fixed size, which makes a frame a pure function of the app state and a fixed clock — no
 //! pty, no terminal, no timing.
 //!
-//! The clock is pinned rather than `Utc::now()` on purpose: the age column would otherwise make
-//! every snapshot fail a second after it was taken.
+//! The clock is pinned rather than `Utc::now()` on purpose: the `edited` column would otherwise
+//! make every snapshot fail a second after it was taken.
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use jot_core::query::Draft;
@@ -19,13 +19,19 @@ use ratatui::style::Modifier;
 use tempfile::TempDir;
 use unicode_width::UnicodeWidthStr;
 
-/// The size every snapshot renders at. Wide enough for a title and the meta column, short enough
+/// The size every snapshot renders at. Wide enough for a title and its age, short enough
 /// that a snapshot stays readable in a diff.
 const SIZE: (u16, u16) = (72, 12);
 
-/// A fixed "now", so the relative-age column is stable.
+/// A fixed "now", so the relative `edited` column is stable.
+///
+/// **In 2025, a year before any note these tests create.** The `created` column prints `Oct 25`
+/// for a note from the clock's own year and `Oct 2026` for any other, and the two are different
+/// widths. With the clock in the same year as the notes, every snapshot would change shape on the
+/// first of January, when the notes' year moves past the clock's. A clock in a year the notes can
+/// never be from keeps every date in the one eight-column form, which [`mask_dates`] then pins.
 fn clock() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap()
+    Utc.with_ymd_and_hms(2025, 9, 4, 12, 0, 0).unwrap()
 }
 
 /// A vault with the given titles, oldest first.
@@ -52,17 +58,22 @@ fn render(app: &mut App) -> String {
 
 /// A width wide enough for all three panes.
 ///
-/// 22 columns of sidebar, 40 of list — `LIST_MIN` — and the reader in what is left. It was 110
-/// while the frame carried two panes; the sidebar moved the threshold, and 110 is now a frame
-/// that drops the reader by the rule the layout has always had rather than by anything new.
-const WIDE: (u16, u16) = (112, 12);
+/// 30 columns of sidebar, 40 of list — `LIST_MIN` — and the reader in what is left. It was 110
+/// while the frame carried two panes and 112 while the sidebar was 22 columns; the sidebar grew to
+/// 30 (2026-10-25) and the threshold moved with it, by the rule the layout has always had.
+const WIDE: (u16, u16) = (120, 12);
 
-/// A frame wide enough that the list keeps its full meta column beside the other two panes.
+/// A frame wide enough that the table keeps its counts column beside the other two panes.
 ///
-/// At [`WIDE`] the list is squeezed to `LIST_MIN` and the meta cell degrades to the age alone —
-/// which is the list's own rule working exactly as written, and therefore the wrong frame to look
-/// for the counts in.
-const ROOMY: (u16, u16) = (130, 12);
+/// At [`WIDE`] the list is squeezed to `LIST_MIN` and the counts column is dropped, then the time
+/// the view is not sorted by — which is the table's own rule working exactly as written, and
+/// therefore the wrong frame to look for the counts in. 170 is where the list reaches `LIST_MAX`,
+/// and a quoted thread's counts beside both times needs nearly all of it.
+const ROOMY: (u16, u16) = (170, 12);
+
+/// The calendar's weekday header as the sidebar paints it: each day centred in a four-column cell.
+/// What the pane-layout tests look for to ask "is the sidebar on screen".
+const WEEKDAYS: &str = "Mo  Tu  We  Th  Fr  Sa  Su";
 
 /// A frame that carries the sidebar and the list and no reader — the default terminal, and the
 /// middle band of the drop order.
@@ -155,6 +166,7 @@ fn normalise(frame: String, app: &App) -> String {
             for id in &ids {
                 out = replace_cell(&out, id);
             }
+            out = mask_header(&out);
             // An overlay can land on top of a row and leave only the front of an id showing. That
             // stub is still random, so it still has to go — masked to its own width, which needs
             // no compensating fill.
@@ -164,6 +176,7 @@ fn normalise(frame: String, app: &App) -> String {
                 }
             }
             out = mask_ages(&out);
+            out = mask_dates(&out);
             out = mask_dots(&out);
             // Give back what the mask took, so the border stays where it was painted.
             let fill = before.saturating_sub(out.width());
@@ -185,8 +198,8 @@ fn normalise(frame: String, app: &App) -> String {
 
 /// Replace every relative age in a line with a fixed-width token.
 ///
-/// The ages are the other thing in a frame that nothing can pin. A note's `created_at` is decoded
-/// from a UUIDv7 minted at test time while [`clock`] is fixed, so the *text* moves with the hour —
+/// The ages are the other thing in a frame that nothing can pin. A note's `edited` time is the
+/// file's mtime, written at test time while [`clock`] is fixed, so the *text* moves with the hour —
 /// and, worse, so does its *width*: `4h` is two columns and `ahead` is five. That is a bomb on a
 /// timer, and it went off. These snapshots were recorded in the morning and began failing at noon,
 /// when real time passed the fixed clock and every age flipped from `4h` to `ahead`, shifting three
@@ -217,6 +230,35 @@ fn mask_ages(line: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// Replace every `created` date in a line with [`DATE_MASK`].
+///
+/// A note's `created` date is the day the suite ran, so it moves every day. Under [`clock`] it is
+/// always the `Oct 2026` form — eight columns, the width of the mask — so substituting changes the
+/// text and never the layout. The calendar's own title is the same shape and is left alone: it is
+/// the clock's month, which is pinned, and it opens a border (`┌ Sep 2025`).
+fn mask_dates(line: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mut out = line.to_string();
+    for month in MONTHS {
+        let mut from = 0;
+        while let Some(found) = out[from..].find(&format!("{month} ")) {
+            let at = from + found;
+            let year = out.get(at + 4..at + 8).unwrap_or("");
+            let in_title = out[..at].ends_with("\u{250c} ");
+            if year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit()) && !in_title {
+                out.replace_range(at..at + 8, DATE_MASK);
+            }
+            from = at + 4;
+        }
+    }
+    out
+}
+
+/// What a `created` date is masked to: the eight columns of the `Oct 2026` form.
+const DATE_MASK: &str = "MMM YYYY";
 
 /// Blank out the calendar's dots, which are on a timer of their own.
 ///
@@ -255,6 +297,29 @@ const AGE_MASK: &str = "[age]";
 /// The token an id cell is masked to: thirteen columns of id and two of gap, which is the column
 /// the list paints in every vault that does not capture twice in one millisecond.
 const MASK: &str = "id-----------  ";
+
+/// Give the table header's `id` cell the width [`MASK`] gives the ids under it.
+///
+/// The header's `id` is padded to the id column, and the id column is as wide as the widest id on
+/// screen — thirteen characters on one run, fourteen on the next when two notes share a
+/// millisecond. Masking the ids and not their header would leave the header's padding as the one
+/// random width in an otherwise fixed frame. Recognised as `id` followed by blanks and the start of
+/// the title label, which no row and no note body produces.
+fn mask_header(line: &str) -> String {
+    let Some(at) = line.find(" id ") else {
+        return line.to_string();
+    };
+    let rest = &line[at + " id".len()..];
+    let label = rest.trim_start_matches(' ');
+    if !label.starts_with("ti") {
+        return line.to_string();
+    }
+    format!(
+        "{} id{}{label}",
+        &line[..at],
+        " ".repeat(MASK.len() - "id".len())
+    )
+}
 
 /// A `len`-character stand-in for a truncated id.
 fn stub(len: usize) -> String {
@@ -434,6 +499,7 @@ fn a_wide_frame_puts_a_reader_beside_the_list() {
         ("older", "an earlier thought"),
         ("the note in focus", "the body of the focused note"),
     ]);
+    app.dispatch(Action::ToggleReader);
     let frame = render_at(&mut app, WIDE.0, WIDE.1);
 
     assert!(
@@ -450,6 +516,7 @@ fn a_wide_frame_puts_a_reader_beside_the_list() {
 #[test]
 fn a_narrow_frame_drops_the_reader_rather_than_squeezing_both() {
     let (_tmp, mut app) = bodies(&[("a note", "a body nobody can see")]);
+    app.dispatch(Action::ToggleReader);
     let frame = render_at(&mut app, 72, 12);
 
     assert!(
@@ -466,6 +533,7 @@ fn a_narrow_frame_drops_the_reader_rather_than_squeezing_both() {
 #[test]
 fn moving_the_selection_moves_the_reader_with_it() {
     let (_tmp, mut app) = bodies(&[("older", "the older body"), ("newer", "the newer body")]);
+    app.dispatch(Action::ToggleReader);
 
     // Newest first, so the selection starts on `newer`.
     let first = render_at(&mut app, WIDE.0, WIDE.1);
@@ -480,6 +548,7 @@ fn moving_the_selection_moves_the_reader_with_it() {
 #[test]
 fn the_reader_names_the_focused_note_by_its_full_id() {
     let (_tmp, mut app) = vault(&["a note"]);
+    app.dispatch(Action::ToggleReader);
     let raw = render_raw_at(&mut app, WIDE.0, WIDE.1);
     let id = app.focused().unwrap().note.id;
 
@@ -502,6 +571,7 @@ fn no_row_overflows_the_frame_beside_a_reader() {
     // a narrowed list is exactly where the column arithmetic would first fail to close.
     let (_tmp, mut app) =
         vault(&["a title long enough that it cannot possibly fit inside the column it is given"]);
+    app.dispatch(Action::ToggleReader);
     let frame = render_raw_at(&mut app, WIDE.0, WIDE.1);
 
     for line in frame.lines() {
@@ -516,6 +586,7 @@ fn no_row_overflows_the_frame_beside_a_reader() {
 #[test]
 fn an_empty_list_leaves_the_reader_saying_so_rather_than_blank() {
     let (_tmp, mut app) = vault(&[]);
+    app.dispatch(Action::ToggleReader);
     let frame = render_at(&mut app, WIDE.0, WIDE.1);
     assert!(
         frame.contains("Nothing selected"),
@@ -565,7 +636,9 @@ fn every_row_starts_its_title_in_the_same_column() {
                 .unwrap_or_else(|| panic!("`{short}` is not on screen:\n{frame}"));
             let at = line.find(short.as_str()).unwrap();
             let rest = &line[at + short.len()..];
-            at + short.len() + (rest.len() - rest.trim_start_matches(' ').len())
+            // Columns, not bytes, up to the id: the selected row's `◉` is three bytes wide in a
+            // string and one column on screen.
+            line[..at].width() + short.len() + (rest.len() - rest.trim_start_matches(' ').len())
         })
         .collect();
 
@@ -591,17 +664,119 @@ fn the_timeline_opens_on_every_note_rather_than_thread_roots() {
 
 #[test]
 fn the_marker_distinguishes_a_reply_from_a_note_on_its_own() {
+    // Newest first, so the selection opens on the reply, and the quoter sits between it and the
+    // parent it is linked to. The lane runs down from the selection to its parent and nowhere
+    // else; the relation slot says which row is a reply, which a head, and which neither.
     let (_tmp, mut app) = threaded();
     let frame = render_at(&mut app, WIDE.0, WIDE.1);
 
-    assert!(
-        frame.contains('\u{21b3}'),
-        "a reply must not look like a standalone note — the whole reason flat was hiding:\n{frame}"
+    assert_eq!(
+        [
+            marker_of(&frame, "a reply"),
+            marker_of(&frame, "a quoter"),
+            marker_of(&frame, "the head"),
+        ],
+        ["╭◉↳  ", "│  ❯ ", "╰►⚑  "],
+        "a reply must not look like a standalone note — the whole reason flat was hiding — and \
+         the lane must join the selection to its parent through the row between:\n{frame}"
     );
-    assert!(
-        frame.contains('\u{2691}'),
-        "and the head of the thread must say so:\n{frame}"
+    assert_frame!(frame);
+}
+
+#[test]
+fn a_parent_above_the_selection_turns_the_lane_upside_down() {
+    // Oldest first puts the parent at the top and the reply at the bottom. The corners point at
+    // each other whichever way round the two rows are.
+    let (_tmp, mut app) = threaded();
+    app.dispatch(Action::NextView); // files
+    app.dispatch(Action::CycleSort); // oldest
+    app.dispatch(Action::Bottom);
+    let frame = render_at(&mut app, WIDE.0, WIDE.1);
+
+    assert_eq!(
+        [
+            marker_of(&frame, "the head"),
+            marker_of(&frame, "a quoter"),
+            marker_of(&frame, "a reply"),
+        ],
+        ["╭►⚑  ", "│  ❯ ", "╰◉↳  "],
+        "{frame}"
     );
+}
+
+#[test]
+fn a_narrow_table_keeps_the_time_its_view_is_sorted_by() {
+    // Too narrow for both times beside the title: the files view keeps `created` while it is
+    // sorted by creation, and `edited` once it is sorted by edit time — the column the order is
+    // about is the one that stays.
+    let (_tmp, mut app) = vault(&["b note", "a note"]);
+    let header = |app: &mut App| {
+        let frame = render_raw_at(app, 40, 8);
+        frame
+            .lines()
+            .find(|line| line.contains("title"))
+            .unwrap_or_else(|| panic!("no header row:\n{frame}"))
+            .to_string()
+    };
+
+    app.dispatch(Action::NextView); // files, newest first
+    let by_created = header(&mut app);
+    assert!(
+        by_created.contains("created") && !by_created.contains("edited"),
+        "{by_created}"
+    );
+
+    app.dispatch(Action::CycleSort); // oldest
+    app.dispatch(Action::CycleSort); // edited
+    let by_edited = header(&mut app);
+    assert!(
+        by_edited.contains("edited") && !by_edited.contains("created"),
+        "{by_edited}"
+    );
+}
+
+#[test]
+fn the_table_keeps_the_selection_on_screen_below_its_header() {
+    // Twenty notes in a pane of eight rows once the header has taken one. Walking to the oldest
+    // must scroll the table, keep the header where it is, and put the selected row on screen.
+    let titles: Vec<String> = (0..20).map(|n| format!("note {n:02}")).collect();
+    let (_tmp, mut app) = vault(&titles.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let list_rows = |frame: &str| -> Vec<String> {
+        frame
+            .lines()
+            .skip(1)
+            .take(SIZE.1 as usize - 3)
+            .map(|line| line.split('\u{2502}').nth(3).unwrap_or("").to_string())
+            .collect()
+    };
+
+    for step in 0..20 {
+        let rows = list_rows(&render(&mut app));
+        let want = format!("note {:02}", 19 - step);
+        assert!(
+            rows[0].contains("title"),
+            "at step {step} the header scrolled away: {rows:?}"
+        );
+        assert!(
+            rows[1..].iter().any(|row| row.contains(&want)),
+            "at step {step} the selected `{want}` is off screen: {rows:?}"
+        );
+        app.dispatch(Action::MoveDown);
+    }
+}
+
+#[test]
+fn one_hundred_and_twenty_by_thirty_carries_every_pane() {
+    // The smallest frame that carries all of it: the calendar with the thread graph under it, the
+    // table, and the reader.
+    let (_tmp, mut app) = forked();
+    app.dispatch(Action::Bottom);
+    app.dispatch(Action::ToggleReader);
+    let frame = render_at(&mut app, 120, 30);
+    assert!(frame.contains(WEEKDAYS), "{frame}");
+    assert!(frame.contains(" thread "), "{frame}");
+    assert!(frame.contains("the body of the root"), "{frame}");
     assert_frame!(frame);
 }
 
@@ -617,7 +792,7 @@ fn a_quote_fills_the_second_slot_without_moving_the_first() {
     let columns: Vec<usize> = frame
         .lines()
         .filter(|line| line.starts_with('\u{2502}') && line.contains(MASK.trim_end()))
-        .map(|line| line.find(MASK.trim_end()).unwrap())
+        .map(|line| line[..line.find(MASK.trim_end()).unwrap()].width())
         .collect();
     assert_eq!(columns.len(), 3, "three rows expected:\n{frame}");
     assert!(
@@ -636,12 +811,14 @@ fn a_quote_fills_the_second_slot_without_moving_the_first() {
 
 #[test]
 fn eighty_columns_carries_the_sidebar_and_the_list_and_no_reader() {
-    // The terminal that matters, and the middle band of the drop order: 22 columns of calendar,
-    // 58 of list, and the reader dropped by its own rule rather than squeezed in beside them.
+    // The terminal that matters, and the middle band of the drop order: 30 columns of sidebar,
+    // 50 of list, and the reader dropped by its own rule rather than squeezed in beside them.
     let (_tmp, mut app) = bodies(&[
         ("older", "an earlier thought"),
         ("the note in focus", "the body of the focused note"),
     ]);
+    // Wanted, so what drops it is the width rule and not the default.
+    app.dispatch(Action::ToggleReader);
     let frame = render_at(&mut app, EIGHTY.0, EIGHTY.1);
 
     assert!(
@@ -649,8 +826,8 @@ fn eighty_columns_carries_the_sidebar_and_the_list_and_no_reader() {
         "80 columns cannot carry a calendar and two bordered panels:\n{frame}"
     );
     assert!(
-        frame.contains("Mo Tu We Th Fr Sa Su"),
-        "but it carries the calendar, with 18 columns to spare:\n{frame}"
+        frame.contains(WEEKDAYS),
+        "but it carries the calendar, with 10 columns to spare:\n{frame}"
     );
     assert_eq!(
         ui::reader_text_width(EIGHTY.0, EIGHTY.1),
@@ -661,15 +838,16 @@ fn eighty_columns_carries_the_sidebar_and_the_list_and_no_reader() {
 }
 
 #[test]
-fn a_hundred_and_twelve_columns_carries_all_three_panes() {
+fn a_hundred_and_twenty_columns_carries_all_three_panes() {
     let (_tmp, mut app) = bodies(&[
         ("older", "an earlier thought"),
         ("the note in focus", "the body of the focused note"),
     ]);
+    app.dispatch(Action::ToggleReader);
     let frame = render_at(&mut app, WIDE.0, 16);
 
     assert!(
-        frame.contains("Mo Tu We Th Fr Sa Su"),
+        frame.contains(WEEKDAYS),
         "the sidebar is the left pane:\n{frame}"
     );
     assert!(
@@ -684,18 +862,19 @@ fn the_panes_drop_in_the_settled_order_as_the_frame_narrows() {
     // Reader first, then sidebar, then the list alone — read off the painted frame rather than
     // off the geometry, because what is on screen is the thing being promised.
     let (_tmp, mut app) = bodies(&[("a note", "a body to look for")]);
+    app.dispatch(Action::ToggleReader);
 
-    let calendar = |frame: &str| frame.contains("Mo Tu We Th Fr Sa Su");
+    let calendar = |frame: &str| frame.contains(WEEKDAYS);
     let reader = |frame: &str| frame.contains("a body to look for");
 
-    let three = render_at(&mut app, 112, 16);
+    let three = render_at(&mut app, 120, 16);
     assert!(calendar(&three) && reader(&three));
 
-    let two = render_at(&mut app, 111, 16);
+    let two = render_at(&mut app, 119, 16);
     assert!(calendar(&two), "the sidebar stays:\n{two}");
     assert!(!reader(&two), "the reader is what goes first:\n{two}");
 
-    let one = render_at(&mut app, 61, 16);
+    let one = render_at(&mut app, 69, 16);
     assert!(!calendar(&one), "and the sidebar goes next:\n{one}");
     assert!(!reader(&one));
     assert!(
@@ -707,6 +886,8 @@ fn the_panes_drop_in_the_settled_order_as_the_frame_narrows() {
 #[test]
 fn hiding_the_reader_gives_the_whole_main_pane_to_the_list() {
     let (_tmp, mut app) = bodies(&[("a note", "a body to look for")]);
+    // It starts closed (user decision, 2026-10-26); open it so there is something to hide.
+    app.dispatch(Action::ToggleReader);
     let with = render_at(&mut app, WIDE.0, 16);
     assert!(with.contains("a body to look for"));
 
@@ -717,7 +898,7 @@ fn hiding_the_reader_gives_the_whole_main_pane_to_the_list() {
         "the toggle takes the panel away:\n{without}"
     );
     assert!(
-        without.contains("Mo Tu We Th Fr Sa Su"),
+        without.contains(WEEKDAYS),
         "and takes nothing else with it:\n{without}"
     );
 
@@ -728,20 +909,18 @@ fn hiding_the_reader_gives_the_whole_main_pane_to_the_list() {
 
 #[test]
 fn hiding_the_sidebar_is_the_only_way_a_toggle_adds_anything() {
-    // 100 columns is under the 112 three panes need and over the 90 two need, so the reader is
-    // reachable there only by spending the calendar's 22 columns on it. That is the toggle
+    // 100 columns is under the 120 three panes need and over the 90 two need, so the reader is
+    // reachable there only by spending the sidebar's 30 columns on it. That is the toggle
     // working in the one direction it may: by removal.
     let (_tmp, mut app) = bodies(&[("a note", "a body to look for")]);
+    app.dispatch(Action::ToggleReader);
     let with = render_at(&mut app, 100, 16);
-    assert!(with.contains("Mo Tu We Th Fr Sa Su"));
+    assert!(with.contains(WEEKDAYS));
     assert!(!with.contains("a body to look for"));
 
     app.dispatch(Action::ToggleSidebar);
     let without = render_at(&mut app, 100, 16);
-    assert!(
-        !without.contains("Mo Tu We Th Fr Sa Su"),
-        "the calendar goes:\n{without}"
-    );
+    assert!(!without.contains(WEEKDAYS), "the calendar goes:\n{without}");
     assert!(
         without.contains("a body to look for"),
         "and the reader fits in what it was using:\n{without}"
@@ -754,6 +933,8 @@ fn a_toggle_cannot_force_a_pane_into_a_frame_too_narrow_for_it() {
     // get nothing: the automatic rule wins, and a two-column reader painted over the list would
     // be the toggle overriding it in the direction it may not.
     let (_tmp, mut app) = bodies(&[("a note", "a body to look for")]);
+    // Both wanted to begin with, so the loop below turns both off and then asks for both back.
+    app.dispatch(Action::ToggleReader);
     let alone = render_at(&mut app, 60, 16);
 
     for _ in 0..2 {
@@ -816,10 +997,11 @@ fn the_calendar_marks_today_without_spending_a_column_on_it() {
         .unwrap();
     let buffer = terminal.backend().buffer();
 
-    // `clock()` is the 4th of September and the app's zone is UTC, so today is the 4th — in both
-    // calendars, which is 4 reversed cells' worth of two columns each.
+    // `clock()` is the 4th of September 2025 and the app's zone is UTC, so today is the 4th: one
+    // reversed number, two columns wide, and nothing else in the sidebar reversed.
+    let sidebar = SIDEBAR_INNER as u16 + 2;
     let marked: String = (0..20)
-        .flat_map(|y| (0..22).map(move |x| (x, y)))
+        .flat_map(|y| (0..sidebar).map(move |x| (x, y)))
         .filter(|at| {
             buffer[*at]
                 .style()
@@ -836,6 +1018,21 @@ fn the_calendar_marks_today_without_spending_a_column_on_it() {
     );
 }
 
+/// The list's marker column on the row titled `title`: its five columns, as painted.
+///
+/// Read by column, past the sidebar and the list's own border, because the selection lane's `│`
+/// is the same character as a panel border and splitting on it would cut the marker in half.
+fn marker_of(frame: &str, title: &str) -> String {
+    frame
+        .lines()
+        .map(|line| line.chars().skip(SIDEBAR_INNER + 3).collect::<String>())
+        .find(|list| list.contains(title))
+        .unwrap_or_else(|| panic!("`{title}` is not in the list:\n{frame}"))
+        .chars()
+        .take(5)
+        .collect()
+}
+
 /// The sidebar's inner columns, one `Vec<char>` per row of the frame.
 ///
 /// Indexed by *column* rather than by byte, because the frame's borders are three bytes each and
@@ -850,7 +1047,9 @@ fn sidebar_rows(frame: &str) -> Vec<Vec<char>> {
 /// A vault holding one thread and one note that quotes its root, synced and loaded.
 ///
 /// Built through the workspace rather than by hand because the marker is a function of `Row`, and
-/// `Row`'s relation fields are exactly what the index computes.
+/// `Row`'s relation fields are exactly what the index computes. The quoter is written between the
+/// head and its reply, so in either creation order it is the row between a reply and its parent —
+/// which is what puts a `│` in the selection lane.
 fn threaded() -> (TempDir, App) {
     use jot_core::query::Draft;
 
@@ -858,15 +1057,16 @@ fn threaded() -> (TempDir, App) {
     let mut ws = Workspace::init(tmp.path()).unwrap();
     let root = ws.create(Draft::new("body").title("the head")).unwrap();
     let root = root.meta().id;
-    ws.create(Draft::new("body").title("a reply").reply_to(root))
-        .unwrap();
     ws.create(Draft::new("body").title("a quoter").quote(root))
+        .unwrap();
+    ws.create(Draft::new("body").title("a reply").reply_to(root))
         .unwrap();
     ws.sync().unwrap();
     (tmp, App::new(ws))
 }
 
-/// A vault holding one forking thread, synced and loaded with the graph toggled on.
+/// A vault holding one forking thread, synced and loaded. The graph needs nothing pressed: it is
+/// always under the calendar.
 ///
 /// The shape is the one `stage6.md`'s acceptance criterion names — "a thread with a fork" — and
 /// it is deliberately the smallest tree with every feature the sweep has: a trunk, a fork, and a
@@ -890,9 +1090,7 @@ fn forked() -> (TempDir, App) {
         .unwrap();
     ws.sync().unwrap();
 
-    let mut app = App::new(ws);
-    app.dispatch(Action::ToggleGraph);
-    (tmp, app)
+    (tmp, App::new(ws))
 }
 
 /// The sidebar's inner rows as text, one string per *content* row.
@@ -916,34 +1114,24 @@ fn sidebar_text(frame: &str) -> Vec<String> {
 }
 
 /// Columns inside the sidebar's borders. `ui::SIDEBAR_WIDTH` less the two it spends on them.
-const SIDEBAR_INNER: usize = 20;
+const SIDEBAR_INNER: usize = 28;
 
 /// Tall enough that the calendar's 15 rows leave the graph a pane worth drawing into.
 const TALL: (u16, u16) = (112, 24);
 
 #[test]
-fn the_thread_graph_is_off_until_it_is_toggled() {
-    // The sidebar is the calendar, and it keeps working with the graph off — which is the whole
-    // reason this is a toggle rather than a second permanent panel.
+fn the_thread_graph_is_always_under_the_calendar() {
+    // No key for it (user decision, 2026-10-25): the first frame has it, with nothing pressed, and
+    // it costs the calendar nothing.
     let (_tmp, mut app) = forked();
-    app.dispatch(Action::ToggleGraph);
-
-    let off = render_at(&mut app, TALL.0, TALL.1);
+    let first = render_at(&mut app, TALL.0, TALL.1);
     assert!(
-        !off.contains(" thread "),
-        "nothing announces a panel that is not there:\n{off}"
-    );
-    assert!(off.contains("Mo Tu We Th Fr Sa Su"));
-
-    app.dispatch(Action::ToggleGraph);
-    let on = render_at(&mut app, TALL.0, TALL.1);
-    assert!(
-        on.contains(" thread "),
-        "and the same key brings it back:\n{on}"
+        first.contains(" thread "),
+        "the graph is there from the first frame:\n{first}"
     );
     assert!(
-        on.contains("Mo Tu We Th Fr Sa Su"),
-        "without costing the calendar a row:\n{on}"
+        first.contains(WEEKDAYS),
+        "without costing the calendar a row:\n{first}"
     );
 }
 
@@ -951,7 +1139,7 @@ fn the_thread_graph_is_off_until_it_is_toggled() {
 fn a_forking_thread_is_one_list_with_a_lane_gutter_and_the_root_at_the_top() {
     let (_tmp, mut app) = forked();
     // The timeline is newest first, so the root is the last row. Focusing it is what makes the
-    // `@` land at the top of the graph, which is the reading this test is about.
+    // `◉` land at the top of the graph, which is the reading this test is about.
     app.dispatch(Action::Bottom);
     let frame = render_at(&mut app, TALL.0, TALL.1);
 
@@ -965,15 +1153,16 @@ fn a_forking_thread_is_one_list_with_a_lane_gutter_and_the_root_at_the_top() {
         graph,
         [
             // Root at the top, growing downward: `undotree` is root-at-bottom and a conversation
-            // is not. `@` is the focused note and `*` every other one. The gutter is two columns
-            // because the thread forks once — a linear thread would be one — and `a follow up` is
-            // drawn after `second answer` because the sweep is chronological, which is also why
-            // it sits in the trunk's lane rather than under its own parent's row.
-            "@  the question",
-            "|\\",
-            "*| first answer",
-            "|* second answer",
-            "*  a follow up",
+            // is not. `◉` is the focused note and `●` every other one. The gutter is two lanes,
+            // each a glyph and a spacer, because the thread forks once — a linear thread would be
+            // one — and `a follow up` is drawn after `second answer` because the sweep is
+            // chronological, which is also why it sits in the trunk's lane rather than under its
+            // own parent's row.
+            "◉    the question",
+            "├─╮",
+            "● │  first answer",
+            "│ ●  second answer",
+            "●    a follow up",
         ],
         "the graph is not the shape it should be:\n{frame}"
     );
@@ -981,20 +1170,21 @@ fn a_forking_thread_is_one_list_with_a_lane_gutter_and_the_root_at_the_top() {
 }
 
 #[test]
-fn the_gutter_carries_nothing_wider_than_one_column_under_a_cjk_locale() {
-    // The acceptance criterion, read off a painted frame rather than off the glyph table: every
-    // character the sidebar draws must be the same width in both locales, or the grid and the
-    // gutter come apart under `LANG=ja_JP.UTF-8`.
+fn the_gutter_carries_nothing_wider_than_one_column() {
+    // Read off a painted frame rather than off the glyph table. This used to demand the same width
+    // under a CJK locale, which kept the gutter ASCII; the user chose box-drawing lines on
+    // 2026-10-25 instead, because the frame's own border `┌─│┐` is the same East Asian Ambiguous
+    // set, so a terminal that widens Ambiguous has already broken the panel the gutter sits in.
+    // What is left to catch is a wide character or an emoji in a fixed-width gutter.
     let (_tmp, mut app) = forked();
     let frame = render_raw_at(&mut app, TALL.0, TALL.1);
 
     for row in sidebar_text(&frame) {
         for c in row.chars() {
-            let s = c.to_string();
             assert_eq!(
-                UnicodeWidthStr::width_cjk(s.as_str()),
-                s.width(),
-                "`{c}` (U+{:04X}) is Ambiguous and would take two columns under a CJK locale",
+                c.to_string().width(),
+                1,
+                "`{c}` (U+{:04X}) is not one column wide",
                 c as u32
             );
         }
@@ -1007,11 +1197,11 @@ fn the_graph_follows_the_cursor_and_marks_where_you_are() {
     // Newest first, so the surface opens on the leaf and `G` walks back to the root.
     let at_leaf = sidebar_text(&render_at(&mut app, TALL.0, TALL.1));
     assert!(
-        at_leaf.contains(&"@  a follow up".to_string()),
+        at_leaf.contains(&"◉    a follow up".to_string()),
         "the mark starts where the cursor is: {at_leaf:?}"
     );
     assert!(
-        at_leaf.contains(&"*  the question".to_string()),
+        at_leaf.contains(&"●    the question".to_string()),
         "and the thread is still drawn from its root — `thread(focus)` alone would have hidden \
          everything above the leaf: {at_leaf:?}"
     );
@@ -1019,11 +1209,11 @@ fn the_graph_follows_the_cursor_and_marks_where_you_are() {
     app.dispatch(Action::Bottom);
     let at_root = sidebar_text(&render_at(&mut app, TALL.0, TALL.1));
     assert!(
-        at_root.contains(&"@  the question".to_string()),
+        at_root.contains(&"◉    the question".to_string()),
         "the mark must move with the cursor: {at_root:?}"
     );
     assert!(
-        at_root.contains(&"*  a follow up".to_string()),
+        at_root.contains(&"●    a follow up".to_string()),
         "and nothing else may wear it: {at_root:?}"
     );
 }
@@ -1034,11 +1224,10 @@ fn a_workspace_with_no_replies_gets_a_note_and_a_lane_rather_than_an_empty_panel
     // A single row that says "you are here" is a fact; a bordered box with nothing in it is an
     // affordance that can never fire.
     let (_tmp, mut app) = vault(&["a note on its own"]);
-    app.dispatch(Action::ToggleGraph);
     let sidebar = sidebar_text(&render_at(&mut app, TALL.0, TALL.1));
 
     assert!(
-        sidebar.contains(&"@ a note on its own".to_string()),
+        sidebar.contains(&"◉  a note on its own".to_string()),
         "one lane, one node, one title: {sidebar:?}"
     );
 }
@@ -1067,12 +1256,11 @@ fn a_thread_taller_than_the_pane_keeps_the_focus_and_says_what_it_hid() {
     }
     ws.sync().unwrap();
     let mut app = App::new(ws);
-    app.dispatch(Action::ToggleGraph);
 
     // Newest first, so the top row is the deepest note and `G` walks back to the root.
     for step in 0..12 {
         let sidebar = sidebar_text(&render_at(&mut app, TALL.0, TALL.1));
-        let want = format!("@ note {:02}", 11 - step);
+        let want = format!("◉  note {:02}", 11 - step);
         assert!(
             sidebar.iter().any(|row| row.starts_with(&want)),
             "at step {step} the focus `{want}` is not on screen: {sidebar:?}"
@@ -1118,7 +1306,6 @@ fn a_thread_wider_than_the_gutter_folds_its_lanes_and_keeps_every_title() {
     }
     ws.sync().unwrap();
     let mut app = App::new(ws);
-    app.dispatch(Action::ToggleGraph);
     app.dispatch(Action::Bottom);
 
     // Nine notes and a connector is ten rows, against six of pane, so this also exercises the
@@ -1138,14 +1325,18 @@ fn a_thread_wider_than_the_gutter_folds_its_lanes_and_keeps_every_title() {
         );
     }
     assert!(
-        graph.iter().any(|row| row.contains('+')),
+        graph.iter().any(|row| row.contains('┊')),
         "the fold must say there are lanes it is not drawing: {graph:?}"
     );
+    // Six lanes of two columns, then the gap: no title may start further right than that. A
+    // gutter has spaces in it now, so the title is found by where it starts rather than by where
+    // the gutter's first blank is.
     for row in &graph {
-        let gutter: String = row.chars().take_while(|c| *c != ' ').collect();
-        assert!(
-            gutter.chars().count() <= 6,
-            "`{row}` draws a gutter wider than the cap"
-        );
+        if let Some(title_at) = row.chars().position(char::is_alphanumeric) {
+            assert!(
+                title_at <= 6 * 2 + 1,
+                "`{row}` draws a gutter wider than the cap"
+            );
+        }
     }
 }

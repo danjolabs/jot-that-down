@@ -2,27 +2,27 @@
 source: crates/jot-tui/tests/render.rs
 expression: frame
 ---
-┌ Sep 2026 ──────────┐┌ timeline — every note ───────────────┐┌ id---------------------------------- ──────────┐
-│Mo Tu We Th Fr Sa Su││↳  id-----------  a follow up    [age]││# the question                                  │
-│    1  2  3  4  5  6││↳  id-----------  second answer  [age]││                                                │
-│                    ││↳  id-----------  first answer   [age]││the body of the root                            │
-│ 7  8  9 10 11 12 13││⚑  id-----------  the question   [age]││                                                │
-│                    ││                                      ││                                                │
-│14 15 16 17 18 19 20││                                      ││                                                │
-│                    ││                                      ││                                                │
-│21 22 23 24 25 26 27││                                      ││                                                │
-│                    ││                                      ││                                                │
-│28 29 30            ││                                      ││                                                │
-│                    ││                                      ││                                                │
-│                    ││                                      ││                                                │
-│                    ││                                      ││                                                │
-└────────────────────┘│                                      ││                                                │
-┌ thread ────────────┐│                                      ││                                                │
-│@  the question     ││                                      ││                                                │
-│|\                  ││                                      ││                                                │
-│*| first answer     ││                                      ││                                                │
-│|* second answer    ││                                      ││                                                │
-│*  a follow up      ││                                      ││                                                │
-│                    ││                                      ││                                                │
-└────────────────────┘└──────────────────────────────────────┘└────────────────────────────────────────────────┘
- 4/4  Space  n  r  q  e  x  ·  Tab  f  [  ]  t  /  ·  ?  q
+┌ Sep 2025 ──────────────────┐┌ timeline — every note ─────────────────────────────────────────────────────────┐
+│ Mo  Tu  We  Th  Fr  Sa  Su ││     id             title          counts   created  edited                     │
+│  1   2   3   4   5   6   7 ││  ↳  id-----------  a follow up            MMM YYYY   [age]                     │
+│                            ││  ↳  id-----------  second answer          MMM YYYY   [age]                     │
+│  8   9  10  11  12  13  14 ││  ↳  id-----------  first answer      1 ▸  MMM YYYY   [age]                     │
+│                            ││ ◉⚑  id-----------  the question    2/3 ▸  MMM YYYY   [age]                     │
+│ 15  16  17  18  19  20  21 ││                                                                                │
+│                            ││                                                                                │
+│ 22  23  24  25  26  27  28 ││                                                                                │
+│                            ││                                                                                │
+│ 29  30                     ││                                                                                │
+│                            ││                                                                                │
+│                            ││                                                                                │
+│                            ││                                                                                │
+└────────────────────────────┘│                                                                                │
+┌ thread ────────────────────┐│                                                                                │
+│◉    the question           ││                                                                                │
+│├─╮                         ││                                                                                │
+│● │  first answer           ││                                                                                │
+││ ●  second answer          ││                                                                                │
+│●    a follow up            ││                                                                                │
+│                            ││                                                                                │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────┘
+ 4/4  Space  n  r  q  e  x  ·  Tab  f  [  ]  /  ·  ?  q

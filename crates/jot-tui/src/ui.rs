@@ -6,13 +6,17 @@
 
 use std::collections::BTreeSet;
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
-use jot_core::query::{Ref, Row, State};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Utc};
+use jot_core::query::{FileSort, Ref, Row, State};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Paragraph, Row as TableRow, Table, TableState,
+};
+#[cfg(test)]
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, GraphRow, Lane, Panes, ViewKind, sort_name};
@@ -63,15 +67,20 @@ const LIST_MAX: u16 = 56;
 
 /// Columns the sidebar occupies, its two border columns included.
 ///
-/// Seven day cells of three columns each, less the separator the last cell does not need — 20 —
-/// plus the borders. Fixed rather than a fraction of the frame because a calendar is a *grid*: at
-/// 21 columns it is not a narrower month, it is a week with a day sliced off the end, and every
-/// row below the header lands one column out from the row above it.
-const SIDEBAR_WIDTH: u16 = 22;
+/// Seven day cells of [`DAY_CELL`] columns each — 28 — plus the borders. Fixed rather than a
+/// fraction of the frame because a calendar is a *grid*: one column narrower it is not a narrower
+/// month, it is a week with a day sliced off the end, and every row below the header lands one
+/// column out from the row above it.
+///
+/// It was 22, with three-column cells. The user widened it to 30 (2026-10-25) so the grid could
+/// breathe and the thread graph under it could keep a readable title beside a six-lane gutter; see
+/// [`MAX_LANES`]. The eight columns come out of the reader, never the list: [`split_main`] still
+/// gives the list its 40–56, and only the threshold at which the reader fits moved.
+const SIDEBAR_WIDTH: u16 = 30;
 
 /// Narrower than this and the frame carries no sidebar.
 ///
-/// [`LIST_MIN`] one pane out: the 22 columns of calendar plus the 40 a list needs to still be a
+/// [`LIST_MIN`] one pane out: the 30 columns of sidebar plus the 40 a list needs to still be a
 /// list. Below this the sidebar is the thing to drop, for the same reason the reader is dropped
 /// below [`READER_MIN_FRAME`] — the list is what the surface is *for*, and a month is context
 /// beside it.
@@ -82,7 +91,7 @@ const SIDEBAR_MIN_FRAME: u16 = SIDEBAR_WIDTH + LIST_MIN;
 /// The list is not optional: it is the surface. Whatever else goes, it gets what is left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneAreas {
-    /// The calendar column, when there is room for it.
+    /// The sidebar — calendar, and thread graph under it — when there is room for it.
     pub sidebar: Option<Rect>,
     /// The row list. Always painted.
     pub list: Rect,
@@ -103,9 +112,9 @@ pub struct PaneAreas {
 ///
 /// | frame | sidebar | list | reader |
 /// | --- | --- | --- | --- |
-/// | 112+ | 22 | 40–56 | the rest |
-/// | 62–111 | 22 | the rest | — |
-/// | under 62 | — | the whole frame | — |
+/// | 120+ | 30 | 40–56 | the rest |
+/// | 70–119 | 30 | the rest | — |
+/// | under 70 | — | the whole frame | — |
 ///
 /// (Hide the sidebar and the reader comes back at 90, because the main pane is the frame again.)
 ///
@@ -114,8 +123,8 @@ pub struct PaneAreas {
 /// `panes` says what the user *wants*, and this function is what decides. Wanting a pane the
 /// width cannot carry gets nothing: pressing the reader's key at 60 columns must not paint a
 /// two-column panel over the list. The automatic rule wins, and the toggles are an escape hatch in
-/// the one direction — 22 columns of calendar is a quarter of an 80-column terminal, and there has
-/// to be a way to spend it on the list instead.
+/// the one direction — 30 columns of sidebar is well over a third of an 80-column terminal, and
+/// there has to be a way to spend it on the list instead.
 #[must_use]
 pub fn split_frame(area: Rect, panes: Panes) -> PaneAreas {
     let (sidebar, main) = if panes.sidebar && area.width >= SIDEBAR_MIN_FRAME {
@@ -165,21 +174,26 @@ pub fn split_main(area: Rect) -> (Rect, Option<Rect>) {
 /// The run loop's half of the contract in [`split_main`]. `frame_height` costs the status line;
 /// the panel's own borders cost two columns and two rows.
 ///
-/// **Answers for the default pane set** — both side panes wanted — because the run loop holds a
-/// terminal size and not an [`App`], so this is the question it is able to ask. That is the right
-/// answer in the state the surface starts in and stays in until a toggle is pressed; anything
-/// holding the app's own [`Panes`] should ask [`reader_text_width_for`] instead. Getting it wrong
-/// costs a rewrap, not a broken frame: text wrapped for a narrower panel wraps early inside a
-/// wider one.
+/// **Answers for both side panes wanted** — the reader beside the sidebar — so `None` here means
+/// the width rule has no room for a reader, never that one was closed. That is not the default:
+/// the reader starts closed (see [`Panes::default`]), and a default-pane answer would be `None` at
+/// every size. Anything holding the app's own [`Panes`] — the run loop does — should ask
+/// [`reader_text_width_for`] instead.
 #[must_use]
 pub fn reader_text_width(frame_width: u16, frame_height: u16) -> Option<u16> {
-    reader_text_width_for(Panes::default(), frame_width, frame_height)
+    reader_text_width_for(EVERY_PANE, frame_width, frame_height)
 }
+
+/// Both side panes wanted: the most a frame is ever asked to carry.
+const EVERY_PANE: Panes = Panes {
+    sidebar: true,
+    reader: true,
+};
 
 /// [`reader_text_width`], for a caller that knows which panes are wanted.
 ///
-/// The sidebar is 22 columns of the reader's budget, so the two questions have different answers
-/// the moment it is hidden — and between 90 and 112 columns they differ about whether there is a
+/// The sidebar is 30 columns of the reader's budget, so the two questions have different answers
+/// the moment it is hidden — and between 90 and 120 columns they differ about whether there is a
 /// reader at all.
 #[must_use]
 pub fn reader_text_width_for(panes: Panes, frame_width: u16, frame_height: u16) -> Option<u16> {
@@ -226,7 +240,7 @@ fn draw_reader(frame: &mut Frame, area: Rect, app: &App) {
 /// `∙` is U+2219 BULLET OPERATOR, East Asian **Neutral** — one column in every locale, checked in
 /// `every_calendar_glyph_is_one_column_in_every_locale` rather than assumed. The obvious
 /// candidates are traps: `·` (U+00B7), `•` (U+2022) and every box-drawing character are
-/// *Ambiguous* and render two columns under a CJK locale, which in a three-column day cell shifts
+/// *Ambiguous* and render two columns under a CJK locale, which in a four-column day cell shifts
 /// the rest of the week sideways and breaks the grid the whole sidebar width was chosen for.
 const DOT: &str = "\u{2219}";
 
@@ -248,19 +262,26 @@ const CALENDAR_ROWS: u16 = 1 + CALENDAR_WEEKS as u16 * 2;
 
 /// The weekday header, and the source of the sidebar's width.
 ///
-/// Monday first: ISO 8601's week, and the one [`chrono`] counts from. Joined by a single space
-/// this is exactly 20 columns — 7 cells of 2, 6 separators of 1 — which is [`SIDEBAR_WIDTH`]
-/// less its borders.
+/// Monday first: ISO 8601's week, and the one [`chrono`] counts from. Each is centred in a
+/// [`DAY_CELL`]-column cell, so the header is exactly 28 columns — which is [`SIDEBAR_WIDTH`] less
+/// its borders.
 const WEEKDAYS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
-/// The sidebar: the month, and the thread graph under it while that is toggled on.
+/// Columns one day of the grid takes: a blank, the two-column day number, a blank.
+///
+/// The blanks are the grid's separators, split either side of the number rather than all on one
+/// side, so the week sits centred in the pane with one column of air against each border. The dot
+/// row uses the same cell, with the dot under the number's units digit.
+const DAY_CELL: usize = 4;
+
+/// The sidebar: the month, and the thread graph under it.
 ///
 /// `now` is the frame's clock and `app.zone()` the offset it is read in — the same discipline as
 /// everywhere else here. This module never asks the operating system what time it is or where it
 /// is: a rendered frame is a function of the state handed to it, which is what makes a snapshot
 /// worth taking. See [`App::zone`](crate::app::App::zone) for who supplies the offset.
 fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
-    let (calendar, graph) = split_sidebar(area, app.graph_is_open());
+    let (calendar, graph) = split_sidebar(area);
     draw_calendar(frame, calendar, app, now);
     if let Some(graph) = graph {
         draw_graph(frame, graph, app);
@@ -270,11 +291,10 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
 /// The shortest a graph panel is worth drawing: two borders and a single row of content.
 ///
 /// Below this the calendar keeps the whole column. A bordered box with nothing inside it is an
-/// affordance that says a thing is here and then does not show it, which is worse than the key
-/// appearing to do nothing.
+/// affordance that says a thing is here and then does not show it, which is worse than no box.
 const GRAPH_MIN_HEIGHT: u16 = 3;
 
-/// Cut the sidebar into the calendar and, while it is toggled on, the graph beneath it.
+/// Cut the sidebar into the calendar and the graph beneath it.
 ///
 /// The calendar's height is **fixed** at [`CALENDAR_ROWS`] plus its borders rather than shared
 /// proportionally, and that is the whole reason the loser of the two-calendar comparison had to
@@ -282,12 +302,17 @@ const GRAPH_MIN_HEIGHT: u16 = 3;
 /// and everything below it moves with it. So the month takes exactly what a month needs and the
 /// graph takes the remainder, which on a 24-row terminal — minus the status line — is eight rows.
 ///
-/// The graph is dropped when the remainder is under [`GRAPH_MIN_HEIGHT`], by the same rule the
-/// frame drops the reader and then the sidebar: the automatic decision wins, and the toggle is an
-/// escape hatch in the direction that *removes* a pane.
-fn split_sidebar(area: Rect, graph: bool) -> (Rect, Option<Rect>) {
+/// # Always there, except where it cannot be
+///
+/// There is no key for the graph: the user made it permanent on 2026-10-25, reversing the toggle
+/// `stage6.md` had settled on. Two things still take it away, and neither is a want. The sidebar's
+/// own key hides the whole column, graph included, through [`split_frame`]. And the graph is
+/// dropped when the remainder is under [`GRAPH_MIN_HEIGHT`], by the same rule the frame drops the
+/// reader and then the sidebar: the automatic decision wins, and on a short terminal the month
+/// keeps the column rather than sharing it with an empty box.
+fn split_sidebar(area: Rect) -> (Rect, Option<Rect>) {
     let calendar_height = CALENDAR_ROWS + 2;
-    if !graph || area.height < calendar_height + GRAPH_MIN_HEIGHT {
+    if area.height < calendar_height + GRAPH_MIN_HEIGHT {
         return (area, None);
     }
     let chunks = Layout::default()
@@ -346,17 +371,19 @@ fn month_grid(anchor: NaiveDate) -> Vec<[Option<NaiveDate>; 7]> {
     grid
 }
 
-/// The weekday header row, and the top of the grid.
+/// The weekday header row, and the top of the grid: each day centred in its [`DAY_CELL`].
 fn weekday_header() -> Line<'static> {
-    Line::from(Span::styled(WEEKDAYS.join(" "), dim()))
+    let header: String = WEEKDAYS.iter().map(|day| format!(" {day} ")).collect();
+    Line::from(Span::styled(header, dim()))
 }
 
 /// The calendar: the dot on its own row, directly under the day it belongs to.
 ///
-/// Two rows per week — the numbers, then the dots — for [`CALENDAR_ROWS`] in total. The dot sits
-/// under the units digit, which is where the eye is already looking on a right-aligned number, and
-/// an empty day is two spaces rather than a placeholder: a grid of "no" marks says nothing and
-/// reads as noise.
+/// Two rows per week — the numbers, then the dots — for [`CALENDAR_ROWS`] in total. Every day is
+/// one [`DAY_CELL`]: a blank, the number right-aligned in two columns, a blank. The dot sits under
+/// the units digit, which is where the eye is already looking on a right-aligned number, and an
+/// empty day is blank rather than a placeholder: a grid of "no" marks says nothing and reads as
+/// noise.
 ///
 /// # Why the dot gets a row of its own
 ///
@@ -372,26 +399,26 @@ fn calendar(today: NaiveDate, days: &BTreeSet<NaiveDate>) -> Vec<Line<'static>> 
     for week in month_grid(today) {
         let mut numbers = Vec::new();
         let mut dots = Vec::new();
-        for (i, cell) in week.iter().enumerate() {
-            if i > 0 {
-                numbers.push(Span::raw(" "));
-                dots.push(Span::raw(" "));
-            }
+        for cell in week {
             match cell {
                 None => {
-                    numbers.push(Span::raw("  "));
-                    dots.push(Span::raw("  "));
+                    numbers.push(Span::raw(" ".repeat(DAY_CELL)));
+                    dots.push(Span::raw(" ".repeat(DAY_CELL)));
                 }
                 Some(day) => {
+                    // Only the number is styled, so today's reverse video is the two digits and
+                    // not the cell's blanks — which belong to the gaps between days, not to a day.
+                    numbers.push(Span::raw(" "));
                     numbers.push(Span::styled(
                         format!("{:>2}", day.day()),
-                        day_style(*day, today),
+                        day_style(day, today),
                     ));
+                    numbers.push(Span::raw(" "));
                     dots.push(Span::styled(
-                        if days.contains(day) {
-                            format!(" {DOT}")
+                        if days.contains(&day) {
+                            format!("  {DOT} ")
                         } else {
-                            "  ".to_string()
+                            " ".repeat(DAY_CELL)
                         },
                         dim(),
                     ));
@@ -406,9 +433,10 @@ fn calendar(today: NaiveDate, days: &BTreeSet<NaiveDate>) -> Vec<Line<'static>> 
 
 /// How a day number is painted before anything is known about its notes.
 ///
-/// Today is reversed rather than bracketed or arrowed: a two-column cell has no room for a
-/// decoration, and every glyph that would fit is one column of the grid that some locale renders
-/// as two. Reverse video costs nothing and cannot move a column.
+/// Today is reversed rather than bracketed or arrowed: the blanks either side of a number are the
+/// gaps between days, so a bracket there would read as belonging to a neighbour, and every glyph
+/// that would fit is one column of the grid that some locale renders as two. Reverse video costs
+/// nothing and cannot move a column.
 fn day_style(day: NaiveDate, today: NaiveDate) -> Style {
     if day == today {
         Style::default().add_modifier(Modifier::REVERSED)
@@ -419,25 +447,52 @@ fn day_style(day: NaiveDate, today: NaiveDate) -> Style {
 
 // ============================================================================== the thread graph
 
-/// The graph's glyphs. ASCII, and that is a constraint rather than a style.
+/// The graph's glyphs: box-drawing, so the lines join up, in the curved style `jj log` draws.
 ///
-/// `*` node, `@` the focused note, `|` a lane, `/` and `\` the diagonals under a fork, `+` the
-/// fold described in [`MAX_LANES`]. Every one of them is East Asian **Narrow** — one column in any
-/// locale — which is checked in `every_graph_glyph_is_one_column_in_every_locale` rather than
-/// assumed. `undotree` offers a Unicode set as an option and this deliberately does not take it:
-/// `●`, `○`, `│`, `╱`, `╲` and every box-drawing character in U+2500–U+2573 are **Ambiguous** and
-/// render two columns under a CJK locale, which in a fixed gutter is a frame that has come apart.
-const GLYPH_NODE: char = '*';
+/// `●` a note, `◉` the focused one, `│` a lane. On a connector row, the forking note's lane is
+/// `├`, `┤` or `┼` as its forks lie right, left or both; `─` is the horizontal, `┼` where it crosses
+/// a lane passing through; `╮` and `╭` are the outermost fork on each side and `┬` any fork short
+/// of it. `┊` is the fold described in [`MAX_LANES`]. Which of these a lane gets is decided in
+/// [`lane_glyph`], from the row's topology.
+///
+/// # Why not ASCII, which this was
+///
+/// The gutter was `* @ | / \ +`, on the argument that `●` and every box-drawing character are East
+/// Asian **Ambiguous** — two columns under a CJK locale — where ASCII is Narrow everywhere. The
+/// argument was true and protected nothing: the panel's own border, `┌─│┐`, is the same Ambiguous
+/// set. A terminal that renders Ambiguous as wide has already broken the frame the gutter sits in,
+/// and an ASCII gutter inside a broken frame is not a working panel. So the user chose seamless
+/// lines over it, 2026-10-25. (`◉` is Neutral; `●` and the box-drawing set are Ambiguous.)
+///
+/// What is still asserted, in `every_graph_glyph_is_one_column`, is that each glyph is one column
+/// at the default width — which is what catches a stray emoji or wide character in a fixed gutter.
+const GLYPH_NODE: char = '●';
 /// See [`GLYPH_NODE`]. The focused note, so "where am I" is answerable without reading colour.
-const GLYPH_FOCUS: char = '@';
+const GLYPH_FOCUS: char = '◉';
 /// See [`GLYPH_NODE`].
-const GLYPH_LANE: char = '|';
-/// See [`GLYPH_NODE`].
-const GLYPH_FORK_RIGHT: char = '\\';
-/// See [`GLYPH_NODE`].
-const GLYPH_FORK_LEFT: char = '/';
+const GLYPH_LANE: char = '│';
+/// See [`GLYPH_NODE`]. The horizontal on a connector row, in a lane column or a spacer.
+const GLYPH_RULE: char = '─';
+/// See [`GLYPH_NODE`]. A horizontal crossing a lane, or a branch with forks on both sides.
+const GLYPH_CROSS: char = '┼';
+/// See [`GLYPH_NODE`]. The forking note's lane, every fork to its right.
+const GLYPH_BRANCH_RIGHT: char = '├';
+/// See [`GLYPH_NODE`]. The forking note's lane, every fork to its left.
+const GLYPH_BRANCH_LEFT: char = '┤';
+/// See [`GLYPH_NODE`]. The rightmost fork, where the horizontal turns down.
+const GLYPH_FORK_RIGHT: char = '╮';
+/// See [`GLYPH_NODE`]. The leftmost fork, where the horizontal turns down.
+const GLYPH_FORK_LEFT: char = '╭';
+/// See [`GLYPH_NODE`]. A fork the horizontal carries on past.
+const GLYPH_FORK_MID: char = '┬';
 /// See [`GLYPH_NODE`] and [`MAX_LANES`].
-const GLYPH_MORE: char = '+';
+const GLYPH_MORE: char = '┊';
+
+/// Columns one lane takes: its glyph, then a spacer.
+///
+/// The spacer is what a connector's horizontal runs through between two lanes, and a space on
+/// every other row — so the lines read as lines rather than a solid block of vertical strokes.
+const LANE_WIDTH: usize = 2;
 
 /// Columns between the gutter and the title.
 const GRAPH_GAP: usize = 1;
@@ -446,35 +501,42 @@ const GRAPH_GAP: usize = 1;
 ///
 /// # Why there has to be a cap
 ///
-/// The gutter is one column per live lane and the number of live lanes is unbounded in principle:
-/// a note with forty replies opens forty lanes. The sidebar has **20 columns inside its borders**,
-/// which is the whole budget for gutter, gap and title together, so an uncapped gutter is a title
-/// column that can reach zero — and a graph whose labels have been eaten by its own art is not a
-/// minimap, it is a decoration.
+/// The gutter is [`LANE_WIDTH`] columns per live lane and the number of live lanes is unbounded in
+/// principle: a note with forty replies opens forty lanes. The sidebar has **28 columns inside its
+/// borders**, which is the whole budget for gutter, gap and title together, so an uncapped gutter
+/// is a title column that can reach zero — and a graph whose labels have been eaten by its own art
+/// is not a minimap, it is a decoration.
 ///
 /// # Why six
 ///
-/// Six lanes plus the gap leaves 13 columns of title, which is about two short words. Below that a
-/// title stops distinguishing anything and the panel stops answering the question it exists for.
-/// Six simultaneous open branches in one conversation is also well past anything the vault this is
-/// dogfooded against has produced, so the cap is a guard rather than a routine truncation.
+/// Six lanes of two columns plus the gap is 6 × 2 + 1 = 13 columns, which leaves 15 of the 28 for
+/// the title — two or three short words, and more than the 13 the original one-column lanes left in
+/// the old 20. Below about that a title stops distinguishing anything and the panel stops answering
+/// the question it exists for. Six simultaneous open branches in one conversation is also well past
+/// anything the vault this is dogfooded against has produced, so the cap is a guard rather than a
+/// routine truncation.
+///
+/// The history, because the number moved twice in a day: six while a lane was one column wide;
+/// four when the spacer that makes the lines join halved what 20 columns hold; six again when the
+/// sidebar grew to 30 (2026-10-25).
 ///
 /// # What happens past it
 ///
 /// The lanes at and beyond the last drawn column **fold into that column**, and nothing is
 /// dropped: every note still gets its row and its title. The folded column shows the node glyph
 /// when this row's note is out there, [`GLYPH_MORE`] when some other lane is, and a blank when
-/// nothing is. So the *art* degrades and the *list* does not — which is the right way round,
-/// because the list is what carries the titles and the focus.
+/// nothing is. A connector's horizontal that runs past the cap runs into the fold and stops there.
+/// So the *art* degrades and the *list* does not — which is the right way round, because the list
+/// is what carries the titles and the focus.
 const MAX_LANES: usize = 6;
 
 /// The thread graph: the focused note's whole thread as a lane gutter and one title per node.
 ///
-/// **This is a minimap, not a reading view.** Twenty columns hold a gutter and a truncated title
-/// and nothing else; it answers "where am I in this thread, and what else is in it" and refers
-/// everything past that to the reader panel, which is already showing the note. Trying to make it
-/// read — wrapping titles, showing bodies, adding a meta column — is how a 20-column pane becomes
-/// unreadable in both jobs.
+/// **This is a minimap, not a reading view.** Twenty-eight columns hold a gutter and a truncated
+/// title and nothing else; it answers "where am I in this thread, and what else is in it" and
+/// refers everything past that to the reader panel, which is already showing the note. Trying to
+/// make it read — wrapping titles, showing bodies, adding a meta column — is how a 28-column pane
+/// becomes unreadable in both jobs.
 fn draw_graph(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default().borders(Borders::ALL).title(" thread ");
 
@@ -497,15 +559,15 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &App) {
     let inner_height = area.height.saturating_sub(2) as usize;
 
     // One gutter width for the whole panel rather than per row, so the titles form a column. The
-    // widest row decides it, capped; a linear thread is therefore two columns of gutter and gap,
-    // exactly as promised.
+    // widest row decides it, capped; a linear thread is therefore one lane — a glyph and its
+    // spacer — and the gap, three columns before the title.
     let gutter = rows
         .iter()
         .map(|row| row.lanes.len())
         .max()
         .unwrap_or(1)
         .clamp(1, MAX_LANES);
-    let title_width = inner_width.saturating_sub(gutter + GRAPH_GAP);
+    let title_width = inner_width.saturating_sub(gutter * LANE_WIDTH + GRAPH_GAP);
 
     let focus = rows
         .iter()
@@ -532,7 +594,7 @@ fn draw_graph(frame: &mut Frame, area: Rect, app: &App) {
                 Some(text) => Line::from(Span::styled(
                     format!(
                         "{}{}",
-                        " ".repeat(gutter + GRAPH_GAP),
+                        " ".repeat(gutter * LANE_WIDTH + GRAPH_GAP),
                         truncate(&text, title_width)
                     ),
                     dim(),
@@ -573,11 +635,11 @@ fn graph_window(len: usize, focus: usize, height: usize) -> std::ops::Range<usiz
     start..start + height
 }
 
-/// One row: the gutter, a space, and as much of the title as is left.
+/// One row: the gutter, a space, and as much of the title as is left. `gutter` counts lanes.
 fn graph_line(row: &GraphRow, gutter: usize, title_width: usize) -> Line<'static> {
     let focused = row.node.as_ref().is_some_and(|node| node.is_focus);
     let mut spans = vec![
-        Span::styled(fold_gutter(&row.lanes, gutter, focused), dim()),
+        Span::styled(fold_gutter(&row.lanes, gutter, focused), gutter_style()),
         Span::raw(" ".repeat(GRAPH_GAP)),
     ];
 
@@ -601,17 +663,33 @@ fn graph_line(row: &GraphRow, gutter: usize, title_width: usize) -> Line<'static
     Line::from(spans)
 }
 
-/// Render `lanes` into exactly `width` columns, folding anything past the last one.
+/// How lines and the focus mark are painted, in the graph's gutter and the list's selection lane
+/// alike — one style, so the two panes draw the same thing the same way.
+fn gutter_style() -> Style {
+    dim()
+}
+
+/// Render `lanes` into exactly `width` lanes — `width * LANE_WIDTH` columns — folding anything past
+/// the last one.
+///
+/// Each lane is its glyph and then a spacer. The spacer after lane `i` is the horizontal when the
+/// row's connector span runs on past `i`, and a space otherwise; the spacer after the last drawn
+/// lane is always a space, because nothing is to its right.
 ///
 /// See [`MAX_LANES`] for what the fold means and why it is a fold rather than a truncation.
 fn fold_gutter(lanes: &[Lane], width: usize, focused: bool) -> String {
     let node = if focused { GLYPH_FOCUS } else { GLYPH_NODE };
-    (0..width)
-        .map(|at| {
-            let folds = at + 1 == width && lanes.len() > width;
-            if !folds {
-                return lane_glyph(lanes.get(at).copied().unwrap_or(Lane::Empty), node);
-            }
+    // The last drawn lane, when the lanes at and past it have to fold into it.
+    let fold = (lanes.len() > width).then(|| width.saturating_sub(1));
+    // A horizontal that runs past the cap runs into the fold and stops there.
+    let span = connector_span(lanes).map(|(lo, hi)| match fold {
+        Some(fold) => (lo.min(fold), hi.min(fold)),
+        None => (lo, hi),
+    });
+
+    let mut out = String::new();
+    for at in 0..width {
+        out.push(if fold == Some(at) {
             let rest = &lanes[at..];
             if rest.contains(&Lane::Node) {
                 node
@@ -620,22 +698,73 @@ fn fold_gutter(lanes: &[Lane], width: usize, focused: bool) -> String {
             } else {
                 GLYPH_MORE
             }
-        })
-        .collect()
+        } else {
+            lane_glyph(lanes, at, span, node)
+        });
+        let runs_on = span.is_some_and(|(lo, hi)| lo <= at && at < hi);
+        out.push(if runs_on && at + 1 < width {
+            GLYPH_RULE
+        } else {
+            ' '
+        });
+    }
+    out
 }
 
-/// How one lane column is painted. See [`GLYPH_NODE`] for the width rule these all obey.
-fn lane_glyph(lane: Lane, node: char) -> char {
-    match lane {
+/// The leftmost and rightmost lane a connector row's horizontal touches: every `Branch` and fork on
+/// the row. `None` for a note row, which has no horizontal.
+fn connector_span(lanes: &[Lane]) -> Option<(usize, usize)> {
+    let mut joins = (0..lanes.len())
+        .filter(|&at| matches!(lanes[at], Lane::Branch | Lane::ForkLeft | Lane::ForkRight));
+    let lo = joins.next()?;
+    Some((lo, joins.next_back().unwrap_or(lo)))
+}
+
+/// How lane `at` is painted, given the row it is on and that row's connector span.
+///
+/// A lane strictly inside the span is crossed by the horizontal: a lane passing through becomes a
+/// crossing and an empty one becomes the horizontal itself. The `Branch` points at its forks, and a
+/// fork curves down at the end of the span and tees off it short of the end. See [`GLYPH_NODE`] for
+/// the width rule these all obey.
+fn lane_glyph(lanes: &[Lane], at: usize, span: Option<(usize, usize)>, node: char) -> char {
+    let inside = span.is_some_and(|(lo, hi)| lo < at && at < hi);
+    let is_fork = |lane: &Lane| matches!(lane, Lane::ForkLeft | Lane::ForkRight);
+    match lanes.get(at).copied().unwrap_or(Lane::Empty) {
+        Lane::Empty if inside => GLYPH_RULE,
         Lane::Empty => ' ',
+        Lane::Through if inside => GLYPH_CROSS,
         Lane::Through => GLYPH_LANE,
         Lane::Node => node,
-        Lane::ForkRight => GLYPH_FORK_RIGHT,
-        Lane::ForkLeft => GLYPH_FORK_LEFT,
+        // Which side its forks are on is read from the whole row, folded lanes included: a fork
+        // past the cap is still a fork, and the horizontal still leaves towards it.
+        Lane::Branch => match (
+            lanes[..at].iter().any(is_fork),
+            lanes[at + 1..].iter().any(is_fork),
+        ) {
+            (true, true) => GLYPH_CROSS,
+            (true, false) => GLYPH_BRANCH_LEFT,
+            (false, true) => GLYPH_BRANCH_RIGHT,
+            // Not something the sweep draws — a connector exists because there is a fork — and a
+            // line with nothing to branch to is still a line.
+            (false, false) => GLYPH_LANE,
+        },
+        Lane::ForkRight if span.is_some_and(|(_, hi)| at == hi) => GLYPH_FORK_RIGHT,
+        Lane::ForkLeft if span.is_some_and(|(lo, _)| at == lo) => GLYPH_FORK_LEFT,
+        Lane::ForkRight | Lane::ForkLeft => GLYPH_FORK_MID,
     }
 }
 
-/// The row list, which serves all four `Row` views.
+/// The row table, which serves all four `Row` views.
+///
+/// A real [`Table`] with a header row (user decision, 2026-10-25), not a list of pre-padded lines.
+/// The columns are marker, id, title, counts, `created` and `edited`, and their widths are still
+/// decided here, against the rows on screen, by [`list_columns`]; the table only lays out what that
+/// decided, as `Constraint::Length` columns with no spacing of its own.
+///
+/// Two times rather than one age, as `stage6.md` settled on 2026-09-09: `created` as an absolute
+/// date, the fact that does not change, and `edited` as a relative age, read as "how stale is
+/// this". One relative age from `created_at` left the files view's `edited` sort ordering rows by
+/// a value nobody could see.
 fn draw_list(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
     let header = match app.view() {
         ViewKind::Timeline => {
@@ -658,104 +787,150 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         return;
     }
 
-    // Width available for the title: the frame's borders, the marker, the id column and the
-    // right-hand meta column all come off first, so a long title is truncated rather than pushing
-    // the age off the edge.
-    //
-    // The arithmetic has to close exactly. A row is `MARKER + id + title + gap + meta`, and that
-    // must total *at most* the block's inner width — two columns wider and the meta column is
-    // clipped off the right edge, which is invisible in a snapshot because the trailing spaces get
-    // trimmed and it simply looks as though notes have no age.
     let inner = area.width.saturating_sub(2) as usize;
+    // The calendar's zone, so a note's `created` day is the day its dot is on.
+    let zone = app.zone();
 
-    // Both columns are measured against the rows actually on screen rather than fixed. An id is
-    // thirteen characters — the whole millisecond timestamp, which is where the TUI has floored
-    // since stage 5 and where `jot ls` now floors too — until a burst of notes shares a
-    // millisecond and forces a fourteenth; a meta cell is three characters for a lone note and
-    // thirteen for a branching week-old thread. Sizing to the
-    // widest present is what keeps the age beside the title instead of a fixed guess away from it
-    // — which was the visible complaint: a right-aligned column in an 80-column frame puts the
-    // time an inch of whitespace from the title it belongs to.
-    let id_width = app
+    // Every column is measured against the rows actually on screen rather than fixed, and against
+    // its own header, so a label is never clipped by the data under it. An id is thirteen
+    // characters — the whole millisecond timestamp, which is where the TUI has floored since stage
+    // 5 and where `jot ls` now floors too — until a burst of notes shares a millisecond and forces
+    // a fourteenth; a counts cell is empty for a lone note and seven characters for a quoted
+    // branching thread; a `created` date is `Oct 25` this year and `Oct 2025` before it. Sizing to
+    // the widest present is what keeps the times beside the title instead of a fixed guess away
+    // from it — which was the visible complaint: a right-aligned column in an 80-column frame puts
+    // the time an inch of whitespace from the title it belongs to.
+    let widest =
+        |measure: &dyn Fn(&Row) -> usize| app.rows().iter().map(measure).max().unwrap_or(0);
+    let counts = widest(&|row| counts_text(row).width());
+    let natural = Natural {
+        id: widest(&|row| app.short_id(row.note.id).width()).max(HEADER_ID.width()),
+        title: widest(&|row| title_of(row).width()).max(HEADER_TITLE.width()),
+        // A view where no row has a count gets no counts column at all — not an empty one with a
+        // label over it, which would spend seven columns announcing nothing.
+        counts: if counts == 0 {
+            0
+        } else {
+            counts.max(HEADER_COUNTS.width())
+        },
+        created: widest(&|row| created_text(row, zone, now).width()).max(HEADER_CREATED.width()),
+        edited: widest(&|row| edited_text(row, now).width()).max(HEADER_EDITED.width()),
+    };
+    let columns = list_columns(natural, inner, ordered_by(app.view(), app.sort()));
+    let in_trash = app.view() == ViewKind::Trash;
+    let selected = app.selected();
+    let parent = parent_row(app.rows(), selected);
+
+    let rows: Vec<TableRow> = app
         .rows()
         .iter()
-        .map(|row| app.short_id(row.note.id).width())
-        .max()
-        .unwrap_or(0);
-    let widest = |detail| {
-        app.rows()
-            .iter()
-            .map(|row| meta_text(row, now, detail).width())
-            .max()
-            .unwrap_or(0)
-    };
-
-    // The title column is sized to the *titles*, not to the space available. Filling the width
-    // was what stranded the age an inch of whitespace away from the title it describes: a column
-    // of five-character titles in a fifty-column list put every age at column fifty. Sized to
-    // content, the meta follows the titles and the rest of the row stays empty.
-    let title_natural = app
-        .rows()
-        .iter()
-        .map(|row| title_of(row).width())
-        .max()
-        .unwrap_or(0);
-
-    let id_column = if id_width == 0 { 0 } else { id_width + ID_GAP };
-    let avail = inner.saturating_sub(MARKER_WIDTH + id_column);
-
-    // Priority when it does not all fit: the age, then the title, then the counts. The age is the
-    // one part of a row that is never inferable from anything else on screen, and the counts are
-    // the one part that is — a thread's size is visible the moment you open it. So the meta column
-    // degrades to the age alone rather than being clipped, which would have taken the age and left
-    // the counts. Same shape as the key bar dropping labels before it drops keys.
-    let detail = if title_natural.min(TITLE_MAX) + META_GAP + widest(MetaDetail::Full) <= avail {
-        MetaDetail::Full
-    } else {
-        MetaDetail::AgeOnly
-    };
-    let meta_width = widest(detail);
-    let title_width = title_natural
-        .min(avail.saturating_sub(meta_width + META_GAP))
-        .min(TITLE_MAX);
-
-    let columns = Columns {
-        id: id_width,
-        title: title_width,
-        meta: meta_width,
-        detail,
-        in_trash: app.view() == ViewKind::Trash,
-    };
-    let items: Vec<ListItem> = app
-        .rows()
-        .iter()
-        .map(|row| ListItem::new(row_line(row, &app.short_id(row.note.id), columns, now)))
+        .enumerate()
+        .map(|(at, row)| {
+            let id = app.short_id(row.note.id);
+            let link = link_glyphs(at, selected, parent);
+            table_row(row, &id, columns, link, in_trash, (zone, now))
+        })
         .collect();
 
-    let list = List::new(items).block(block).highlight_style(
-        Style::default()
-            .add_modifier(Modifier::BOLD)
-            .fg(Color::Cyan),
-    );
+    let table = Table::new(rows, columns.constraints())
+        .header(header_row(columns))
+        .column_spacing(0)
+        .block(block)
+        .row_highlight_style(
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Cyan),
+        );
 
-    let mut state = ListState::default();
-    state.select(Some(app.selected()));
-    frame.render_stateful_widget(list, area, &mut state);
+    // Rebuilt every frame from the app's selection, as the list's state was: the offset it scrolls
+    // to is a function of the selection and the pane's height, and the table works it out with the
+    // header's row already taken off the height — so the selected row is always on screen below
+    // it.
+    let mut state = TableState::default().with_selected(Some(app.selected()));
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
-/// Columns the leading marker occupies: two glyph slots and a space.
+/// Columns the leading marker occupies: the selection lane's line and its end, a relation slot, a
+/// quote slot, and a space.
 ///
-/// Both slots are reserved on every row, including the rows that fill neither. Letting the quote
-/// glyph slide left when the relation slot is empty would put the same symbol in two different
-/// columns, and a column you have to *read* to locate is not a column.
+/// ```text
+/// ╭◉↳  01a1736a-b5b0  Ch. 3 notes: LSM trees vs…   ← selected
+/// │ ↳  01a1736a-6164  The Pragmatic Programmer
+/// │ ↳  01a1736a-615f  A Philosophy of Software …
+/// ╰►↳  01a1736a-615b  Designing Data-Intensive …   ← its parent
+///   ⚑  01a1736a-6156  Reading list
+/// ```
 ///
-/// Every glyph used here — `⌫`, `⚠`, `↳`, `⚑`, `❯` — is East Asian **Neutral**, so all of them are
-/// one column in any locale. That is a property that was checked rather than assumed: `◆`, `★`,
-/// `┬`, `¶` and `“` are all *Ambiguous* and render two columns wide under a CJK locale, which in a
-/// fixed-width cell is a broken frame in exactly the vault that has CJK titles in it.
-const MARKER_WIDTH: usize = 3;
+/// 1. **Line** — `╭`, `│` or `╰`: the one link from the selected note to its parent, drawn by
+///    [`link_glyphs`].
+/// 2. **End** — `◉` on the selected row, `►` on its parent's.
+/// 3. **Relation** — one glyph from [`relation_marker`].
+/// 4. **Quote** — `❯` when the note quotes another, so a reply that quotes reads `↳❯`.
+///
+/// Every slot is reserved on every row, including the rows that fill none of them. Letting a glyph
+/// slide left when the slot before it is empty would put the same symbol in different columns on
+/// different rows, and a column you have to *read* to locate is not a column.
+///
+/// `⌫`, `⚠`, `↳`, `⚑`, `❯`, `◉` and `►` are East Asian **Neutral**. `╭`, `│` and `╰` are
+/// **Ambiguous**, which the user accepted on 2026-10-25 by the same rule as the thread graph and
+/// the frame borders: a terminal that widens box-drawing has already widened the frame. Each
+/// character is still one column at the default width, which the test checks rather than claiming
+/// the marker is CJK-narrow.
+const MARKER_WIDTH: usize = 5;
 
-/// The first marker slot: where this note sits, or what is wrong with where it sits.
+/// The selection lane's line where it starts, on whichever of the two rows is higher.
+const LINK_TOP: char = '╭';
+/// The selection lane's line where it ends, on whichever of the two rows is lower.
+const LINK_BOTTOM: char = '╰';
+/// The selection lane's end on the parent's row. The selected row's is [`GLYPH_FOCUS`], the mark
+/// the thread graph puts on the same note.
+const LINK_PARENT: char = '►';
+
+/// The row in `rows` holding the parent of the row at `selected`, if it is one of them.
+///
+/// `None` for a note with no parent, and for a parent the list is not showing — trashed, filtered
+/// out by a search, or not a root in the thread-roots timeline. A line has to end on a row, and
+/// there is no row to end on.
+fn parent_row(rows: &[Row], selected: usize) -> Option<usize> {
+    let parent = rows.get(selected)?.parent.as_ref()?.id();
+    rows.iter()
+        .position(|row| row.note.id == parent)
+        // A hand-edited note can name itself as its parent. That is a line of no length, and
+        // drawing it would paint a top corner with nothing under it.
+        .filter(|&at| at != selected)
+}
+
+/// The selection lane's two columns on row `at`: the line, then its end.
+///
+/// **One link only** (user decision): the selected note to its parent. Its replies get no line,
+/// and every other row shows only its own markers. The corners point at each other —
+/// the higher row of the two gets [`LINK_TOP`] and the lower [`LINK_BOTTOM`] — so a parent above
+/// the selection, as in the files view sorted by title, draws the same shape upside down.
+///
+/// Worked out against the whole row list rather than the rows on screen, which is what makes a
+/// parent scrolled out of view still read: the visible part of the line runs to the pane's edge,
+/// pointing the way the parent is. `◉` marks the selected row whether or not there is a line.
+fn link_glyphs(at: usize, selected: usize, parent: Option<usize>) -> [char; 2] {
+    let end = if at == selected {
+        GLYPH_FOCUS
+    } else if Some(at) == parent {
+        LINK_PARENT
+    } else {
+        ' '
+    };
+    let line = match parent.map(|parent| (selected.min(parent), selected.max(parent))) {
+        Some((top, _)) if at == top => LINK_TOP,
+        Some((_, bottom)) if at == bottom => LINK_BOTTOM,
+        Some((top, bottom)) if top < at && at < bottom => GLYPH_LANE,
+        _ => ' ',
+    };
+    [line, end]
+}
+
+/// The relation slot: one column saying where this note sits, or what is wrong with where it sits.
+///
+/// The third of the marker's columns; see [`MARKER_WIDTH`]. Dim, like the quote slot after it —
+/// except for the two warnings, which are coloured because they are the ones to act on.
 ///
 /// First match wins, and the order is the point — a fact about the *vault* outranks a fact about
 /// the note, because it is the one you cannot find out any other way from a list.
@@ -791,50 +966,210 @@ fn relation_marker<'a>(row: &Row, in_trash: bool) -> (&'a str, Style) {
 /// listing rather than as two conventions.
 const ID_GAP: usize = 2;
 
-/// Columns between the longest title and the meta column.
+/// Columns in front of every column after the title — counts, `created`, `edited`.
 ///
 /// A floor, not a target. With the title column sized to content, the longest title would
-/// otherwise touch its own age — `a long title3h` — which is not a tighter layout but an
-/// unreadable one.
+/// otherwise touch its own date — `a long titleOct 25` — which is not a tighter layout but an
+/// unreadable one. In front of the column rather than after the one before it, because these
+/// columns are right-aligned and a trailing gap would be swallowed by the alignment.
 const META_GAP: usize = 2;
 
-/// The widest a title column grows before the meta column stops following it.
+/// The widest a title column grows before the columns after it stop following it.
 ///
-/// Without a cap the age is right-aligned to the frame, which on a wide terminal strands it a long
-/// way from the title it describes and makes the pair hard to read as one row. Past this the row
-/// simply ends and the rest of the line stays empty.
+/// Without a cap the times are pushed to the frame's right edge, which on a wide terminal strands
+/// them a long way from the title they describe and makes the pair hard to read as one row. Past
+/// this the row simply ends and the rest of the line stays empty.
 const TITLE_MAX: usize = 44;
 
-/// The list's column widths, decided once for the whole frame.
-///
-/// Passed as one value rather than six: they are a single decision — every one of them is chosen
-/// against the others and against the frame's width — and splitting them across a parameter list
-/// invites a caller to compute one of them somewhere else.
-#[derive(Debug, Clone, Copy)]
-struct Columns {
-    /// Width of the id column, before its gap.
-    id: usize,
-    /// Width of the title column.
-    title: usize,
-    /// Width of the right-hand meta column.
-    meta: usize,
-    /// How much of the meta column there is room for.
-    detail: MetaDetail,
-    /// Whether this is the trash, where trashed-ness is the premise rather than news.
-    in_trash: bool,
+/// The header row's labels. The marker column has none: its glyphs explain themselves in `?`, and
+/// a label over its four glyph columns would be wider than the column.
+const HEADER_ID: &str = "id";
+/// See [`HEADER_ID`].
+const HEADER_TITLE: &str = "title";
+/// See [`HEADER_ID`]. "counts" rather than "replies": the column carries the quote count beside
+/// the reply count, and a label naming only one of them would misname the other.
+const HEADER_COUNTS: &str = "counts";
+/// See [`HEADER_ID`].
+const HEADER_CREATED: &str = "created";
+/// See [`HEADER_ID`].
+const HEADER_EDITED: &str = "edited";
+
+/// Which of the two times a view is ordered by — and so the time column it keeps longest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Time {
+    Created,
+    Edited,
 }
 
-/// One row: marker, id, title, then the counts and age.
-fn row_line<'a>(row: &Row, id: &str, columns: Columns, now: DateTime<Utc>) -> Line<'a> {
-    let Columns {
-        id: id_width,
-        title: title_width,
-        meta: meta_width,
-        detail,
-        in_trash,
-    } = columns;
+/// The time a view's rows are ordered by.
+///
+/// Only the files view's `edited` sort is ordered by edit time. The timeline, the files view's
+/// other sorts — `title` included, which orders by neither and keeps the time that does not change
+/// — and search and trash all count as created.
+fn ordered_by(view: ViewKind, sort: FileSort) -> Time {
+    match view {
+        ViewKind::Files if sort == FileSort::Edited => Time::Edited,
+        _ => Time::Created,
+    }
+}
 
-    let title = title_of(row);
+/// How wide each column would like to be: the widest cell on screen, or its header if that is
+/// wider. `counts` is zero when no row has a count, which means no counts column at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Natural {
+    id: usize,
+    title: usize,
+    counts: usize,
+    created: usize,
+    edited: usize,
+}
+
+/// The table's column widths, decided once for the whole frame.
+///
+/// Passed as one value rather than five: they are a single decision — every one of them is chosen
+/// against the others and against the frame's width — and splitting them across a parameter list
+/// invites a caller to compute one of them somewhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Columns {
+    /// Width of the id, before its [`ID_GAP`].
+    id: usize,
+    /// Width of the title.
+    title: usize,
+    /// Width of the counts, or `None` when the column is dropped or there is nothing to count.
+    counts: Option<usize>,
+    /// Width of `created`, or `None` when it is dropped.
+    created: Option<usize>,
+    /// Width of `edited`, or `None` when it is dropped.
+    edited: Option<usize>,
+}
+
+impl Columns {
+    /// The columns after the title, in the order they are drawn, each with its width when shown.
+    fn after_title(self) -> [Option<usize>; 3] {
+        [self.counts, self.created, self.edited]
+    }
+
+    /// The table's constraints: one `Length` per column, the id's gap after it and every
+    /// right-aligned column's [`META_GAP`] in front of it.
+    fn constraints(self) -> Vec<Constraint> {
+        let length = |n: usize| Constraint::Length(u16::try_from(n).unwrap_or(u16::MAX));
+        let mut widths = vec![
+            length(MARKER_WIDTH),
+            length(self.id + ID_GAP),
+            length(self.title),
+        ];
+        widths.extend(
+            self.after_title()
+                .into_iter()
+                .flatten()
+                .map(|width| length(META_GAP + width)),
+        );
+        widths
+    }
+
+    /// Columns the whole row occupies. What `list_columns` keeps at or under the pane's width, and
+    /// what the tests hold it to.
+    #[cfg(test)]
+    fn total(self) -> usize {
+        let after: usize = self
+            .after_title()
+            .into_iter()
+            .flatten()
+            .map(|width| META_GAP + width)
+            .sum();
+        MARKER_WIDTH + self.id + ID_GAP + self.title + after
+    }
+}
+
+/// Decide the column widths for a pane `inner` columns wide.
+///
+/// # The arithmetic has to close exactly
+///
+/// A row is `MARKER + id + gap + title`, then `gap + width` for each column after the title, and
+/// that must total *at most* the block's inner width. Wider and the table squeezes columns to fit,
+/// which takes width from the times — invisible in a snapshot, because the trailing spaces get
+/// trimmed and it simply looks as though notes have no date. [`Columns::total`] is that sum and
+/// the tests hold it to `inner`.
+///
+/// # The title is sized to the titles, not to the space
+///
+/// Filling the width was what stranded the time an inch of whitespace away from the title it
+/// describes: a column of five-character titles in a fifty-column list put every time at column
+/// fifty. Sized to content and capped at [`TITLE_MAX`], the columns after it follow the titles and
+/// the rest of the row stays empty.
+///
+/// # What goes first when it does not fit
+///
+/// 1. **The counts.** They are the one part of a row that is inferable from elsewhere — a thread's
+///    size is visible the moment you open it.
+/// 2. **The time the view is not ordered by** — see [`ordered_by`]. A list sorted by edit time is
+///    read down its `edited` column, and a date nobody sorted on is the next least needed.
+/// 3. **Then the title is clipped.** The time the view *is* ordered by stays as long as there is
+///    room for any title at all; it is the column the order is about, and never inferable.
+///
+/// Each step happens before the next is touched by a single column: the counts go before the other
+/// time is dropped, and both go before the title loses anything. Same shape as the key bar dropping
+/// labels before it drops keys.
+fn list_columns(natural: Natural, inner: usize, ordered: Time) -> Columns {
+    let avail = inner.saturating_sub(MARKER_WIDTH + natural.id + ID_GAP);
+    let title = natural.title.min(TITLE_MAX);
+    let cost = |width: usize| if width == 0 { 0 } else { META_GAP + width };
+    let (kept, other) = match ordered {
+        Time::Created => (natural.created, natural.edited),
+        Time::Edited => (natural.edited, natural.created),
+    };
+
+    let both_times = cost(kept) + cost(other);
+    let counts = (natural.counts > 0 && title + cost(natural.counts) + both_times <= avail)
+        .then_some(natural.counts);
+    let show_other = counts.is_some() || title + both_times <= avail;
+    let used = counts.map_or(0, cost) + cost(kept) + if show_other { cost(other) } else { 0 };
+
+    let (created, edited) = match ordered {
+        Time::Created => (Some(natural.created), show_other.then_some(natural.edited)),
+        Time::Edited => (show_other.then_some(natural.created), Some(natural.edited)),
+    };
+    Columns {
+        id: natural.id,
+        title: title.min(avail.saturating_sub(used)),
+        counts,
+        created,
+        edited,
+    }
+}
+
+/// The header: a blank over the marker, then a label per column, aligned as the column's cells
+/// are. Bold and dim, so it reads as furniture rather than as the first note; no separator row,
+/// which would cost a row of a pane that is often only ten tall.
+fn header_row(columns: Columns) -> TableRow<'static> {
+    let mut cells = vec![
+        Cell::from(""),
+        Cell::from(truncate(HEADER_ID, columns.id)),
+        Cell::from(truncate(HEADER_TITLE, columns.title)),
+    ];
+    let labels = [HEADER_COUNTS, HEADER_CREATED, HEADER_EDITED];
+    for (label, width) in labels.into_iter().zip(columns.after_title()) {
+        if let Some(width) = width {
+            cells.push(Cell::from(
+                Line::from(truncate(label, width)).right_aligned(),
+            ));
+        }
+    }
+    TableRow::new(cells).style(Style::default().add_modifier(Modifier::BOLD | Modifier::DIM))
+}
+
+/// One row: marker, id, title, then the counts and the two times, right-aligned in their columns.
+///
+/// `link` is this row's two selection-lane columns, from [`link_glyphs`]. The last argument is the
+/// zone `created` is read in and the instant `edited` is measured from.
+fn table_row(
+    row: &Row,
+    id: &str,
+    columns: Columns,
+    [line, end]: [char; 2],
+    in_trash: bool,
+    (zone, now): (FixedOffset, DateTime<Utc>),
+) -> TableRow<'static> {
     let title_style = if row.note.title.is_some() {
         Style::default()
     } else {
@@ -848,33 +1183,41 @@ fn row_line<'a>(row: &Row, id: &str, columns: Columns, now: DateTime<Utc>) -> Li
         " "
     };
 
-    // Truncated as well as padded. The column is sized to the widest row, so this can only fire
-    // when even the age does not fit — but a frame two columns narrower than the arithmetic
-    // expected paints over its own border, and that is invisible in a snapshot.
-    let meta = truncate(&meta_text(row, now, detail), meta_width);
-    let title_cell = truncate(&title, title_width);
-    // Right-align the meta column: pad out the title's cell, then pad out the meta's own.
-    let pad = meta_width.saturating_sub(meta.width());
-    let gap = title_width.saturating_sub(title_cell.width()) + META_GAP + pad;
-
-    // Yellow, and ahead of the title, exactly as `jot ls` prints it. An id you can read off the
-    // browser and paste into `jot show` is the whole reason it is here, and it only reads as the
-    // same id if it looks like the same id.
-    let id_cell = format!(
-        "{id}{}{}",
-        " ".repeat(id_width.saturating_sub(id.width())),
-        " ".repeat(if id_width == 0 { 0 } else { ID_GAP })
-    );
-
-    Line::from(vec![
-        Span::styled(relation, relation_style),
-        Span::styled(quote, dim()),
-        Span::raw(" "),
-        Span::styled(id_cell, Style::default().fg(Color::Yellow)),
-        Span::styled(title_cell, title_style),
-        Span::raw(" ".repeat(gap)),
-        Span::styled(meta, dim()),
-    ])
+    // Truncated as well as sized. Every column is at least as wide as its widest cell, so this can
+    // only fire on the title, or on a time in a pane too narrow to hold even that — but a cell
+    // wider than its column is clipped by the table, and a clipped time is invisible in a snapshot.
+    let mut cells = vec![
+        Cell::from(Line::from(vec![
+            Span::styled(String::from_iter([line, end]), gutter_style()),
+            Span::styled(relation, relation_style),
+            Span::styled(quote, dim()),
+            Span::raw(" "),
+        ])),
+        // Yellow, and ahead of the title, exactly as `jot ls` prints it. An id you can read off the
+        // browser and paste into `jot show` is the whole reason it is here, and it only reads as
+        // the same id if it looks like the same id.
+        Cell::from(Span::styled(
+            id.to_string(),
+            Style::default().fg(Color::Yellow),
+        )),
+        Cell::from(Span::styled(
+            truncate(&title_of(row), columns.title),
+            title_style,
+        )),
+    ];
+    let texts = [
+        counts_text(row),
+        created_text(row, zone, now),
+        edited_text(row, now),
+    ];
+    for (text, width) in texts.into_iter().zip(columns.after_title()) {
+        if let Some(width) = width {
+            cells.push(Cell::from(
+                Line::from(Span::styled(truncate(&text, width), dim())).right_aligned(),
+            ));
+        }
+    }
+    TableRow::new(cells)
 }
 
 /// What a row calls itself. `Untitled` for a note with no title, which is a legal note.
@@ -888,45 +1231,51 @@ fn title_of(row: &Row) -> String {
         .unwrap_or_else(|| "Untitled".to_string())
 }
 
-/// How much of the right-hand column there is room for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetaDetail {
-    /// Counts and the age.
-    Full,
-    /// The age alone, for a list too narrow to carry both.
-    AgeOnly,
-}
-
-/// The right-hand column: reply count, quote count, then relative age.
-fn meta_text(row: &Row, now: DateTime<Utc>, detail: MetaDetail) -> String {
-    let age = row
-        .note
-        .created_at
-        .map_or_else(|| "—".to_string(), |t| relative(t, now));
-
-    if detail == MetaDetail::AgeOnly {
-        return age;
-    }
-
-    let mut out = String::new();
+/// The counts column: reply count, then quote count. Empty for a note nothing has grown around.
+fn counts_text(row: &Row) -> String {
+    let mut parts = Vec::new();
     if row.replies > 0 {
         if row.replies == row.descendants {
-            out.push_str(&format!("{} \u{25b8} ", row.replies));
+            parts.push(format!("{} \u{25b8}", row.replies));
         } else {
             // Direct replies and the whole subtree differ, which means the thread branches.
             // Showing both is what makes a fork visible from the list rather than only after
             // opening it.
-            out.push_str(&format!("{}/{} \u{25b8} ", row.replies, row.descendants));
+            parts.push(format!("{}/{} \u{25b8}", row.replies, row.descendants));
         }
     }
     // How many notes point *at* this one. A count rather than a list, and here rather than in the
     // marker, because it is the same kind of fact as the reply count and belongs beside it — the
-    // marker says what this note is, the meta says what has accumulated around it.
+    // marker says what this note is, the counts say what has accumulated around it.
     if row.quoted > 0 {
-        out.push_str(&format!("{} \u{275e} ", row.quoted));
+        parts.push(format!("{} \u{275e}", row.quoted));
     }
-    out.push_str(&age);
-    out
+    parts.join(" ")
+}
+
+/// The `created` column: the day the note was written, in `zone`, as an absolute date — `Oct 25`
+/// within the year `now` is in, `Oct 2025` before it. `—` for a note with no recoverable creation
+/// time.
+///
+/// The day only, not the hour: the column answers "which day", the same question the calendar's
+/// dot answers, and in the same zone so the two never disagree about a note near midnight.
+fn created_text(row: &Row, zone: FixedOffset, now: DateTime<Utc>) -> String {
+    let Some(created) = row.note.created_at else {
+        return "—".to_string();
+    };
+    let created = created.with_timezone(&zone);
+    if created.year() == now.with_timezone(&zone).year() {
+        created.format("%b %e").to_string()
+    } else {
+        created.format("%b %Y").to_string()
+    }
+}
+
+/// The `edited` column: how long ago the file was last written, coarse and relative, or `—` when
+/// the index has no edit time for it.
+fn edited_text(row: &Row, now: DateTime<Utc>) -> String {
+    row.edited_at
+        .map_or_else(|| "—".to_string(), |t| relative(t, now))
 }
 
 /// What an empty list should say. Never just blank — an empty frame is indistinguishable from a
@@ -1278,36 +1627,36 @@ mod tests {
     fn the_panes_drop_in_the_settled_order_as_the_frame_narrows() {
         // Reader first, then sidebar, then the list alone. Checked one column either side of each
         // boundary, because a drop order is only a decision at the boundary.
-        let all = split_frame(frame(112), Panes::default());
+        let all = split_frame(frame(120), EVERY_PANE);
         assert_eq!(all.sidebar.map(|r| r.width), Some(SIDEBAR_WIDTH));
         assert_eq!(all.list.width, LIST_MIN);
         assert_eq!(
             all.reader.map(|r| r.width),
-            Some(112 - SIDEBAR_WIDTH - LIST_MIN)
+            Some(120 - SIDEBAR_WIDTH - LIST_MIN)
         );
 
-        let two = split_frame(frame(111), Panes::default());
+        let two = split_frame(frame(119), EVERY_PANE);
         assert!(
             two.reader.is_none(),
             "one column short of three panes, the reader is what goes"
         );
         assert_eq!(two.sidebar.map(|r| r.width), Some(SIDEBAR_WIDTH));
-        assert_eq!(two.list.width, 111 - SIDEBAR_WIDTH);
+        assert_eq!(two.list.width, 119 - SIDEBAR_WIDTH);
 
-        let two = split_frame(frame(62), Panes::default());
+        let two = split_frame(frame(70), EVERY_PANE);
         assert_eq!(two.sidebar.map(|r| r.width), Some(SIDEBAR_WIDTH));
         assert_eq!(
             two.list.width, LIST_MIN,
-            "62 is the sidebar plus a list's floor"
+            "70 is the sidebar plus a list's floor"
         );
 
-        let one = split_frame(frame(61), Panes::default());
+        let one = split_frame(frame(69), EVERY_PANE);
         assert!(
             one.sidebar.is_none() && one.reader.is_none(),
             "and one column below that, the sidebar goes too"
         );
         assert_eq!(
-            one.list.width, 61,
+            one.list.width, 69,
             "the list is never dropped: it is the surface"
         );
     }
@@ -1316,13 +1665,13 @@ mod tests {
     fn a_toggle_only_ever_removes_a_pane() {
         // Wanting everything at 60 columns gets a list, not a two-column reader painted over it.
         // The automatic rule wins; the toggles are an escape hatch in one direction only.
-        let narrow = split_frame(frame(60), Panes::default());
+        let narrow = split_frame(frame(60), EVERY_PANE);
         assert!(narrow.sidebar.is_none() && narrow.reader.is_none());
         assert_eq!(narrow.list.width, 60);
 
         let hidden = Panes {
             sidebar: false,
-            ..Panes::default()
+            ..EVERY_PANE
         };
         let no_sidebar = split_frame(frame(100), hidden);
         assert!(no_sidebar.sidebar.is_none());
@@ -1333,34 +1682,33 @@ mod tests {
         );
 
         let no_reader = split_frame(
-            frame(112),
+            frame(120),
             Panes {
                 reader: false,
-                ..Panes::default()
+                ..EVERY_PANE
             },
         );
         assert!(no_reader.reader.is_none());
         assert_eq!(
             no_reader.list.width,
-            112 - SIDEBAR_WIDTH,
+            120 - SIDEBAR_WIDTH,
             "with the reader away the list takes the whole main pane"
         );
     }
 
     #[test]
     fn the_width_the_run_loop_asks_for_is_the_width_the_panel_gets() {
-        // The run loop holds a terminal size and no `App`, so it asks the default-pane question.
-        // That has to agree with what is painted in the default state, or the highlighter wraps
-        // text for a panel of a different width.
-        let painted = split_frame(frame(112), Panes::default()).reader.unwrap();
-        assert_eq!(reader_text_width(112, 21), Some(painted.width - 2));
-        assert_eq!(reader_text_width(111, 21), None);
+        // The size-only question answers for every pane wanted. That has to agree with what is
+        // painted in that state, or the highlighter wraps text for a panel of a different width.
+        let painted = split_frame(frame(120), EVERY_PANE).reader.unwrap();
+        assert_eq!(reader_text_width(120, 21), Some(painted.width - 2));
+        assert_eq!(reader_text_width(119, 21), None);
 
         // And the app-aware answer differs the moment the sidebar is hidden, which is why the
         // second entry point exists.
         let hidden = Panes {
             sidebar: false,
-            ..Panes::default()
+            ..EVERY_PANE
         };
         assert_eq!(reader_text_width(100, 21), None);
         assert!(reader_text_width_for(hidden, 100, 21).is_some());
@@ -1371,9 +1719,14 @@ mod tests {
         // The constant is derived from the calendar, not chosen for it. If the header ever grows
         // a column — a week-number gutter, a wider weekday abbreviation — this is what says so.
         assert_eq!(
-            WEEKDAYS.join(" ").width() + 2,
+            WEEKDAYS.len() * DAY_CELL + 2,
             SIDEBAR_WIDTH as usize,
-            "seven cells of two columns, six separators, and two borders"
+            "seven cells of four columns, and two borders"
+        );
+        assert_eq!(
+            weekday_header().width(),
+            WEEKDAYS.len() * DAY_CELL,
+            "and the header is the grid's own width, with no ragged edge"
         );
     }
 
@@ -1430,11 +1783,12 @@ mod tests {
             .map(ToString::to_string)
             .collect();
 
-        // Header, then two rows per week. The 9th is the Wednesday of the second week, so it
-        // occupies columns 6 and 7 of the numbers row.
-        assert_eq!(&lines[3][6..8], " 9");
+        // Header, then two rows per week. The 9th is the Wednesday of the second week: the third
+        // four-column cell, which starts at column 8 with a blank, so its number is columns 9
+        // and 10.
+        assert_eq!(&lines[3][8..12], "  9 ");
         assert_eq!(
-            lines[4].chars().nth(7),
+            lines[4].chars().nth(10),
             Some('\u{2219}'),
             "the dot goes under the units digit, where the eye already is: `{}`",
             lines[4]
@@ -1502,7 +1856,7 @@ mod tests {
     fn every_calendar_glyph_is_one_column_in_every_locale() {
         // The same property the marker column has, and the same trap: `·`, `•` and every
         // box-drawing character are East Asian Ambiguous and render two columns under a CJK
-        // locale, which in a three-column day cell shifts the rest of the week sideways.
+        // locale, which in a four-column day cell shifts the rest of the week sideways.
         assert_eq!(DOT.width(), 1);
         assert_eq!(
             UnicodeWidthStr::width_cjk(DOT),
@@ -1518,79 +1872,281 @@ mod tests {
     // ------------------------------------------------------------------------- the thread graph
 
     #[test]
-    fn every_graph_glyph_is_one_column_in_every_locale() {
-        // The same trap as the calendar's dot, in a gutter where it is worse: `undotree` offers a
-        // Unicode set, and `●`, `○`, `│`, `╱`, `╲` and every box-drawing character in
-        // U+2500–U+2573 are East Asian *Ambiguous*. Two columns under a CJK locale in a
-        // fixed-width gutter is a frame that has come apart.
+    fn every_graph_glyph_is_one_column() {
+        // Box-drawing, by the user's choice of 2026-10-25, and every glyph here bar `◉` (Neutral)
+        // is East Asian *Ambiguous*: two columns under a terminal that renders Ambiguous as wide.
+        // That is not asserted against, because it buys nothing — the panel's own border `┌─│┐` is
+        // the same Ambiguous set, so such a terminal has already broken the frame the gutter sits
+        // in, and the ASCII gutter this replaced protected nothing inside it. What is asserted is
+        // the default width, which still catches an emoji or a wide character in a fixed gutter.
         for glyph in [
             GLYPH_NODE,
             GLYPH_FOCUS,
             GLYPH_LANE,
+            GLYPH_RULE,
+            GLYPH_CROSS,
+            GLYPH_BRANCH_RIGHT,
+            GLYPH_BRANCH_LEFT,
             GLYPH_FORK_RIGHT,
             GLYPH_FORK_LEFT,
+            GLYPH_FORK_MID,
             GLYPH_MORE,
         ] {
-            let s = glyph.to_string();
-            assert_eq!(s.width(), 1, "`{glyph}` is not one column");
-            assert_eq!(
-                UnicodeWidthStr::width_cjk(s.as_str()),
-                1,
-                "`{glyph}` widens under a CJK locale and would break the gutter"
-            );
-            assert!(glyph.is_ascii(), "`{glyph}` is not ASCII");
+            assert_eq!(glyph.to_string().width(), 1, "`{glyph}` is not one column");
         }
     }
 
+    /// `fold_gutter`, with the width it promises checked on the way out.
+    fn gutter(lanes: &[Lane], width: usize) -> String {
+        let drawn = fold_gutter(lanes, width, false);
+        assert_eq!(
+            drawn.width(),
+            width * LANE_WIDTH,
+            "`{drawn}` is not exactly {width} lanes wide"
+        );
+        drawn
+    }
+
+    /// A four-lane gutter for the fold tests, spelled out rather than borrowed from [`MAX_LANES`]:
+    /// these say what folding *does*, which should not change every time the cap does.
+    const NARROW: usize = 4;
+
     #[test]
     fn a_gutter_narrower_than_the_thread_folds_rather_than_dropping_the_row() {
-        // Past `MAX_LANES` the art degrades and the list does not. Whichever lane this row's note
-        // is in, the row still says which row it is.
+        // Past the cap the art degrades and the list does not. Whichever lane this row's note is
+        // in, the row still says which row it is.
         let wide = vec![Lane::Through; 9];
-        let folded = fold_gutter(&wide, MAX_LANES, false);
         assert_eq!(
-            folded.chars().count(),
-            MAX_LANES,
-            "the gutter must be exact"
+            gutter(&wide, NARROW),
+            "│ │ │ ┊ ",
+            "the tail folds into one column"
         );
-        assert_eq!(folded, "|||||+", "the tail folds into one column");
 
         // The node is what the fold must never hide: it is the only thing saying where you are.
         let mut with_node = vec![Lane::Through; 9];
         with_node[7] = Lane::Node;
-        assert_eq!(fold_gutter(&with_node, MAX_LANES, false), "|||||*");
-        assert_eq!(fold_gutter(&with_node, MAX_LANES, true), "|||||@");
+        assert_eq!(gutter(&with_node, NARROW), "│ │ │ ● ");
+        assert_eq!(fold_gutter(&with_node, NARROW, true), "│ │ │ ◉ ");
 
-        // And a fold over nothing is a blank rather than a `+` promising lanes that are not there.
+        // And a fold over nothing is a blank rather than a `┊` promising lanes that are not there.
         let mut sparse = vec![Lane::Empty; 9];
         sparse[0] = Lane::Node;
-        assert_eq!(fold_gutter(&sparse, MAX_LANES, false), "*     ");
+        assert_eq!(gutter(&sparse, NARROW), "●       ");
     }
 
     #[test]
     fn a_gutter_inside_the_cap_is_drawn_verbatim_and_padded() {
-        assert_eq!(fold_gutter(&[Lane::Node], 1, false), "*");
-        assert_eq!(fold_gutter(&[Lane::Node], 3, false), "*  ");
+        assert_eq!(gutter(&[Lane::Node], 1), "● ");
+        assert_eq!(gutter(&[Lane::Node], 3), "●     ");
+        assert_eq!(fold_gutter(&[Lane::Node], 1, true), "◉ ");
         assert_eq!(
-            fold_gutter(
-                &[Lane::Through, Lane::ForkRight, Lane::ForkLeft, Lane::Empty],
-                4,
-                false
+            gutter(&[Lane::Through, Lane::Node, Lane::Empty, Lane::Through], 4),
+            "│ ●   │ ",
+            "a note row has no horizontal, so every spacer is a space"
+        );
+    }
+
+    #[test]
+    fn a_connector_joins_its_branch_to_its_forks_in_one_unbroken_line() {
+        use Lane::{Branch, ForkLeft, ForkRight};
+        // One fork to the right: the shape nearly every fork in a conversation takes.
+        assert_eq!(gutter(&[Branch, ForkRight], 2), "├─╮ ");
+        // Two to the right: the nearer one tees off a horizontal that carries on to the last.
+        assert_eq!(gutter(&[Branch, ForkRight, ForkRight], 3), "├─┬─╮ ");
+        // A lane reused on the left, so the horizontal leaves the branch the other way.
+        assert_eq!(gutter(&[ForkLeft, Branch], 2), "╭─┤ ");
+        assert_eq!(gutter(&[ForkLeft, ForkLeft, Branch], 3), "╭─┬─┤ ");
+        // Both sides at once, which makes the branch itself a crossing.
+        assert_eq!(gutter(&[ForkLeft, Branch, ForkRight], 3), "╭─┼─╮ ");
+        // Padding past the last lane stays blank: the horizontal stops at its last fork.
+        assert_eq!(gutter(&[Branch, ForkRight], 4), "├─╮     ");
+    }
+
+    #[test]
+    fn a_horizontal_crosses_a_lane_passing_through_rather_than_cutting_it() {
+        use Lane::{Branch, ForkRight, Through};
+        assert_eq!(gutter(&[Branch, Through, ForkRight], 3), "├─┼─╮ ");
+        // A lane outside the span is untouched by it, on either side.
+        assert_eq!(
+            gutter(&[Through, Branch, ForkRight, Through], 4),
+            "│ ├─╮ │ "
+        );
+    }
+
+    #[test]
+    fn a_horizontal_runs_straight_through_an_empty_lane_inside_its_span() {
+        // Reachable: a note forking from lane 2 with lanes 0 and 1 both free reuses the leftmost,
+        // leaving lane 1 empty between the fork and its branch.
+        use Lane::{Branch, Empty, ForkLeft};
+        assert_eq!(gutter(&[ForkLeft, Empty, Branch], 3), "╭───┤ ");
+    }
+
+    #[test]
+    fn a_connector_that_runs_past_the_cap_runs_into_the_fold() {
+        use Lane::{Branch, ForkRight, Through};
+        // The branch is drawn, its fork is folded: the horizontal still leaves towards it and
+        // stops at the fold, which is not a fork glyph because it stands for more than one lane.
+        assert_eq!(
+            gutter(&[Through, Through, Branch, Through, ForkRight], NARROW),
+            "│ │ ├─┊ "
+        );
+        // A wide fan: every drawn fork tees off, because the last one is past the cap.
+        assert_eq!(
+            gutter(
+                &[
+                    Branch, ForkRight, ForkRight, ForkRight, ForkRight, ForkRight
+                ],
+                NARROW
             ),
-            "|\\/ "
+            "├─┬─┬─┊ "
+        );
+        // The whole connector past the cap: no horizontal on the drawn side at all.
+        assert_eq!(
+            gutter(
+                &[Through, Through, Through, Through, Branch, ForkRight],
+                NARROW
+            ),
+            "│ │ │ ┊ "
         );
     }
 
     #[test]
     fn the_cap_leaves_a_title_worth_reading() {
-        // The arithmetic the cap was chosen against: 20 columns inside the sidebar's borders, a
-        // gutter, a gap, and what is left for the title. If either constant moves, this is what
-        // says the title column has stopped being able to say anything.
+        // The arithmetic the cap was chosen against: 28 columns inside the sidebar's borders, a
+        // gutter of two columns a lane, a gap, and what is left for the title. If any constant
+        // moves, this is what says the title column has stopped being able to say anything.
         let inner = SIDEBAR_WIDTH as usize - 2;
+        let title = inner - (MAX_LANES * LANE_WIDTH + GRAPH_GAP);
         assert!(
-            inner - (MAX_LANES + GRAPH_GAP) >= 13,
-            "a {MAX_LANES}-lane gutter leaves {} columns of title",
-            inner - (MAX_LANES + GRAPH_GAP)
+            title >= 15,
+            "a {MAX_LANES}-lane gutter leaves {title} columns of title"
+        );
+    }
+
+    /// A thread built through a real workspace and opened in the graph. Each entry is a title and
+    /// the index of the entry it replies to; they are created in order, so the order written is
+    /// the creation order the sweep follows. `focus` is the index the cursor is put on.
+    fn thread(notes: &[(&str, Option<usize>)], focus: usize) -> (tempfile::TempDir, App) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ws = jot_core::workspace::Workspace::init(tmp.path()).unwrap();
+        let mut ids = Vec::new();
+        for (title, parent) in notes {
+            let mut draft = jot_core::query::Draft::new("b").title(*title);
+            if let Some(parent) = parent {
+                draft = draft.reply_to(ids[*parent]);
+            }
+            ids.push(ws.create(draft).unwrap().meta().id);
+        }
+        ws.sync().unwrap();
+
+        let mut app = App::new(ws);
+        let at = app
+            .rows()
+            .iter()
+            .position(|row| row.note.id == ids[focus])
+            .unwrap();
+        while app.selected() < at {
+            app.dispatch(crate::key::Action::MoveDown);
+        }
+        assert_eq!(app.selected(), at);
+        (tmp, app)
+    }
+
+    /// The graph panel as it lands in a sidebar-wide terminal: inner rows only, trailing blanks
+    /// trimmed, tall enough that nothing scrolls.
+    fn rendered(app: &App) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let height = app.graph().len() as u16 + 2;
+        let mut terminal = Terminal::new(TestBackend::new(SIDEBAR_WIDTH, height)).unwrap();
+        terminal
+            .draw(|frame| draw_graph(frame, frame.area(), app))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (1..height - 1)
+            .map(|y| {
+                (1..SIDEBAR_WIDTH - 1)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_approved_thread_renders_line_for_line() {
+        // The shape the user approved on 2026-10-25: root with replies a and b, and c replying to
+        // a. Every lane is a glyph and a spacer, so a two-lane gutter is four columns, then the
+        // gap — which is the three blanks after `◉` and the two between `│` and `a`.
+        let (_tmp, app) = thread(
+            &[
+                ("root", None),
+                ("a", Some(0)),
+                ("b", Some(0)),
+                ("c", Some(1)),
+            ],
+            0,
+        );
+        assert_eq!(
+            rendered(&app),
+            ["◉    root", "├─╮", "● │  a", "│ ●  b", "●    c"]
+        );
+    }
+
+    #[test]
+    fn a_fork_into_a_reused_lane_curves_left_back_to_its_branch() {
+        // a is a leaf, so its lane is free when b forks, and b's second reply takes it.
+        let (_tmp, app) = thread(
+            &[
+                ("root", None),
+                ("a", Some(0)),
+                ("b", Some(0)),
+                ("c", Some(2)),
+                ("d", Some(2)),
+            ],
+            3,
+        );
+        assert_eq!(
+            rendered(&app),
+            [
+                "●    root",
+                "├─╮",
+                "● │  a",
+                "  ●  b",
+                "╭─┤",
+                "│ ◉  c",
+                "●    d"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fork_past_a_live_lane_draws_a_crossing_and_keeps_the_titles_in_one_column() {
+        // a forks while b's lane is still open, so a's second reply appends a third lane and the
+        // horizontal out to it crosses b's.
+        let (_tmp, app) = thread(
+            &[
+                ("root", None),
+                ("a", Some(0)),
+                ("b", Some(0)),
+                ("c", Some(1)),
+                ("d", Some(1)),
+            ],
+            2,
+        );
+        assert_eq!(
+            rendered(&app),
+            [
+                "●      root",
+                "├─╮",
+                "● │    a",
+                "├─┼─╮",
+                "│ ◉ │  b",
+                "●   │  c",
+                "    ●  d"
+            ]
         );
     }
 
@@ -1640,11 +2196,9 @@ mod tests {
             height: 23,
         };
 
-        // Off: the calendar has the column to itself, which is the state the surface opens in.
-        assert_eq!(split_sidebar(column, false), (column, None));
-
-        // On, on a 24-row terminal minus the status line: 15 rows of calendar and 8 of graph.
-        let (calendar, graph) = split_sidebar(column, true);
+        // No toggle: on a 24-row terminal minus the status line, 15 rows of calendar and 8 of
+        // graph, which is the state the surface opens in.
+        let (calendar, graph) = split_sidebar(column);
         assert_eq!(calendar.height, CALENDAR_ROWS + 2);
         assert_eq!(graph.map(|r| r.height), Some(23 - (CALENDAR_ROWS + 2)));
 
@@ -1653,7 +2207,17 @@ mod tests {
             height: CALENDAR_ROWS + 2 + GRAPH_MIN_HEIGHT - 1,
             ..column
         };
-        assert_eq!(split_sidebar(short, true), (short, None));
+        assert_eq!(split_sidebar(short), (short, None));
+
+        // One row taller and the graph is back, without anything having been pressed.
+        let enough = Rect {
+            height: short.height + 1,
+            ..column
+        };
+        assert_eq!(
+            split_sidebar(enough).1.map(|r| r.height),
+            Some(GRAPH_MIN_HEIGHT)
+        );
     }
 
     #[test]
@@ -1712,7 +2276,7 @@ mod tests {
         assert_eq!(glyph(&reply), "\u{21b3}");
 
         // A reply that has replies of its own is still a reply: the flag is for heads, and its
-        // own subtree is already announced by the count in the meta column.
+        // own subtree is already announced by the counts column.
         reply.replies = 2;
         reply.descendants = 2;
         assert_eq!(glyph(&reply), "\u{21b3}");
@@ -1753,69 +2317,150 @@ mod tests {
     }
 
     #[test]
-    fn every_marker_glyph_is_one_column_in_every_locale() {
-        // The property that keeps a two-slot marker from breaking the frame. `◆`, `★`, `┬` and `¶`
-        // would all fail this: they are East Asian Ambiguous and render two columns under a CJK
-        // locale, which is the vault most likely to have wide titles already.
+    fn every_marker_character_is_one_column_at_the_default_width() {
+        // The lane's `╭│╰` are East Asian Ambiguous, so CJK width is deliberately not the
+        // invariant here. They follow the same accepted rule as the frame borders and thread graph:
+        // default-width glyphs must be one column, which keeps the fixed marker slots honest.
+        let lane = String::from_iter([LINK_TOP, GLYPH_LANE, LINK_BOTTOM, GLYPH_FOCUS, LINK_PARENT]);
         for glyph in [
-            "\u{232b}", "\u{26a0}", "\u{21b3}", "\u{2691}", "\u{276f}", "\u{275e}",
+            lane.as_str(),
+            "\u{232b}",
+            "\u{26a0}",
+            "\u{21b3}",
+            "\u{2691}",
+            "\u{276f}",
+            "\u{275e}",
         ] {
-            assert_eq!(glyph.width(), 1, "`{glyph}` is not one column");
-            assert_eq!(
-                UnicodeWidthStr::width_cjk(glyph),
-                1,
-                "`{glyph}` widens to two columns under a CJK locale"
-            );
+            for character in glyph.chars() {
+                assert_eq!(
+                    character.width(),
+                    Some(1),
+                    "`{character}` in `{glyph}` is not one column at the default width"
+                );
+            }
         }
     }
 
     #[test]
-    fn the_meta_column_shows_a_fork_as_direct_over_total() {
+    fn the_counts_column_shows_a_fork_as_direct_over_total() {
         let now = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
         let mut row = fake_row(now);
 
         row.replies = 0;
         row.descendants = 0;
-        assert_eq!(
-            meta_text(&row, now, MetaDetail::Full),
-            "now",
-            "a leaf shows only its age"
-        );
+        assert_eq!(counts_text(&row), "", "a leaf has nothing to count");
 
         row.replies = 2;
         row.descendants = 2;
-        assert_eq!(
-            meta_text(&row, now, MetaDetail::Full),
-            "2 ▸ now",
-            "a flat thread shows one count"
-        );
+        assert_eq!(counts_text(&row), "2 ▸", "a flat thread shows one count");
 
         row.replies = 2;
         row.descendants = 5;
         assert_eq!(
-            meta_text(&row, now, MetaDetail::Full),
-            "2/5 ▸ now",
+            counts_text(&row),
+            "2/5 ▸",
             "a branching thread shows both, which is what makes a fork visible from the list"
         );
     }
 
     #[test]
-    fn the_meta_column_counts_what_points_at_a_note() {
+    fn the_counts_column_counts_what_points_at_a_note() {
         let now = Utc.with_ymd_and_hms(2026, 9, 4, 12, 0, 0).unwrap();
         let mut row = fake_row(now);
 
         row.quoted = 1;
-        assert_eq!(meta_text(&row, now, MetaDetail::Full), "1 ❞ now");
+        assert_eq!(counts_text(&row), "1 ❞");
 
         // Both counts, in the order the eye reads them: what grew under it, then what points at it.
         row.replies = 2;
         row.descendants = 2;
-        assert_eq!(meta_text(&row, now, MetaDetail::Full), "2 ▸ 1 ❞ now");
-        assert_eq!(
-            meta_text(&row, now, MetaDetail::AgeOnly),
-            "now",
-            "a narrow list keeps the age and drops the counts, never the other way round"
-        );
+        assert_eq!(counts_text(&row), "2 ▸ 1 ❞");
+    }
+
+    /// Natural widths in the shape a real frame produces: thirteen-column ids, a counts column
+    /// as wide as its label, and each time column as wide as its own.
+    fn natural(title: usize) -> Natural {
+        Natural {
+            id: 13,
+            title,
+            counts: HEADER_COUNTS.width(),
+            created: HEADER_CREATED.width(),
+            edited: HEADER_EDITED.width(),
+        }
+    }
+
+    /// The time column a view ordered by `ordered` keeps longest.
+    fn kept(columns: Columns, ordered: Time) -> Option<usize> {
+        match ordered {
+            Time::Created => columns.created,
+            Time::Edited => columns.edited,
+        }
+    }
+
+    #[test]
+    fn the_table_never_lays_out_wider_than_its_pane() {
+        // The arithmetic has to close exactly: a row wider than the pane is squeezed by the table,
+        // and what gets squeezed is a time, which a trimmed snapshot cannot show is missing.
+        // Swept over every pane from too narrow for anything to far wider than needed, against
+        // short titles, titles at the cap and titles far past it, in both orders.
+        for ordered in [Time::Created, Time::Edited] {
+            for title in [1, 5, 20, TITLE_MAX, 80] {
+                let natural = natural(title);
+                let floor = MARKER_WIDTH + natural.id + ID_GAP + META_GAP + natural.created;
+                for inner in floor..200 {
+                    let columns = list_columns(natural, inner, ordered);
+                    assert!(
+                        columns.total() <= inner,
+                        "title {title} in {inner}: {columns:?} is {} wide",
+                        columns.total()
+                    );
+                    assert!(
+                        kept(columns, ordered).is_some(),
+                        "the time the view is ordered by is never what gives"
+                    );
+
+                    let sum: u16 = columns
+                        .constraints()
+                        .iter()
+                        .map(|c| match c {
+                            Constraint::Length(n) => *n,
+                            other => panic!("{other:?} is not a fixed width"),
+                        })
+                        .sum();
+                    assert_eq!(
+                        usize::from(sum),
+                        columns.total(),
+                        "the constraints the table is handed are the widths that were decided"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_columns_drop_in_order_before_the_title_is_clipped() {
+        // Counts, then the time the view is not ordered by, then the title. Narrowing a pane one
+        // column at a time, nothing later in that order loses a column while anything earlier is
+        // still drawn.
+        let natural = natural(20);
+        for ordered in [Time::Created, Time::Edited] {
+            for inner in 30..120 {
+                let columns = list_columns(natural, inner, ordered);
+                let other = match ordered {
+                    Time::Created => columns.edited,
+                    Time::Edited => columns.created,
+                };
+                if columns.counts.is_some() {
+                    assert!(
+                        other.is_some(),
+                        "the other time went before the counts at {inner}"
+                    );
+                }
+                if other.is_some() {
+                    assert_eq!(columns.title, 20, "the title was clipped at {inner} first");
+                }
+            }
+        }
     }
 
     /// A `Row` with the fields these tests care about and defaults elsewhere.

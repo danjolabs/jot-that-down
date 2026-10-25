@@ -75,19 +75,22 @@ impl ViewKind {
 /// what a keypress changes, and rendering reads it the way rendering reads every other field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Panes {
-    /// The calendar column on the left.
+    /// The column on the left: the calendar, and the thread graph under it.
     pub sidebar: bool,
     /// The reader beside the list.
     pub reader: bool,
 }
 
 impl Default for Panes {
-    /// Both on. The width rule is what usually decides, and a surface that opens with its panes
-    /// hidden makes their keys undiscoverable — you cannot toggle off something you never saw.
+    /// The sidebar on and the reader closed: the user chose this on 2026-10-26.
+    ///
+    /// It used to be both on, on the argument that a pane you never saw has an undiscoverable key.
+    /// The `] reader` hint in the status bar is what keeps it discoverable instead. `]` opens it,
+    /// and the width rule in [`crate::ui::split_frame`] still decides whether an open reader fits.
     fn default() -> Self {
         Panes {
             sidebar: true,
-            reader: true,
+            reader: false,
         }
     }
 }
@@ -162,9 +165,10 @@ pub enum Pending {
 
 /// What one lane column holds on one row of the thread graph.
 ///
-/// Topology, not glyphs. [`crate::ui`] maps these onto `*`, `|`, `/` and `\` — the sweep has no
-/// business knowing what a terminal cell looks like, and the mapping is where the
-/// one-column-in-every-locale rule is asserted.
+/// Topology, not glyphs. The sweep says *what* is in each column; [`crate::ui`] decides what a
+/// terminal cell looks like, including the glyphs that depend on a column's neighbours — whether a
+/// fork is the last one on its row, whether a lane is crossed by a horizontal. The sweep has no
+/// business knowing any of that, and the mapping is where the one-column rule is asserted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
     /// Nothing here on this row.
@@ -173,10 +177,17 @@ pub enum Lane {
     Through,
     /// This row's note sits in this lane.
     Node,
+    /// On a connector row, the lane of the note on the row above that forked. Its line carries
+    /// straight on into the first reply, which always inherits its parent's lane; this is where
+    /// the horizontal out to the other replies starts.
+    ///
+    /// Always a live column: a connector row exists only under a note with two or more replies,
+    /// and the first of them is in this lane.
+    Branch,
     /// A reply opening a lane to the **right** of the note it replies to.
     ForkRight,
     /// A reply opening a lane to the **left** — a lane that fell empty earlier and is being
-    /// reused rather than a seventh column being added to a twenty-column pane.
+    /// reused rather than a new column being added to a twenty-column pane.
     ForkLeft,
 }
 
@@ -193,8 +204,9 @@ pub struct GraphNode {
 
 /// One row of the lane graph: a gutter, and the note it belongs to when it has one.
 ///
-/// A row with no node is a **connector**: the row drawn under a fork, carrying the diagonals that
-/// say which lanes the replies opened into. It has no label because it is not a note.
+/// A row with no node is a **connector**: the row drawn under a fork, carrying the `Branch` the
+/// fork starts from and the `ForkRight` / `ForkLeft` lanes the replies opened into. It has no label
+/// because it is not a note.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphRow {
     /// One entry per lane that exists on this row, left to right.
@@ -227,8 +239,6 @@ pub struct App {
     /// whole vault is asked for at once and the sidebar takes the month it needs out of it; a
     /// month-bounded query would have to be redone the moment the calendar can be paged.
     days: BTreeSet<NaiveDate>,
-    /// Whether the thread graph is toggled on. Off until asked for; see [`Action::ToggleGraph`].
-    graph_open: bool,
     /// The focused note's thread, swept into lanes. See [`App::refresh_graph`].
     graph: Vec<GraphRow>,
     /// Which note [`App::graph`] was built for, so the sweep is not redone every frame.
@@ -299,9 +309,9 @@ impl App {
             // test binary happens to run in. See [`App::with_zone`].
             zone: Utc.fix(),
             days: BTreeSet::new(),
-            // Off until asked for. The sidebar's job is the calendar, and a graph occupying the
-            // space permanently is what `stage6.md` refused when it settled this as a toggle.
-            graph_open: false,
+            // Filled by the `reload` below, like everything else derived from the vault. There is
+            // no toggle: the graph is always under the calendar, by the user's decision of
+            // 2026-10-25, which reversed `stage6.md`'s toggle.
             graph: Vec::new(),
             graph_key: None,
             query: String::new(),
@@ -440,9 +450,9 @@ impl App {
     /// actually differ.
     pub fn prepare_preview(&mut self, width: Option<u16>) {
         // A hidden reader is not rendered into, so rendering for it is a highlighter — possibly a
-        // subprocess — spawned for a panel nobody asked for. The run loop cannot know this: it
-        // holds a terminal size and asks [`crate::ui::reader_text_width`], which answers for the
-        // default pane set.
+        // subprocess — spawned for a panel nobody asked for. A width says how much room a panel
+        // would have, not whether one is open: [`crate::ui::reader_text_width`] answers for a
+        // reader that is wanted, whatever this says.
         if !self.panes.reader {
             self.preview.clear();
             self.preview_key = None;
@@ -539,10 +549,6 @@ impl App {
             // whole screen changing shape, which needs no announcement when it happens.
             Action::ToggleSidebar => self.panes.sidebar = !self.panes.sidebar,
             Action::ToggleReader => self.panes.reader = !self.panes.reader,
-            // Same reasoning one pane in. `ui::split_sidebar` may refuse this on a short terminal
-            // and `split_frame` may have dropped the sidebar entirely, so a toast confirming it
-            // would be promising something this end of the surface cannot check.
-            Action::ToggleGraph => self.graph_open = !self.graph_open,
 
             Action::Search => {
                 self.view = ViewKind::Search;
@@ -605,16 +611,12 @@ impl App {
     /// Deliberately not called from the draw path: [`crate::ui`] is pure and a frame is painted
     /// ten times a second, so the sweep runs on the two events that can change its answer — a
     /// reload and a move — and nowhere else.
+    ///
+    /// Always kept current, including while the sidebar is hidden or the frame is too narrow or
+    /// too short to draw it: `App` does not know the frame's size — `ui::split_frame` and
+    /// `ui::split_sidebar` decide that at draw time — and one sweep of tens of notes per cursor
+    /// move is not worth a second source of truth about what is on screen.
     fn refresh_graph(&mut self) {
-        // Nothing is drawn while the toggle is off, so nothing is computed either. Dropping the
-        // rows rather than keeping them also means turning the graph back on cannot show a
-        // thread from before the last reload.
-        if !self.graph_open {
-            self.graph.clear();
-            self.graph_key = None;
-            return;
-        }
-
         let Some(focus) = self.focused_id() else {
             self.graph.clear();
             self.graph_key = None;
@@ -897,13 +899,7 @@ impl App {
         &self.days
     }
 
-    /// Whether the thread graph is toggled on.
-    #[must_use]
-    pub fn graph_is_open(&self) -> bool {
-        self.graph_open
-    }
-
-    /// The focused note's thread as lane rows, root first. Empty while the graph is off.
+    /// The focused note's thread as lane rows, root first. Empty only when nothing is focused.
     #[must_use]
     pub fn graph(&self) -> &[GraphRow] {
         &self.graph
@@ -1071,14 +1067,16 @@ impl App {
 ///    The lane is emptied, and the row drawn is `Node` in that column and `Through` in every other
 ///    live one.
 /// 2. **Replace the lane with the note's replies.** The first reply takes the lane its parent just
-///    vacated, so an unbranched conversation never changes column and costs exactly one column of
+///    vacated, so an unbranched conversation never changes column and costs exactly one lane of
 ///    gutter forever. Every further reply takes the leftmost empty lane, appending a new one only
 ///    when there is none — which is what keeps a thread with many short branches from growing a
 ///    column per leaf. A note with no replies simply leaves its lane empty.
 /// 3. **Draw a connector row under a fork.** Only under a fork: one reply continues the line and
-///    needs no diagonal. The extra replies are drawn `ForkRight` or `ForkLeft` depending on which
-///    side of the parent their lane fell, which is the only place `ForkLeft` comes from — a lane
-///    being *reused* is a lane to the left.
+///    needs no connector. The parent's lane is drawn `Branch` — the first reply is in it, so the
+///    line carries on, and the renderer needs to know where the horizontal starts. The extra
+///    replies are drawn `ForkRight` or `ForkLeft` depending on which side of the parent their lane
+///    fell, which is the only place `ForkLeft` comes from — a lane being *reused* is a lane to the
+///    left.
 ///
 /// Trailing empty lanes are dropped at the end of each pass, so the gutter is as wide as the
 /// thread is branchy at that moment and no wider.
@@ -1130,6 +1128,9 @@ fn sweep(tree: &TreeNode, focus: NoteId) -> Vec<GraphRow> {
 
         if !forks.is_empty() {
             let mut gutter = through(&lanes);
+            // Live by construction: the first reply took this lane above, and only an *empty*
+            // trailing lane is popped.
+            gutter[at] = Lane::Branch;
             for lane in forks {
                 gutter[lane] = if lane > at {
                     Lane::ForkRight
@@ -1279,8 +1280,11 @@ mod tests {
         let (_tmp, mut app) = vault(&["a note"]);
         assert_eq!(
             app.panes(),
-            Panes::default(),
-            "both panes are on to begin with"
+            Panes {
+                sidebar: true,
+                reader: false
+            },
+            "the sidebar is on and the reader closed to begin with (user decision, 2026-10-26)"
         );
 
         app.dispatch(Action::ToggleReader);
@@ -1288,7 +1292,7 @@ mod tests {
             app.panes(),
             Panes {
                 sidebar: true,
-                reader: false
+                reader: true
             }
         );
         app.dispatch(Action::ToggleSidebar);
@@ -1296,7 +1300,7 @@ mod tests {
             app.panes(),
             Panes {
                 sidebar: false,
-                reader: false
+                reader: true
             }
         );
 
@@ -1314,11 +1318,12 @@ mod tests {
 
     #[test]
     fn a_hidden_reader_is_not_rendered_into() {
-        // The run loop asks every frame, with a width computed for the default pane set — it
-        // cannot know the panel is away. Each render may be a `bat` per frame, so this is the
+        // The run loop asks every frame, and a width is room for a panel, not proof that one is
+        // open. Each render may be a `bat` per frame, so this is the
         // difference between a hidden panel costing nothing and costing everything.
         let (_tmp, mut app) = vault(&["one"]);
         let counter = counting(&mut app);
+        app.dispatch(Action::ToggleReader);
 
         app.prepare_preview(Some(40));
         assert_eq!(calls(&counter), 1);
@@ -1387,6 +1392,7 @@ mod tests {
     #[test]
     fn the_reader_renders_the_focused_note_and_promotes_its_title() {
         let (_tmp, mut app) = vault(&["a note"]);
+        app.dispatch(Action::ToggleReader);
         app.prepare_preview(Some(40));
 
         let text: String = app.preview().iter().map(ToString::to_string).collect();
@@ -1404,6 +1410,7 @@ mod tests {
         // process launch, so anything but a cache here is a `bat` per frame forever.
         let (_tmp, mut app) = vault(&["one", "two"]);
         let counter = counting(&mut app);
+        app.dispatch(Action::ToggleReader);
 
         for _ in 0..5 {
             app.prepare_preview(Some(40));
@@ -1422,6 +1429,7 @@ mod tests {
     fn a_frame_too_narrow_for_a_panel_renders_nothing_at_all() {
         let (_tmp, mut app) = vault(&["a note"]);
         let counter = counting(&mut app);
+        app.dispatch(Action::ToggleReader);
 
         app.prepare_preview(None);
         assert!(app.preview().is_empty());
@@ -1432,6 +1440,7 @@ mod tests {
     #[test]
     fn an_empty_list_leaves_the_reader_with_nothing_to_show() {
         let (_tmp, mut app) = vault(&[]);
+        app.dispatch(Action::ToggleReader);
         app.prepare_preview(Some(40));
         assert!(app.preview().is_empty());
         assert_eq!(app.preview_id(), None);
@@ -1998,6 +2007,10 @@ mod tests {
     }
 
     /// The sweep as text: the gutter, then the label or nothing for a connector.
+    ///
+    /// A notation for the *topology*, one character per lane, and deliberately not what
+    /// [`crate::ui`] paints: `+` is `Branch`, and the renderer's choice between `├`, `┤` and `┼`
+    /// for it depends on its neighbours, which is a rendering question these tests are not about.
     fn drawn(rows: &[GraphRow]) -> Vec<String> {
         rows.iter()
             .map(|row| {
@@ -2008,6 +2021,7 @@ mod tests {
                         Lane::Empty => ' ',
                         Lane::Through => '|',
                         Lane::Node => '*',
+                        Lane::Branch => '+',
                         Lane::ForkRight => '\\',
                         Lane::ForkLeft => '/',
                     })
@@ -2041,10 +2055,10 @@ mod tests {
     #[test]
     fn a_fork_opens_a_lane_to_the_right_under_a_connector_row() {
         //   1
-        //   |\
+        //   +\
         //   2 3
         let rows = sweep(&node(1, vec![node(2, vec![]), node(3, vec![])]), nid(1));
-        assert_eq!(drawn(&rows), ["* n1", "|\\", "*| n2", " * n3"]);
+        assert_eq!(drawn(&rows), ["* n1", "+\\", "*| n2", " * n3"]);
     }
 
     #[test]
@@ -2071,7 +2085,8 @@ mod tests {
     fn a_branch_that_ends_frees_its_lane_for_the_next_fork() {
         // The lane bookkeeping's whole point. 1 forks into 2 and 3; 2 is a leaf, so its lane is
         // empty by the time 3 forks — and 3's second reply reuses it rather than opening a fourth
-        // column in a twenty-column pane. Reuse to the *left* is the only source of `/`.
+        // column in a twenty-column pane. Reuse to the *left* is the only source of `/`, and the
+        // `Branch` it forks from is then to the fork's right.
         let tree = node(
             1,
             vec![
@@ -2082,7 +2097,7 @@ mod tests {
         let rows = sweep(&tree, nid(1));
         assert_eq!(
             drawn(&rows),
-            ["* n1", "|\\", "*| n2", " * n3", "/|", "|* n4", "* n5"]
+            ["* n1", "+\\", "*| n2", " * n3", "/+", "|* n4", "* n5"]
         );
         assert!(
             rows.iter().all(|row| row.lanes.len() <= 2),
@@ -2096,8 +2111,126 @@ mod tests {
         let tree = node(1, vec![node(2, vec![]), node(3, vec![]), node(4, vec![])]);
         assert_eq!(
             drawn(&sweep(&tree, nid(1))),
-            ["* n1", "|\\\\", "*|| n2", " *| n3", "  * n4"]
+            ["* n1", "+\\\\", "*|| n2", " *| n3", "  * n4"]
         );
+    }
+
+    #[test]
+    fn a_fork_can_open_lanes_on_both_sides_of_its_branch_at_once() {
+        // 2 is a leaf, so lane 0 is free when 3 forks three ways from lane 1: the first reply
+        // inherits lane 1, the second reuses lane 0 on the left, the third appends lane 2 on the
+        // right. The one connector shape with forks on both sides of the `Branch`.
+        let tree = node(
+            1,
+            vec![
+                node(2, vec![]),
+                node(3, vec![node(4, vec![]), node(5, vec![]), node(6, vec![])]),
+            ],
+        );
+        assert_eq!(
+            drawn(&sweep(&tree, nid(1))),
+            [
+                "* n1", "+\\", "*| n2", " * n3", "/+\\", "|*| n4", "* | n5", "  * n6"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fork_into_the_leftmost_free_lane_can_leave_an_empty_one_inside_its_connector() {
+        // 2 and 3 are leaves, so both their lanes are free by the time 4 forks from lane 2. Its
+        // second reply takes the *leftmost* free lane, and lane 1 stays empty between the fork
+        // and its `Branch` — the renderer runs the horizontal straight through it.
+        let tree = node(
+            1,
+            vec![
+                node(2, vec![]),
+                node(3, vec![]),
+                node(4, vec![node(5, vec![]), node(6, vec![])]),
+            ],
+        );
+        assert_eq!(
+            drawn(&sweep(&tree, nid(1))),
+            [
+                "* n1", "+\\\\", "*|| n2", " *| n3", "  * n4", "/ +", "| * n5", "* n6"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fork_past_a_live_lane_leaves_that_lane_passing_through_its_connector() {
+        // 2 forks while 3's lane is still live between it and the column its second reply has to
+        // append. The live lane stays `Through` on the connector — the renderer draws the
+        // horizontal across it — rather than being displaced.
+        let tree = node(
+            1,
+            vec![
+                node(2, vec![node(4, vec![]), node(5, vec![])]),
+                node(3, vec![]),
+            ],
+        );
+        assert_eq!(
+            drawn(&sweep(&tree, nid(1))),
+            ["* n1", "+\\", "*| n2", "+|\\", "|*| n3", "* | n4", "  * n5"]
+        );
+    }
+
+    #[test]
+    fn every_connector_has_exactly_one_branch_under_the_note_that_forked() {
+        // The renderer starts the horizontal at the `Branch`, so a connector with none, or two,
+        // or one in the wrong column, draws a line from nowhere. Checked over every shape above
+        // and one with a fork nested in a fork.
+        let trees = [
+            node(1, vec![node(2, vec![]), node(3, vec![])]),
+            node(1, vec![node(2, vec![]), node(3, vec![]), node(4, vec![])]),
+            node(
+                1,
+                vec![
+                    node(2, vec![]),
+                    node(3, vec![node(4, vec![]), node(5, vec![]), node(6, vec![])]),
+                ],
+            ),
+            node(
+                1,
+                vec![
+                    node(
+                        2,
+                        vec![
+                            node(4, vec![]),
+                            node(5, vec![node(7, vec![]), node(8, vec![])]),
+                        ],
+                    ),
+                    node(3, vec![node(6, vec![])]),
+                ],
+            ),
+        ];
+        for tree in &trees {
+            let rows = sweep(tree, nid(1));
+            assert!(rows[0].node.is_some(), "the root comes first");
+            for (above, row) in rows.iter().zip(rows.iter().skip(1)) {
+                if row.node.is_some() {
+                    assert!(
+                        !row.lanes.contains(&Lane::Branch),
+                        "a note row carries a `Branch`: {:?}",
+                        drawn(&rows)
+                    );
+                    continue;
+                }
+                let forked = above
+                    .lanes
+                    .iter()
+                    .position(|lane| *lane == Lane::Node)
+                    .expect("a connector is drawn under the note row that forked");
+                let branches: Vec<usize> = (0..row.lanes.len())
+                    .filter(|&at| row.lanes[at] == Lane::Branch)
+                    .collect();
+                assert_eq!(
+                    branches,
+                    [forked],
+                    "the `Branch` is not under the note that forked: {:?}",
+                    drawn(&rows)
+                );
+            }
+        }
     }
 
     #[test]
@@ -2112,7 +2245,7 @@ mod tests {
         assert_eq!(focused, [Some("n3".to_string())]);
 
         // A focus the tree does not contain cannot happen through `App`, and marking nothing is
-        // the right degradation if it ever does — better a graph with no `@` than a panic.
+        // the right degradation if it ever does — better a graph with no focus mark than a panic.
         assert!(
             sweep(&tree, nid(99))
                 .iter()
@@ -2157,7 +2290,6 @@ mod tests {
         ws.sync().unwrap();
 
         let mut app = App::new(ws);
-        app.dispatch(Action::ToggleGraph);
 
         // Put the cursor on the reply, which is the note whose own subtree is a single node.
         let at = app
@@ -2190,17 +2322,16 @@ mod tests {
     }
 
     #[test]
-    fn the_graph_is_empty_until_it_is_toggled_and_follows_the_cursor_after() {
+    fn the_graph_is_there_from_the_first_frame_and_follows_the_cursor() {
+        // No toggle: the graph is always under the calendar (user decision, 2026-10-25), so it is
+        // computed by `App::new` rather than on a keypress, and nothing has to be pressed first.
         let (_tmp, mut app) = vault(&["a", "b"]);
-        assert!(
-            app.graph().is_empty() && !app.graph_is_open(),
-            "nothing is drawn and nothing is computed while the toggle is off"
-        );
-
-        app.dispatch(Action::ToggleGraph);
-        assert!(app.graph_is_open());
         let first = app.graph().to_vec();
         assert_eq!(first.len(), 1, "two unrelated notes are two threads of one");
+        assert!(
+            first[0].node.as_ref().is_some_and(|node| node.is_focus),
+            "and the one row is the note under the cursor"
+        );
 
         app.dispatch(Action::MoveDown);
         assert_ne!(
@@ -2208,9 +2339,6 @@ mod tests {
             first.as_slice(),
             "the graph is a function of what is under the cursor"
         );
-
-        app.dispatch(Action::ToggleGraph);
-        assert!(app.graph().is_empty(), "and the same key puts it away");
     }
 
     #[test]
@@ -2218,7 +2346,6 @@ mod tests {
         // The cache key is the focused note, so a vault that changed under a stationary cursor is
         // exactly the case a naive key would miss.
         let (_tmp, mut app) = vault(&["root"]);
-        app.dispatch(Action::ToggleGraph);
         assert_eq!(app.graph().len(), 1);
 
         let root = app.focused().unwrap().note.id;
@@ -2236,8 +2363,7 @@ mod tests {
 
     #[test]
     fn the_graph_of_an_empty_list_is_empty_rather_than_a_panic() {
-        let (_tmp, mut app) = vault(&[]);
-        app.dispatch(Action::ToggleGraph);
+        let (_tmp, app) = vault(&[]);
         assert!(app.graph().is_empty());
     }
 }

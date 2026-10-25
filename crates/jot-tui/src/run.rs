@@ -127,7 +127,7 @@ fn event_loop(
         // on the first frame after the burst, and labels itself from what it is showing meanwhile.
         if !event::poll(Duration::ZERO)? {
             let size = terminal.size()?;
-            // `_for`, not the default-pane version: the sidebar is 22 columns of the reader's
+            // `_for`, not the default-pane version: the sidebar is 30 columns of the reader's
             // budget, so hiding it makes the panel wider than the width this prepared text for
             // and the reader would wrap early against its own border.
             app.prepare_preview(ui::reader_text_width_for(
