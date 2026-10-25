@@ -152,8 +152,8 @@ Three deliberate departures from the sketch:
 A deferred plan keeps its content and loses its number. It has no `Depends on` because nothing
 depends on it — that is what made it safe to move.
 
-[`orchestration.md`](orchestration.md) covers how work gets done — a lead agent, implementer subagents,
-a Codex review of every turn, and your review before anything is committed.
+[`orchestration.md`](orchestration.md) covers how work gets done — a main agent, one background implementer,
+Codex review on request, and your review before anything is committed.
 
 Stages 1–2 are one continuous piece of work — nothing is user-visible until stage 3. Resist the urge
 to skip ahead: every shortcut taken in 1–3 is paid for three times over in everything after.

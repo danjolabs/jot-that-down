@@ -8,7 +8,7 @@ desktop app is deferred to `docs/plans/todo/desktop.md` and is **not** stage 6.
 
 - `docs/plans/overview.md` — locked decisions, architecture, conventions
 - `docs/plans/stages/stage<N>.md` — the stage being worked on
-- `docs/plans/orchestration.md` — the workflow: lead agent, implementer subagents, Codex review, user review
+- `docs/plans/orchestration.md` — the workflow: a main agent, one background implementer, and your review
 - `docs/plans/todo/` — plans that left the numbered stages. Deferred, not cancelled, and not work
   in progress: read one only when it is being scheduled again.
 
