@@ -1,5 +1,8 @@
 # Stage 7 — What is left of the frontmatter schema
 
+> **Superseded on 2026-11-23** by [`../redesign.md`](../redesign.md). Kept as history; it describes
+> the micro-blog design that the redesign replaced.
+
 **Status.** Mostly subsumed. This stage had two headline features and both are settled: user-declared
 typed frontmatter **landed early**, in `docs/plans/stages/pre-stage4-refactor.md`, and `plain` workspaces are
 **deleted**. What remains is the tail of the type system — enums, defaults — plus rename detection,

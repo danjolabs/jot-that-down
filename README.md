@@ -13,38 +13,19 @@ by git.
 
 ## Status
 
-**Usable from the command line.** Stages 1–5 of
-[`docs/plans/overview.md`](docs/plans/overview.md) are built.
+**Usable from the command line.** The schema-first redesign
+([`docs/plans/redesign.md`](docs/plans/redesign.md)) is built: `workspace.toml` and `schema.json`,
+strict writes, per-field problems on read, field commands, and an index keyed by id. The terminal
+browser from the earlier micro-blog design was removed, and the desktop app stays deferred.
 
-| | |
-| --- | --- |
-| ✅ Vault, frontmatter round-trip, atomic writes | stages 1 and 1b |
-| ✅ Note lifecycle, thread algebra, links | stage 2 |
-| ✅ `jot` CLI | stage 3 |
-| ✅ SQLite index, incremental sync, deterministic rebuild | stage 4 |
-| ✖ `jot tui` — built in stage 5, since removed; `jot` is CLI-only | stage 5 |
-| ⏳ Refactor and polish; the tail of the schema | stages 6–7 |
-| 💤 Desktop app | deferred, unscheduled |
+The version is `0.0.<stage>-<letter>` while this is a prototype; see the versioning convention in
+[`docs/plans/overview.md`](docs/plans/overview.md). `jot --version` says which build is on your
+PATH. Nothing is published to crates.io at these versions.
 
-The version is `0.0.<stage>-<letter>` while this is a prototype — the patch is the stage number, the
-letter is a round of change made after that stage landed, and a bare `0.0.<stage>` means the stage is
-sealed. `jot --version` therefore says which stage the binary on your PATH came from. Nothing is
-published to crates.io at these versions; see the versioning convention in
-[`docs/plans/overview.md`](docs/plans/overview.md).
-
-Stages 2 and 3 were built **before** stage 4, because nothing in them needs a database: threads,
-reference resolution, links and prefix resolution are all functions of the set of notes in the
-vault, and the index is a speed layer over that set. `jot-core` read the whole vault into memory
-instead, behind the same public API SQLite now sits behind.
-
-Stage 4 made that layer real without changing the API above it. A command no longer rescans the
-vault: `(size, mtime_ns)` decides whether a file is worth opening and a blake3 hash decides whether
-to believe it, so a note nothing has touched is answered from the index. At 5,000 notes on Windows
-that is the difference between **~700 ms per command and ~80 ms**, and the 700 ms is not gone —
-it is what the first run after `rm .jot/index.db` still costs.
-
-The index is derived and disposable. Deleting it loses nothing, `jot index rebuild` recreates it
-from the files, and nothing is ever stored there that the markdown does not already say.
+A command does not rescan the workspace: `(size, mtime_ns)` decides whether a file is worth opening
+and a blake3 hash decides whether to believe it, so a note nothing has touched is answered from the
+index. The index is derived and disposable. Deleting it loses nothing, and `jot index rebuild`
+recreates it from the files.
 
 ## Install
 
@@ -158,15 +139,13 @@ wrong workspace is the one mistake this tool could make quietly.
 ## Development
 
 ```sh
-cargo test --workspace                              # unit and integration
-cargo test -p jot-acceptance --features stage4      # executable acceptance criteria
-cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-`crates/jot-acceptance` is the executable form of each stage's acceptance criteria. Changing or
-deleting an existing assertion is always called out for review, so the tests are not weakened to
-fit the code — see [`docs/plans/orchestration.md`](docs/plans/orchestration.md).
+Core is tested against `tests/fixtures/workspace/` through its public API; the CLI with
+`assert_cmd`. How changes get made is in [`docs/plans/orchestration.md`](docs/plans/orchestration.md).
 
 ### Dependencies
 
@@ -176,19 +155,21 @@ gain a minor release.
 
 | Crate | Why this one, rather than a default |
 | --- | --- |
-| `blake3` | `notes.content_hash`. The `(size, mtime_ns)` fast path is a *hint*; the hash is what makes trusting it safe. Named in `stage4.md`'s schema. |
+| `blake3` | `notes.hash`. The `(size, mtime_ns)` fast path is a *hint*; the hash is what makes trusting it safe. |
 | `chrono` | Times. `default-features = false` because the crate's default pulls in more than dates. |
 | `directories` | The OS config directory, for the workspace registry. |
-| `indexmap` | Insertion-ordered maps. Frontmatter key order is part of the file, so a `HashMap` would silently reorder someone's note. |
-| `markdown` | markdown-rs, chosen in [`docs/runs/stage1b/markdown-crate.md`](docs/runs/stage1b/markdown-crate.md): an AST parser and never a renderer, so a note's body stays a slice of the original bytes. Stage 3 needs it for `[[uuid]]` extraction anyway. |
-| `rusqlite` | The index. `bundled` compiles SQLite from vendored C rather than linking a system one, so every platform builds the same version and a machine without `libsqlite3` is not a special case. |
-| `serde`, `serde_json`, `toml`, `yaml_serde` | The four formats a vault touches. `serde_json`'s `preserve_order` keeps `notes.raw` in the key order the file writes, which is what `Record::undeclared` is ordered by. |
-| `thiserror` | The error taxonomy in `jot-core`. `anyhow` is for the binaries; the two never swap. |
-| `uuid` | `v4` for workspace ids, `v7` for note ids. The asymmetry is argued in `workspace::Manifest::id`: only a *note* has its creation time and its ordering read back out of its identity, and v7's timestamp prefix is what makes a short id long. |
+| `indexmap` | Insertion-ordered maps. Frontmatter key order is part of the file. |
+| `jsonschema` | Validates frontmatter against `schema.json` (draft 2020-12). Default features off: they bring an HTTP client, and `$ref` resolves local files only. |
+| `markdown` | markdown-rs: an AST parser and never a renderer, used for `[[id]]` extraction so links in code are skipped. |
+| `notify` | The watcher behind `Sync`. Lives in core so no surface grows its own. |
+| `rusqlite` | The index. `bundled` compiles SQLite from vendored C, so every platform builds the same version. |
+| `serde`, `serde_json`, `toml`, `yaml_serde` | The formats a workspace touches. `serde_json`'s `preserve_order` keeps `schema.json`'s `properties` in declaration order, which is the frontmatter key order. |
+| `thiserror` | The error taxonomy in `jot-core`. `anyhow` is for the binary; the two never swap. |
+| `uuid` | `v7` for note ids. |
 
-The YAML, TOML and time choices were settled together in
-[`docs/runs/stage1/yaml-crate.md`](docs/runs/stage1/yaml-crate.md) — read it before
-changing any of them.
+The YAML, TOML and time choices were settled in
+[`docs/runs/stage1/yaml-crate.md`](docs/runs/stage1/yaml-crate.md); read it before changing any of
+them.
 
 **Two of the groupings in `Cargo.toml` are rules, not tidiness.**
 
@@ -197,16 +178,17 @@ binaries' error type by convention (`overview.md`), and a `clap` type in a core 
 make the domain depend on how one surface happens to present it.
 
 *`serde_json` is the deliberate exception*, and sits with the core crates rather than the surface
-ones. `jot-core` uses it for the index's `raw` column — a JSON projection of the frontmatter block
-— inside a module that is private to the crate. The rule above is about **signatures**: no
-`serde_json` type appears in a public `jot-core` signature, so the domain does not depend on it.
+ones. Since the redesign it **is** part of `jot-core`'s public API: frontmatter is JSON once parsed,
+because `schema.json` validates JSON values, so `Fields` is a `serde_json::Map` and `Value` appears
+in `Action` and `Event`. A wrapper type would only restate it.
 
 ## Documentation
 
 | | |
 | --- | --- |
 | [`docs/plans/overview.md`](docs/plans/overview.md) | Locked decisions, architecture, the core API. **Read first.** |
-| [`docs/plans/stages/stage<N>.md`](docs/plans/stages) | One file per stage, self-contained. |
+| [`docs/plans/redesign.md`](docs/plans/redesign.md) | The detailed spec of the current design. |
+| [`docs/plans/stages/stage<N>.md`](docs/plans/stages) | The stages that built the earlier micro-blog design. History, not spec. |
 | [`docs/plans/todo/`](docs/plans/todo) | Plans that left the numbered stages. Deferred, not cancelled. |
 | [`docs/runs/`](docs/runs) | What each run actually did, what it found, what it cost. |
 | [`docs/cli-json.md`](docs/cli-json.md) | The `--json` contract and exit codes. |

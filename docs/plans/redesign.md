@@ -1,8 +1,7 @@
 # Redesign — a schema-first workspace engine
 
-Settled in conversation with the user on 2026-11-23. **This document supersedes `overview.md`
-wherever the two disagree**; `overview.md`'s locked-decisions table is to be rewritten against it.
-The decisions below were taken by the user and are as locked as the ones they replace.
+Settled in conversation with the user on 2026-11-23. `overview.md` was rewritten against this
+document; where the two disagree, this one wins and `overview.md` is the one to fix. The decisions below were taken by the user and are as locked as the ones they replace.
 
 ## The product, restated
 
@@ -332,5 +331,5 @@ first two are the ones most worth a look.
 - Ordering with no `document:created_at` (default: mtime, labelled).
 - Upgrading an existing old-format vault (`.jot/workspace.toml`, `<id>_slug.md`). Not built; an
   old vault is detected and refused with a message saying what changed.
-- `jot-acceptance` suites for stages 1b and 4 assert the old model. They are left in place and
-  not run; deleting or rewriting them is the user's call.
+- ~~`jot-acceptance` suites for stages 1b and 4.~~ Deleted with the old fixtures, by the user's
+  decision; the CLI and core integration tests cover the new model.

@@ -1,5 +1,8 @@
 # Stage 6 — Refactor and polish
 
+> **Superseded on 2026-11-23** by [`../redesign.md`](../redesign.md). Kept as history; it describes
+> the micro-blog design that the redesign replaced.
+
 **Goal.** Consolidation over what stages 1–5 built. Two surfaces exist and one person has been
 using them daily; this stage is what that use turned up. No new surface, no new subsystem — the CLI
 and the TUI, refined against the way they actually get used.

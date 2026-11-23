@@ -23,7 +23,7 @@ stages 1–6 (planner, integrator, verifier, scribe, wave plans, run artifacts) 
 
 ## The loop
 
-1. **Plan.** The main agent reads `overview.md` and the relevant stage doc. Decisions already
+1. **Plan.** The main agent reads `overview.md` and `redesign.md`. Decisions already
    settled there go into the task as written — a task that leaves one out gets built wrong. The
    task names the goal, the files expected to change, the constraints, and the few behaviours that
    deserve a test.
@@ -36,7 +36,6 @@ stages 1–6 (planner, integrator, verifier, scribe, wave plans, run artifacts) 
    cargo fmt --check
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
-   cargo test -p jot-acceptance --all-features
    ```
 
 4. **Relay.** The main agent reads the report and `git diff --stat` and passes on a short summary:
@@ -77,13 +76,13 @@ These outlive any harness; they are in `AGENTS.md` and repeated in the implement
 
 - Locked decisions in `overview.md` are locked. A reason to revisit one is a question for the user.
 - Surfaces never touch the filesystem or SQLite. Worth a grep before relaying:
-  `rusqlite|std::fs` under `crates/jot-cli` and `crates/jot-tui` should return only the four
-  `jot-cli` lines named in `crates/README.md`.
-- `crates/jot-acceptance/` is the executable form of each stage's acceptance criteria. Implementers
-  may add to it; changing or deleting an existing assertion must be called out in the report and
-  in the relay, never done quietly to get to green.
+  `rusqlite|std::fs` under `crates/jot-cli` should return only the `editor.rs` lines named in
+  `crates/README.md`.
+- jot never writes a note that fails the schema; every write goes through core's validator.
+- Changing or deleting an existing test assertion must be called out in the report and in the
+  relay, never done quietly to get to green.
 
 ## What no agent can verify
 
-Some criteria need you: whether the TUI feels right, a week of real capture without loss, rename
-detection being worth its cost (stage 7). The relay lists these rather than marking them done.
+Some criteria need you: whether the CLI feels right, a week of real capture without loss, whether a
+schema change reads clearly in `jot check`. The relay lists these rather than marking them done.

@@ -12,7 +12,7 @@ working with the user. See `docs/plans/orchestration.md`.
 
 1. `AGENTS.md` — the standing rules
 2. `docs/plans/overview.md` — locked decisions, the seam, conventions
-3. The stage doc the task names, if any — including decisions already settled in it
+3. `docs/plans/redesign.md` — the detailed spec, including decisions already settled in it
 
 ## Constraints
 
@@ -21,8 +21,8 @@ working with the user. See `docs/plans/orchestration.md`.
   task's purpose: report it instead.
 - **Never change a locked decision** from `overview.md`. Report the reason instead.
 - **No new dependencies** unless the task says so.
-- **Acceptance tests** (`crates/jot-acceptance/`): you may add to them. If you change or delete an
-  existing assertion, say so explicitly in your report with the reason — never to get to green.
+- **Existing test assertions**: if you change or delete one, say so explicitly in your report with
+  the reason — never to get to green.
 - **Do not commit.** The main agent commits after the user has reviewed.
 
 ## Tests
@@ -41,7 +41,6 @@ restate the implementation.
   cargo fmt --check
   cargo clippy --workspace --all-targets -- -D warnings
   cargo test --workspace
-  cargo test -p jot-acceptance --all-features
   ```
 
 ## Report
