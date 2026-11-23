@@ -21,7 +21,7 @@ blake3 = "1.8"
 directories = "6.0.0"
 indexmap = { version = "2.14", features = ["serde"] }
 # JSON Schema validation of frontmatter (`docs/plans/redesign.md`). Default features off: they pull
-# in an HTTP client, and `$ref` is resolved from local files only, by a retriever in `schema.rs`.
+# in an HTTP client, and `$ref` is resolved from local files only, by a retriever in `settings.rs`.
 jsonschema = { version = "0.63", default-features = false }
 markdown = "1.0.0"
 # The watcher lives in core: it is an event source for `Action::Sync`, and a surface that grew its
