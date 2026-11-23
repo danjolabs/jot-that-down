@@ -20,19 +20,25 @@ const HAND_ID: &str = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5";
 
 /// A temp workspace plus a builder for commands pointed at it.
 struct Vault {
-    dir: TempDir,
+    // Held so the directory outlives the test; every path goes through `root`.
+    _dir: TempDir,
+    // The temp dir in the registry's canonical spelling. On a Windows runner the temp dir can be an
+    // 8.3 short path (`C:\Users\RUNNER~1\…`) while the registry stores the long one
+    // (`runneradmin`), so comparing against the raw spelling fails for a correct registry.
+    root: PathBuf,
 }
 
 impl Vault {
     fn new() -> Vault {
         let dir = tempfile::tempdir().unwrap();
-        let vault = Vault { dir };
+        let root = jot_core::registry::canonical(dir.path());
+        let vault = Vault { _dir: dir, root };
         vault.jot(&["ws", "new", &vault.path().display().to_string()]);
         vault
     }
 
     fn path(&self) -> &Path {
-        self.dir.path()
+        &self.root
     }
 
     fn ws(&self) -> &str {
@@ -49,8 +55,8 @@ impl Vault {
             // A registry write must never touch the developer's real one, and `JOT_REGISTRY` is
             // the only thing that guarantees it: `directories` reads `FOLDERID_RoamingAppData`
             // through a syscall on Windows, so `XDG_CONFIG_HOME`/`HOME` isolate nothing there.
-            .env("JOT_REGISTRY", self.dir.path().join("registry.toml"))
-            .current_dir(self.dir.path());
+            .env("JOT_REGISTRY", self.root.join("registry.toml"))
+            .current_dir(&self.root);
         cmd
     }
 
