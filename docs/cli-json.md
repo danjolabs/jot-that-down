@@ -43,7 +43,7 @@ The id carries no meaning — nothing is decoded from it — so there is no reas
 | `edited_at` | string \| null | The file's mtime, from the index. Never read from the file's contents. |
 | `problems` | integer | How many problems the note has. `jot show` and `jot check` list them. |
 
-## `listing` — `ls`, `search`
+## `listing` — `ls`
 
 ```json
 {
@@ -81,22 +81,6 @@ A `row`, extended with:
 the JSON Schema keyword that failed (`type`, `required`, `format`, …) or one of jot's conversion
 rules (`yaml`, `frontmatter`, `key`, `duplicate-key`, `tag`, `number`, `utf8`).
 
-## `links`
-
-```json
-{
-  "id": "…",
-  "links_out": [
-    { "target": "…", "label": "the root", "offset": 34, "length": 45, "state": "missing" }
-  ],
-  "links_in": [ /* row */ ]
-}
-```
-
-`offset` and `length` are byte positions of the whole `[[…]]` within the body. `state` is
-`"present"` or `"missing"`; a link to a deleted note is `"missing"` — a designed state, not
-corruption.
-
 ## `check`
 
 ```json
@@ -110,16 +94,6 @@ corruption.
 `settings.errors` non-empty means writes are refused; `stale` means reads are using the last valid
 settings. `jot check` exits **5** when any note has a problem or `settings.errors` is not empty,
 with or without `--json`. Strays are listed but do not affect the exit code.
-
-## `index status`, `index rebuild`
-
-```json
-{
-  "root": "/home/you/notes",
-  "notes": 12, "notes_with_problems": 1, "strays": 0,
-  "writable": true, "stale": false
-}
-```
 
 ## `ws ls`
 

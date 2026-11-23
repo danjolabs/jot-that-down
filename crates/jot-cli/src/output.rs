@@ -13,9 +13,8 @@
 //! a colour marks is also a word, so a piped or colour-blind reading loses nothing.
 
 use chrono::{DateTime, Local, Utc};
-use jot_core::link::Link;
 use jot_core::registry::Entry;
-use jot_core::snapshot::{Ref, Stray};
+use jot_core::snapshot::Stray;
 use jot_core::{Listing, Note, NoteId, Ordering, Problem, Row};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -79,7 +78,7 @@ impl Style {
 
     /// Render an id at this invocation's width.
     ///
-    /// An id the table does not know — a link to a deleted note — falls back to the full id: there
+    /// An id the table does not know — one just deleted — falls back to the full id: there
     /// is nothing for it to be unique against, and a truncation that cannot be resolved would be
     /// worse than a long one that can.
     pub fn show(&self, id: &NoteId) -> String {
@@ -219,33 +218,6 @@ pub fn show(note: &Note, row: &Row, style: &Style) -> String {
     out
 }
 
-/// A note's outgoing links and the notes linking back to it.
-pub fn links(outgoing: &[(Link, Ref)], backlinks: &[Row], style: &Style) -> String {
-    let mut out = String::new();
-    section(&mut out, "links out", outgoing.len(), style);
-    for (link, target) in outgoing {
-        let what = match target {
-            Ref::Present(row) => style.title(row),
-            Ref::Missing(_) => style.dim("(missing)"),
-        };
-        let label = link
-            .label
-            .as_deref()
-            .map(|l| style.dim(&format!("  as \"{l}\"")))
-            .unwrap_or_default();
-        out.push_str(&format!("  {}  {what}{label}\n", style.id(&link.target)));
-    }
-    section(&mut out, "links in", backlinks.len(), style);
-    for row in backlinks {
-        out.push_str(&format!("  {}  {}\n", style.id(&row.id), style.title(row)));
-    }
-    out
-}
-
-fn section(out: &mut String, name: &str, count: usize, style: &Style) {
-    out.push_str(&style.dim(&format!("{name} ({count})\n")));
-}
-
 /// `jot check`: each note with its problems, then each stray.
 pub fn check(problems: &[(Row, Vec<Problem>)], strays: &[Stray], style: &Style) -> String {
     let mut out = String::new();
@@ -379,21 +351,6 @@ pub fn problem_json(problem: &Problem) -> Value {
 /// One stray file.
 pub fn stray_json(stray: &Stray) -> Value {
     json!({ "path": stray.path.display().to_string(), "reason": stray.reason })
-}
-
-/// One extracted link and what it resolves to.
-pub fn link_json(link: &Link, target: &Ref) -> Value {
-    let state = match target {
-        Ref::Present(_) => "present",
-        Ref::Missing(_) => "missing",
-    };
-    json!({
-        "target": link.target.as_str(),
-        "label": link.label,
-        "offset": link.span.start,
-        "length": link.span.end - link.span.start,
-        "state": state,
-    })
 }
 
 #[cfg(test)]

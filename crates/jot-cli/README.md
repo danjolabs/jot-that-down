@@ -43,18 +43,17 @@ done
 | --- | ---: | --- | --- | --- |
 | `context` | 216 | — | `registry` `workspace` `Error` | Which workspace this command acts on, and *which rule chose it* — flag, then `JOT_WORKSPACE`, then discovery, then the registry's current. `--verbose` prints the reason. Prints settings warnings and errors, and turns an old-format refusal into a message with a hint. Owns `JOT_REGISTRY`. |
 | `editor` | 263 | — | — | The `$EDITOR` loop: scratch file, `$VISUAL` then `$EDITOR`; a refused buffer is reopened with the reasons as `# jot:` comments, and every way out that did not write keeps the draft and prints its path. Every `std::fs` call in the crate is here, and none touches the workspace. |
-| `output` | 425 | — | `link` `registry` `snapshot` and the root re-exports | Rendering. Human format and `--json` are built from the same core values, so they cannot disagree; colour is off when stdout is not a tty or `NO_COLOR` is set, and never carries meaning alone. |
-| `main.rs` | 1214 | `context` `editor` `output` | `registry` `snapshot` and the root re-exports | The clap tree, the dispatch, outcome handling, and the exit codes. |
+| `output` | 382 | — | `registry` `snapshot` and the root re-exports | Rendering. Human format and `--json` are built from the same core values, so they cannot disagree; colour is off when stdout is not a tty or `NO_COLOR` is set, and never carries meaning alone. |
+| `main.rs` | 1094 | `context` `editor` `output` | `registry` `snapshot` and the root re-exports | The clap tree, the dispatch, outcome handling, and the exit codes. |
 
 ## What the surface is
 
 Every command resolves a workspace through `context` and acts through `Workspace`:
 
 - **Capture and edit** — `new`, `edit`, `remove` (deletes the file; confirms)
-- **Read** — `list`, `show`, `search`, `links`, `check`
+- **Read** — `list`, `show`, `check`
 - **Batches** — `field fill | remove | rename`
 - **Workspaces** — `workspace list | use | add | new | remove | prune`
-- **Index** — `index status`, `index rebuild`
 - **Shell** — `completions`
 
 Exit codes are fixed because scripts depend on them: `0` success, `1` runtime (a refused write

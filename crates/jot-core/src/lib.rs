@@ -15,7 +15,6 @@ pub(crate) mod fs;
 pub mod id;
 // Private to the crate, and that is the seam: there is no `&Index` to hand a surface.
 mod index;
-pub mod link;
 pub mod problem;
 pub mod registry;
 pub mod settings;

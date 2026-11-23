@@ -29,13 +29,12 @@ files against the index and produces precise events.
 | --- | --- |
 | `workspace` | The facade: `init`/`open`/`discover`, `decide`/`execute`/`apply`, `subscribe`, every read, and the sync itself. |
 | `action` | `Action`, `Plan`, `Outcome`, `Rejection`, `Failure`, `Event`, and the pure `decide`. |
-| `snapshot` | The workspace in memory — `Record`s, strays, settings — and the queries over it: timeline order, search, prefix resolution, backlinks. |
+| `snapshot` | The workspace in memory — `Record`s, strays, settings — and the queries over it: timeline order and prefix resolution. |
 | `settings` | `workspace.toml`, `schema.json` (compiled with the `jsonschema` crate, format assertion on, local `$ref` only), roles and the cross-file checks, the last valid snapshot. |
 | `document` | A note file: YAML 1.2 core → JSON with conversion problems, and rendering fields + body back. |
 | `problem` | `Problem { key, rule, message }`, schema and conversion alike. |
 | `id` | The opaque `NoteId`, `IdFormat` (`uuidv7`), and the note-or-stray rule for a filename. |
-| `index` | SQLite: `notes`, `field_values`, `problems`, `strays`, `links`, `index_meta`. Private to the crate. |
-| `link` | `[[id]]` extraction from a body, by AST, skipping code. |
+| `index` | SQLite: `notes`, `field_values`, `problems`, `strays`, `index_meta`. Private to the crate. |
 | `shortid` | Shortest unambiguous id prefixes. |
 | `registry` | Known workspaces, keyed by canonical path. `jot-cli`'s alone; nothing in core calls it. |
 | `watch` | A non-recursive watch on the root, debounced, yielding `SyncNeeded`. Never sees `.jot/`. |

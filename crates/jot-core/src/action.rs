@@ -63,7 +63,7 @@ pub enum Action {
         /// The hash the caller last saw — when `$EDITOR` opened, say. `None` means the index's.
         expected_hash: Option<Hash>,
     },
-    /// Delete the note's file. Nothing cascades; links to it dangle, which is a designed state.
+    /// Delete the note's file. Nothing cascades, and jot keeps no copy.
     Delete {
         /// The note.
         id: NoteId,

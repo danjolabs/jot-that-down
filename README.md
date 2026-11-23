@@ -24,8 +24,8 @@ PATH. Nothing is published to crates.io at these versions.
 
 A command does not rescan the workspace: `(size, mtime_ns)` decides whether a file is worth opening
 and a blake3 hash decides whether to believe it, so a note nothing has touched is answered from the
-index. The index is derived and disposable. Deleting it loses nothing, and `jot index rebuild`
-recreates it from the files.
+index. The index is derived and disposable: delete `.jot/index.db` and the next command rebuilds
+it from the files.
 
 ## Install
 
@@ -55,7 +55,6 @@ jot new                      # opens $EDITOR; an untouched buffer cancels
 
 jot list                     # newest first, by the created_at role
 jot show <id>                # frontmatter in schema order, problems beside their keys
-jot search lemon             # any frontmatter text
 ```
 
 Editing and deleting:
@@ -99,11 +98,8 @@ ids; `--json` always does.
 **Nothing guesses.** An ambiguous id lists the candidates and exits non-zero. So does a workspace
 name that matches two workspaces.
 
-**Delete is delete.** `jot remove` removes the file; there is no trash, and nothing cascades — links
-to it simply dangle. Recovery is git's job, or the OS's.
-
-**Links** are `[[<id>]]` or `[[<id>|label]]` in a note's body, and are ignored inside code fences
-and inline code. `jot links <id>` shows outgoing links and backlinks.
+**Delete is delete.** `jot remove` removes the file; there is no trash, and nothing cascades. Recovery
+is git's job, or the OS's.
 
 **`--json` on every read command**, with a documented stable shape — see
 [`docs/cli-json.md`](docs/cli-json.md).
@@ -160,7 +156,7 @@ gain a minor release.
 | `directories` | The OS config directory, for the workspace registry. |
 | `indexmap` | Insertion-ordered maps. Frontmatter key order is part of the file. |
 | `jsonschema` | Validates frontmatter against `schema.json` (draft 2020-12). Default features off: they bring an HTTP client, and `$ref` resolves local files only. |
-| `markdown` | markdown-rs: an AST parser and never a renderer, used for `[[id]]` extraction so links in code are skipped. |
+| `markdown` | markdown-rs, for one job: finding the frontmatter fences. An AST parser and never a renderer, so the body stays a slice of the original bytes. |
 | `notify` | The watcher behind `Sync`. Lives in core so no surface grows its own. |
 | `rusqlite` | The index. `bundled` compiles SQLite from vendored C, so every platform builds the same version. |
 | `serde`, `serde_json`, `toml`, `yaml_serde` | The formats a workspace touches. `serde_json`'s `preserve_order` keeps `schema.json`'s `properties` in declaration order, which is the frontmatter key order. |

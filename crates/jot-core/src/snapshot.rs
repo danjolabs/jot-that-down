@@ -93,8 +93,6 @@ pub struct Record {
     pub(crate) conversion: Vec<Problem>,
     /// Every problem: `conversion` plus the schema's. Recomputable from `fields`.
     pub(crate) problems: Vec<Problem>,
-    /// Distinct `[[id]]` targets in the body, in first-appearance order.
-    pub(crate) links: Vec<NoteId>,
     pub(crate) hash: Hash,
     pub(crate) size: u64,
     pub(crate) mtime_ns: i64,
@@ -123,12 +121,6 @@ impl Record {
     #[must_use]
     pub fn hash(&self) -> Hash {
         self.hash
-    }
-
-    /// The `[[id]]` targets of the body.
-    #[must_use]
-    pub fn links(&self) -> &[NoteId] {
-        &self.links
     }
 
     /// The file's mtime. Index-only, never a fact a file asserts.
@@ -211,15 +203,6 @@ pub enum Resolution {
     Ambiguous(Vec<Row>),
     /// Nothing matched.
     None,
-}
-
-/// What an `[[id]]` link points at.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Ref {
-    /// A note in this workspace.
-    Present(Row),
-    /// No note has this id — deleted, or never existed. A designed state, not an error.
-    Missing(NoteId),
 }
 
 /// The workspace in memory.
@@ -306,28 +289,6 @@ impl Snapshot {
         self.listing(self.notes.values())
     }
 
-    /// Notes whose title or any string value contains `text`, case-insensitively, in timeline
-    /// order. An empty query matches nothing.
-    #[must_use]
-    pub fn search(&self, text: &str) -> Listing {
-        let needle = text.trim().to_lowercase();
-        let matches = |value: &Value| -> bool {
-            match value {
-                Value::String(s) => s.to_lowercase().contains(&needle),
-                Value::Array(items) => items.iter().any(|i| {
-                    i.as_str()
-                        .is_some_and(|s| s.to_lowercase().contains(&needle))
-                }),
-                _ => false,
-            }
-        };
-        let hits = self
-            .notes
-            .values()
-            .filter(|r| !needle.is_empty() && r.fields.values().any(matches));
-        self.listing(hits)
-    }
-
     fn listing<'a>(&self, records: impl Iterator<Item = &'a Record>) -> Listing {
         let mut rows: Vec<(Row, Option<DateTime<Utc>>)> = records
             .map(|r| {
@@ -381,25 +342,6 @@ impl Snapshot {
             1 => Resolution::Unique(matched.remove(0)),
             _ => Resolution::Ambiguous(matched),
         }
-    }
-
-    /// What an id refers to.
-    #[must_use]
-    pub fn reference(&self, id: &NoteId) -> Ref {
-        match self.notes.get(id) {
-            Some(record) => Ref::Present(self.row_of(record)),
-            None => Ref::Missing(id.clone()),
-        }
-    }
-
-    /// Notes whose body links to `id`, in id order.
-    #[must_use]
-    pub fn backlinks(&self, id: &NoteId) -> Vec<Row> {
-        self.notes
-            .values()
-            .filter(|r| r.links.contains(id))
-            .map(|r| self.row_of(r))
-            .collect()
     }
 
     /// The shortest unambiguous prefix of every note id, at least `min` long.

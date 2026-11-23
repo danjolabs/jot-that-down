@@ -4,8 +4,8 @@ Two crates. One of them knows what a workspace is; the other is how you talk to 
 
 | Crate | Lines | Kind | What it is |
 | --- | ---: | --- | --- |
-| [`jot-core`](jot-core/README.md) | ~6.7k | lib | The engine: settings, documents, validation, actions and events, the index. Everything jot knows how to do. |
-| [`jot-cli`](jot-cli/README.md) | ~2.1k | **bin** | `jot`. The only executable in the workspace. |
+| [`jot-core`](jot-core/README.md) | ~6.1k | lib | The engine: settings, documents, validation, actions and events, the index. Everything jot knows how to do. |
+| [`jot-cli`](jot-cli/README.md) | ~2.0k | **bin** | `jot`. The only executable in the workspace. |
 
 ## The stack
 
@@ -40,7 +40,6 @@ The rule is not "call these modules" but **every operation on a workspace goes t
 | `Problem` | `problem` |
 | `Settings`, roles | `settings` |
 | `Snapshot`, `Row`, `Listing`, `Ordering`, `Hash` | `snapshot` |
-| `Link` | `link` |
 | `Registry` — the workspace list. `jot-cli` is the only caller | `registry` |
 | `Watcher` — "something changed", the trigger for `Sync`. No caller yet | `watch` |
 | shortest-unique-prefix ids | `shortid` |
