@@ -1,21 +1,33 @@
-//! `jot-core` — domain, vault I/O, index, and thread algebra for jot-that-down.
+//! `jot-core` — the schema-first workspace engine behind jot-that-down.
 //!
-//! Surfaces (CLI, TUI, desktop) never touch the filesystem or SQLite directly; everything goes
-//! through this crate's public API. See `docs/plans/overview.md` for the seam this enforces.
+//! A workspace is a flat folder of markdown files with typed frontmatter: `workspace.toml` and
+//! `schema.json` at the root declare it, the files are the source of truth, and SQLite under
+//! `.jot/` is a derived, disposable index. See `docs/plans/redesign.md`.
+//!
+//! Surfaces never touch the filesystem or SQLite; everything goes through [`workspace::Workspace`].
+//! Mutations are [`action::Action`]s, decided purely and then executed; what happened comes back
+//! as [`action::Event`]s.
 
+pub mod action;
+pub mod document;
 pub mod error;
-pub mod frontmatter;
-pub mod fs;
-// Private to the crate, and that is the seam: `overview.md` puts SQLite behind `jot-core` and
-// nothing else. There is no `&Index` to hand a surface, which is what stops the index's
-// *representation* becoming part of the API the way `&Snapshot` briefly did.
+pub(crate) mod fs;
+pub mod id;
+// Private to the crate, and that is the seam: there is no `&Index` to hand a surface.
 mod index;
 pub mod link;
-pub mod note;
-pub mod query;
+pub mod problem;
 pub mod registry;
+pub mod settings;
 pub mod shortid;
 pub mod snapshot;
-pub mod thread;
 pub mod watch;
 pub mod workspace;
+
+pub use action::{Action, Event, Failure, Outcome, Plan, Rejection};
+pub use document::{Document, Fields};
+pub use error::{Error, Result};
+pub use id::{IdFormat, NoteId};
+pub use problem::Problem;
+pub use snapshot::{Hash, Listing, Ordering, Row, Snapshot};
+pub use workspace::{Note, Workspace};

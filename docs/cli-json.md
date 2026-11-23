@@ -1,128 +1,85 @@
 # `jot --json`
 
-The machine-readable output shape, promised by [`plans/stages/stage3.md`](plans/stages/stage3.md). This is the
-contract that makes `jot` compose with `jq` and everything else; treat a change to it the way you
-would treat a change to a database schema.
+The machine-readable output shape. This is the contract that makes `jot` compose with `jq` and
+everything else; treat a change to it the way you would treat a change to a database schema. The
+shapes below are those of the schema-first workspace ([`plans/redesign.md`](plans/redesign.md));
+the thread, trash and slug fields of the earlier format are gone.
 
 ## Rules that hold everywhere
 
 - **One JSON document on stdout**, pretty-printed, newline-terminated. Nothing else is ever written
   to stdout in `--json` mode.
-- **Warnings and errors go to stderr.** A vault with an unparseable file still emits valid JSON on
-  stdout and complains on stderr, so `jot list --json | jq` keeps working while a problem is being
-  reported.
-- **Ids are always full UUIDs**, regardless of `--long`. A short id is a *reading* convenience whose
-  width depends on the other notes in the vault (see below); putting one in a machine-readable
-  document would produce a value that may stop resolving when the next note is written.
-- **Timestamps are RFC 3339, UTC.**
-- **`null` is a real answer, not a missing field.** An untitled note has `"title": null`. A note
-  whose id is not a UUIDv7 has `"created_at": null` — it has no recoverable creation time, and that
-  is a state rather than an error.
-- **Absent is never invented.** Nothing in this document is derived from a default.
+- **Warnings and errors go to stderr.** A workspace with a broken note or a stray file still emits
+  valid JSON on stdout and complains on stderr, so `jot list --json | jq` keeps working while a
+  problem is being reported.
+- **Ids are always full**, regardless of `--long`. A short id is a *reading* convenience whose width
+  depends on the other notes in the workspace; putting one in a machine-readable document would
+  produce a value that may stop resolving when the next note is written.
+- **`null` is a real answer, not a missing field.** A note whose title is missing or invalid has
+  `"title": null` (human output says `Untitled`). Nothing is derived from a default.
+- **Times jot measures** (`edited_at`, the file's mtime) are RFC 3339, UTC. **Values a note
+  carries** (`created_at`, everything in `fields`) are exactly what the file says.
 
-## Short ids are *not* in JSON, and why
+Short ids in human output are the shortest prefix unique in the workspace, at least 8 characters.
+The id carries no meaning — nothing is decoded from it — so there is no reason for a wider floor.
 
-`jot` prints an abbreviated id in human output — for notes, and for workspaces in
-`jot workspace list`. It is not a fixed width, and it is not in the JSON.
-
-Git's short ids work because a SHA is random from its first bit. **A UUIDv7's leading 48 bits are a
-millisecond timestamp**, so eight hex characters cover only the top 32 of them — one shared value
-per roughly 65 seconds. Notes captured in the same minute share their first eight characters almost
-always, which is exactly when you are most likely to be referring to one of them. `jot` therefore
-computes the shortest prefix that is unique *within the set it is shown beside* — the notes in a
-vault, or the workspaces in the registry — the way git actually does it.
-
-**The floor differs by what is being abbreviated, because the two id schemes differ.**
-
-- **Notes are UUIDv7**, so the floor is **13**: the whole millisecond timestamp, the first width at
-  which two notes captured a second apart look different. It is the same floor the TUI uses, so an
-  id read out of `jot ls` is the string the browser shows for that note.
-- **Workspaces are UUIDv4** — minted that way deliberately, so nothing leaks a vault's creation date
-  into a `workspace.toml` people commit — and a v4 is random from its first bit. The
-  timestamp-prefix problem does not arise, so the floor stays at the conventional **8**.
-
-That width is a property of the set at a moment in time, so it is a display convenience only.
-Scripts use the full id, which every document below carries.
-
-## `notemeta`
-
-The shape every other document is built from.
+## `row` — one note in a listing
 
 ```json
 {
   "id": "01a03d4d-5790-7855-9af5-c362987fc91e",
   "title": "First thoughts",
-  "created_at": "2026-08-26T09:00:37+00:00",
-  "root": "01a03d4d-5790-7855-9af5-c362987fc91e",
-  "reply_to": null,
-  "quote": null
+  "created_at": "2026-08-26T09:00:37Z",
+  "edited_at": "2026-08-26T09:00:37Z",
+  "problems": 0
 }
 ```
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `id` | string | UUID. The filename is the identity. |
-| `title` | string \| null | `null` is untitled. |
-| `created_at` | string \| null | Decoded from the id's UUIDv7 timestamp. Never read from the file. |
-| `root` | string \| null | Thread root. A top-level note's root is its own id. |
-| `reply_to` | string \| null | `null` is top-level. May name a note that does not exist. |
-| `quote` | string \| null | Cross-tree. Never affects `root`. May dangle. |
+| `id` | string | The file is exactly `<id>.md`. |
+| `title` | string \| null | The value of the key mapped to `document:title`. `null` when no key is mapped, the note lacks it, or it has a problem. |
+| `created_at` | string \| null | The value of the key mapped to `document:created_at`, as written, under the same conditions. |
+| `edited_at` | string \| null | The file's mtime, from the index. Never read from the file's contents. |
+| `problems` | integer | How many problems the note has. `jot show` and `jot check` list them. |
 
-## `row` — `ls`, `trash`, `search`
-
-An array of `notemeta`, each extended with:
-
-| Field | Type | Notes |
-| --- | --- | --- |
-| `state` | `"active"` \| `"trashed"` | Decided by which directory the file is in. |
-| `replies` | integer | Direct replies, in either state. |
-| `descendants` | integer | Everything below, at any depth. |
-| `is_root` | boolean | No parent, **or** a parent the vault does not hold. |
-| `edited_at` | string \| null | Filesystem mtime. |
-| `parent` | `ref` \| null | `null` when the note is top-level. |
-
-`is_root` is true for an orphan whose parent was purged. That is deliberate: without it, a note
-whose parent is gone would be present in the vault and absent from every view.
-
-```console
-$ jot list --json | jq -r '.[] | select(.replies > 0) | "\(.id)  \(.title)"'
-```
-
-## `ref` — a reference in its three states
-
-```json
-{ "id": "01a03d4d-5790-7855-9af5-c362987fc91e", "state": "present" }
-```
-
-`state` is `"present"`, `"trashed"`, or `"deleted"`. **There is no fourth value.** A reference to a
-note that does not exist is `"deleted"` — a designed state, not corruption — and the id is all that
-remains of it.
-
-## `note` — `show`, and the output of `new` and `edit`
-
-A `notemeta` extended with:
-
-| Field | Type | Notes |
-| --- | --- | --- |
-| `state` | `"active"` \| `"trashed"` | |
-| `body` | string | Everything after the closing fence, byte-for-byte. |
-
-## `thread`
+## `listing` — `ls`, `search`
 
 ```json
 {
-  "focus": "…",
-  "root": "…",
-  "ancestors": [ /* notemeta, root first */ ],
-  "tree": { /* notemeta, plus "children": [ … ] recursively */ },
-  "paths":    [ ["a","b","c","d"], ["a","b","c","e"], ["a","f"] ],
-  "segments": [ ["a","b","c"], ["a","f"], ["c","d"], ["c","e"] ]
+  "ordering": { "by": "created_at", "key": "created_at" },
+  "notes": [ /* row, in that order */ ]
 }
 ```
 
-`ancestors` is always linear and is empty when the focus is a root. `paths` and `segments` are the
-two projections from [`plans/stages/stage2.md`](plans/stages/stage2.md); neither is stored, both are computed from
-the same in-memory tree. Siblings are in creation order, which is id order.
+`ordering.by` is `"created_at"` — newest first by the key in `ordering.key`; notes missing it last,
+then by id — or `"edited_at"`, with `key` null, when `workspace.toml` maps no
+`document:created_at`. Human output says so on stderr in the second case.
+
+```console
+$ jot list --json | jq -r '.notes[] | select(.problems > 0) | .id'
+```
+
+## `note` — `show`, and the output of `new` and `edit`
+
+A `row`, extended with:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `fields` | object | The frontmatter as JSON, keys in `schema.json` order, undeclared keys after. A key jot could not read is absent here and present in `problems`. |
+| `problems` | array of `problem` | Every problem, schema and conversion alike. Replaces the row's count. |
+| `hash` | string | blake3 of the file's bytes, hex. |
+| `body` | string | Everything after the closing fence. |
+
+## `problem`
+
+```json
+{ "key": "status", "rule": "enum", "message": "\"later\" is not one of [\"seed\",\"growing\",\"done\"]" }
+```
+
+`key` is the top-level frontmatter key, `null` for a problem with the block as a whole. `rule` is
+the JSON Schema keyword that failed (`type`, `required`, `format`, …) or one of jot's conversion
+rules (`yaml`, `frontmatter`, `key`, `duplicate-key`, `tag`, `number`, `utf8`).
 
 ## `links`
 
@@ -130,53 +87,57 @@ the same in-memory tree. Siblings are in creation order, which is id order.
 {
   "id": "…",
   "links_out": [
-    { "target": "…", "label": "the root", "offset": 34, "length": 45, "state": "deleted" }
+    { "target": "…", "label": "the root", "offset": 34, "length": 45, "state": "missing" }
   ],
-  "links_in":  [ /* notemeta */ ],
-  "quoted_by": [ /* notemeta */ ]
+  "links_in": [ /* row */ ]
 }
 ```
 
-`offset` and `length` are byte positions of the whole `[[…]]` within the body, kept so a reader can
-highlight a link in place. Extraction never consults the index: a link to a purged note extracts
-normally and resolves to `"deleted"`.
+`offset` and `length` are byte positions of the whole `[[…]]` within the body. `state` is
+`"present"` or `"missing"`; a link to a deleted note is `"missing"` — a designed state, not
+corruption.
+
+## `check`
+
+```json
+{
+  "settings": { "errors": [], "warnings": [], "stale": false },
+  "notes": [ { "id": "…", "title": null, "problems": [ /* problem */ ] } ],
+  "strays": [ { "path": "/home/you/notes/README.md", "reason": "the name is not a uuidv7 id" } ]
+}
+```
+
+`settings.errors` non-empty means writes are refused; `stale` means reads are using the last valid
+settings. `jot check` exits **5** when any note has a problem or `settings.errors` is not empty,
+with or without `--json`. Strays are listed but do not affect the exit code.
+
+## `index status`, `index rebuild`
+
+```json
+{
+  "root": "/home/you/notes",
+  "notes": 12, "notes_with_problems": 1, "strays": 0,
+  "writable": true, "stale": false
+}
+```
 
 ## `ws ls`
 
 ```json
 [
-  {
-    "id": "…", "name": "notes", "path": "/home/you/notes",
-    "current": true, "stale": false, "last_opened": "2026-09-01T00:23:47+00:00"
-  }
+  { "name": "notes", "path": "/home/you/notes", "current": true, "stale": false }
 ]
 ```
 
-`stale` means the registered path is no longer there — usually a moved folder rather than a lost
-vault.
+The registry is keyed by canonical path. `name` defaults to the folder name. `stale` means the
+registered folder is no longer there — usually moved rather than lost.
 
-`id` is a **UUIDv4**, unlike a note's v7: nothing reads a creation time out of a workspace id or
-sorts on it, and a random-from-bit-one id keeps `jot workspace list`'s short ids short. Vaults
-created before
-that change carry a v7 id and are read normally.
+`jot workspace use` and `jot workspace remove` take a **path** as a bare argument, and a name only
+via `--name`. Names are not unique; a `--name` matching several entries lists their paths and exits
+4 rather than picking one.
 
 Command names are full words — `list`, `remove`, `workspace` — with `ls`, `rm` and `ws` as aliases.
 Both spellings are stable; scripts may use either.
-
-`jot workspace use` and `jot workspace remove` take an **id** as a bare argument (or `--id`), and a
-name only via `--name`. The two are exclusive and one is required. A bare argument is never looked up
-as a name: names are not unique — the registry keys on id — and an argument whose meaning depended on
-what happened to be registered would be worse than an explicit flag. A `--name` matching several
-entries is reported with candidates and exits 4 rather than picking one.
-
-## `index status`
-
-```json
-{ "root": "/home/you/notes", "name": "notes", "active": 12, "trashed": 1, "problems": [] }
-```
-
-`problems` is an array of human-readable strings: per-file parse failures, and two files claiming
-one id. A problem never blocks a command.
 
 ## Environment
 
@@ -191,9 +152,12 @@ one id. A problem never blocks a command.
 | Code | Meaning |
 | --- | --- |
 | 0 | success |
-| 1 | runtime error |
+| 1 | runtime error, including a write jot refused (the note would fail `schema.json`, broken settings) |
 | 2 | usage error |
 | 3 | no such note or workspace |
-| 4 | ambiguous id prefix |
+| 4 | ambiguous id prefix, or a workspace name several workspaces share |
+| 5 | `jot check` found problems |
 
-An ambiguous prefix lists its candidates on stderr and exits 4. It never guesses.
+An ambiguous prefix lists its candidates on stderr and exits 4. It never guesses. An old-format
+workspace (`.jot/workspace.toml`, `<id>_<slug>.md`) is refused with exit 1 and a message saying what
+changed; there is no converter yet.

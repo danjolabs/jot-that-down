@@ -1,4 +1,4 @@
-//! End-to-end tests: the real binary, against a real temp vault.
+//! End-to-end tests: the real binary, against a real temp workspace.
 //!
 //! These are the tests that would catch a command wired to the wrong core call, an exit code that
 //! drifted, or a `--json` key that got renamed — none of which a unit test in either crate can see,
@@ -6,16 +6,19 @@
 //!
 //! # Isolation
 //!
-//! Every test gets its own vault and passes `--workspace`, so nothing depends on the machine's
+//! Every test gets its own workspace and passes `--workspace`, so nothing depends on the machine's
 //! registry, on the working directory, or on another test. `NO_COLOR` is set for all of them so
 //! assertions match plain bytes.
 
 use assert_cmd::Command;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-/// A temp vault plus a builder for commands pointed at it.
+/// A uuidv7 for notes written by hand.
+const HAND_ID: &str = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5";
+
+/// A temp workspace plus a builder for commands pointed at it.
 struct Vault {
     dir: TempDir,
 }
@@ -32,16 +35,20 @@ impl Vault {
         self.dir.path()
     }
 
-    /// The command builder: isolated registry, no colour, this vault.
+    fn ws(&self) -> &str {
+        self.path().to_str().unwrap()
+    }
+
+    /// The command builder: isolated registry, no colour, no editor, this directory.
     fn cmd(&self) -> Command {
         let mut cmd = Command::cargo_bin("jot").unwrap();
         cmd.env("NO_COLOR", "1")
             .env_remove("JOT_WORKSPACE")
+            .env_remove("VISUAL")
+            .env_remove("EDITOR")
             // A registry write must never touch the developer's real one, and `JOT_REGISTRY` is
-            // the only thing that guarantees it. `XDG_CONFIG_HOME`/`HOME` were tried first and
-            // isolate on Linux only: `directories` reads `FOLDERID_RoamingAppData` through a
-            // syscall on Windows, so every test in this file was writing into the developer's
-            // real `%APPDATA%` registry — and seeing the other tests' workspaces in `ws ls`.
+            // the only thing that guarantees it: `directories` reads `FOLDERID_RoamingAppData`
+            // through a syscall on Windows, so `XDG_CONFIG_HOME`/`HOME` isolate nothing there.
             .env("JOT_REGISTRY", self.dir.path().join("registry.toml"))
             .current_dir(self.dir.path());
         cmd
@@ -53,21 +60,19 @@ impl Vault {
         String::from_utf8(output.get_output().stdout.clone()).unwrap()
     }
 
-    /// Run a command against this vault explicitly, with full UUIDs.
-    ///
-    /// `--long` by default so assertions can name an id without depending on how wide the
-    /// abbreviation happens to be. Use [`Vault::run_short`] to exercise the abbreviated form.
+    /// Run a command against this workspace explicitly, with full ids.
     fn run(&self, args: &[&str]) -> String {
-        let mut full = vec!["--workspace", self.path().to_str().unwrap(), "--long"];
+        let mut full = vec!["--workspace", self.ws(), "--long"];
         full.extend_from_slice(args);
         self.jot(&full)
     }
 
-    /// Run a command against this vault with ids abbreviated, as a person sees them.
-    fn run_short(&self, args: &[&str]) -> String {
-        let mut full = vec!["--workspace", self.path().to_str().unwrap()];
+    /// Run a command against this workspace; returns stderr.
+    fn stderr(&self, args: &[&str]) -> String {
+        let mut full = vec!["--workspace", self.ws()];
         full.extend_from_slice(args);
-        self.jot(&full)
+        let output = self.cmd().args(&full).assert().success();
+        String::from_utf8(output.get_output().stderr.clone()).unwrap()
     }
 
     /// Create a note and return its full id.
@@ -84,18 +89,34 @@ impl Vault {
         serde_json::from_str(&self.run(&full)).expect("valid JSON on stdout")
     }
 
-    /// The exit code of a command expected to fail.
-    fn code(&self, args: &[&str]) -> i32 {
-        let mut full = vec!["--workspace", self.path().to_str().unwrap()];
+    /// The exit code and stderr of a command expected to fail.
+    fn fail(&self, args: &[&str]) -> (i32, String) {
+        let mut full = vec!["--workspace", self.ws()];
         full.extend_from_slice(args);
-        self.cmd()
-            .args(&full)
-            .assert()
-            .failure()
-            .get_output()
-            .status
-            .code()
-            .unwrap()
+        let assert = self.cmd().args(&full).assert().failure();
+        let output = assert.get_output();
+        (
+            output.status.code().unwrap(),
+            String::from_utf8(output.stderr.clone()).unwrap(),
+        )
+    }
+
+    fn code(&self, args: &[&str]) -> i32 {
+        self.fail(args).0
+    }
+
+    fn note_file(&self, id: &str) -> PathBuf {
+        self.path().join(format!("{id}.md"))
+    }
+
+    /// Replace the settings: `roles` is the `[roles]` table's body, `schema` the whole schema.
+    fn settings(&self, roles: &str, schema: &str) {
+        std::fs::write(
+            self.path().join("workspace.toml"),
+            format!("[id]\nformat = \"uuidv7\"\n\n[roles]\n{roles}"),
+        )
+        .unwrap();
+        std::fs::write(self.path().join("schema.json"), schema).unwrap();
     }
 }
 
@@ -104,58 +125,35 @@ impl Vault {
 // =============================================================================================
 
 #[test]
-fn a_workspace_id_is_a_uuid_v4_so_short_ids_stay_short() {
-    // Unlike a note id: nothing decodes a workspace's creation time or sorts on it, and a v7's
-    // timestamp prefix would make two workspaces created in one minute share eight characters.
+fn ws_new_creates_both_settings_files_and_refuses_to_overwrite_them() {
     let vault = Vault::new();
-    let id = vault.json(&["ws", "ls"])[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(&id[14..15], "4", "version nibble of {id}");
-}
-
-#[test]
-fn ws_new_creates_the_documented_tree_and_nothing_else() {
-    let vault = Vault::new();
-    for expected in [".jot", ".jot/workspace.toml", ".jot/.trash", ".jot/tmp"] {
+    for expected in ["workspace.toml", "schema.json", ".jot"] {
         assert!(vault.path().join(expected).exists(), "missing `{expected}`");
     }
-    // The index is derived and disposable; creating an empty one would be a lie about that.
-    // Stage 4 keeps this true by materialising the database on the first row it has to write.
-    assert!(!vault.path().join(".jot/index.db").exists());
-}
+    let toml = std::fs::read_to_string(vault.path().join("workspace.toml")).unwrap();
+    assert!(toml.contains("\"document:title\""), "{toml}");
 
-#[test]
-fn ws_new_on_an_existing_workspace_refuses_rather_than_overwriting() {
-    let vault = Vault::new();
-    let code = vault.code(&["ws", "new", vault.path().to_str().unwrap()]);
-    assert_eq!(code, 1);
-    // The original is untouched.
-    assert!(vault.path().join(".jot/workspace.toml").exists());
+    assert_eq!(vault.code(&["ws", "new", vault.ws()]), 1);
+    assert_eq!(
+        std::fs::read_to_string(vault.path().join("workspace.toml")).unwrap(),
+        toml,
+        "the original is untouched"
+    );
 }
 
 #[test]
 fn every_command_answers_to_its_full_word_and_its_short_alias() {
-    // The short forms are what the tests above use throughout, so this is the other half: the
-    // full word is the real name and must work everywhere the alias does.
     let vault = Vault::new();
     vault.new_note(&["-m", "a thought"]);
 
     assert_eq!(vault.run(&["list"]), vault.run(&["ls"]));
 
-    // `remove` and its alias both trash, so they need separate notes.
     for name in ["remove", "rm"] {
         let id = vault.new_note(&["-m", "temporary"]);
-        vault.run(&[name, &id]);
-        assert_eq!(
-            vault.json(&["show", &id])["state"],
-            "trashed",
-            "`{name}` must trash"
-        );
+        vault.run(&[name, "--yes", &id]);
+        assert!(!vault.note_file(&id).exists(), "`{name}` must delete");
     }
 
-    // And nested, on both halves independently: `workspace`/`ws` and `list`/`ls`.
     let expected = vault.run(&["ws", "ls"]);
     for spelling in [["workspace", "list"], ["workspace", "ls"], ["ws", "list"]] {
         assert_eq!(vault.run(&spelling), expected, "{spelling:?}");
@@ -163,270 +161,145 @@ fn every_command_answers_to_its_full_word_and_its_short_alias() {
 
     // A group with no subcommand is a usage error, which is clap's behaviour and stays so.
     assert_eq!(vault.code(&["workspace"]), 2);
+    assert_eq!(vault.code(&["field"]), 2);
 }
 
 #[test]
-fn ws_remove_unregisters_without_touching_the_directory() {
+fn ws_remove_unregisters_without_touching_the_folder_and_clears_current() {
     let vault = Vault::new();
-    let other = vault.dir.path().join("other");
-    std::fs::create_dir_all(&other).unwrap();
+    let other = vault.path().join("other");
     vault.run(&["ws", "new", other.to_str().unwrap()]);
-    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 2);
+    assert_eq!(
+        current(&vault)["name"],
+        "other",
+        "a new workspace is current"
+    );
 
     vault.run(&["workspace", "remove", "--name", "other"]);
 
-    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 1);
-    // The whole point: unregistering is not deleting.
-    assert!(other.join(".jot").is_dir(), "the vault survives");
-}
-
-#[test]
-fn removing_the_current_workspace_clears_current_rather_than_dangling() {
-    // `Registry::remove` leaves a dangling `current` by design, so the surface has to notice.
-    let vault = Vault::new();
-    let other = vault.dir.path().join("other");
-    std::fs::create_dir_all(&other).unwrap();
-    vault.run(&["ws", "new", other.to_str().unwrap()]);
-    assert_eq!(current(&vault)["name"], "other");
-
-    vault.run(&["ws", "rm", "--name", "other"]);
-
     let entries = vault.json(&["ws", "ls"]);
+    let entries = entries.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
     assert!(
-        entries
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|entry| entry["current"] == false),
-        "no entry may still be marked current: {entries}"
+        entries.iter().all(|entry| entry["current"] == false),
+        "`current` must not dangle: {entries:?}"
+    );
+    assert!(
+        other.join("workspace.toml").is_file(),
+        "the folder survives"
     );
 }
 
 #[test]
-fn ws_remove_accepts_an_id_and_rejects_an_unknown_target() {
+fn ws_use_selects_by_path_and_by_name_only_when_asked() {
     let vault = Vault::new();
-    let id = vault.json(&["ws", "ls"])[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let other = vault.path().join("other");
+    vault.run(&["ws", "new", other.to_str().unwrap()]);
 
-    assert_eq!(vault.code(&["ws", "rm", "ffffffff"]), 3);
-    assert_eq!(vault.code(&["ws", "rm", "--name", "no-such-thing"]), 3);
-    // A bare argument is an id, here a prefix of one.
-    vault.run(&["ws", "rm", &id[..8]]);
-    assert!(vault.json(&["ws", "ls"]).as_array().unwrap().is_empty());
+    vault.run(&["ws", "use", vault.ws()]);
+    assert_eq!(current(&vault)["path"], vault.ws());
+
+    vault.run(&["ws", "use", "--name", "other"]);
+    assert_eq!(current(&vault)["name"], "other");
+
+    // A bare argument is a path, never a name.
+    assert_eq!(vault.code(&["ws", "use", "no-such-folder"]), 3);
+    assert_eq!(vault.code(&["ws", "use", "--name", "no-such-name"]), 3);
+    assert_eq!(vault.code(&["ws", "use", "x", "--name", "y"]), 2);
 }
 
 #[test]
-fn ws_prune_removes_only_the_workspaces_whose_directory_is_gone() {
+fn a_name_two_workspaces_share_is_refused_rather_than_guessed() {
     let vault = Vault::new();
-    let doomed = vault.dir.path().join("doomed");
-    std::fs::create_dir_all(&doomed).unwrap();
-    vault.run(&["ws", "new", doomed.to_str().unwrap()]);
-    std::fs::remove_dir_all(&doomed).unwrap();
-    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 2);
-
-    vault.run(&["ws", "prune", "--yes"]);
-
-    let entries = vault.json(&["ws", "ls"]);
-    let entries = entries.as_array().unwrap();
-    assert_eq!(entries.len(), 1, "only the missing one goes");
-    assert_eq!(entries[0]["path"], vault.path().to_str().unwrap());
+    for parent in ["a", "b"] {
+        let path = vault.path().join(parent).join("notes");
+        vault.run(&["ws", "new", path.to_str().unwrap()]);
+    }
+    let (code, stderr) = vault.fail(&["ws", "use", "--name", "notes"]);
+    assert_eq!(code, 4);
+    assert!(stderr.contains("a") && stderr.contains("b"), "{stderr}");
 }
 
 #[test]
-fn ws_prune_confirms_first_and_declining_keeps_everything() {
-    // "Stale" is `!path.exists()`, and an unmounted drive looks exactly like a deleted vault, so
+fn ws_prune_confirms_and_removes_only_the_workspaces_whose_folder_is_gone() {
+    // "Stale" is a missing folder, and an unmounted drive looks exactly like a deleted one, so
     // this prompt is load-bearing rather than ceremonial.
     let vault = Vault::new();
-    let doomed = vault.dir.path().join("doomed");
-    std::fs::create_dir_all(&doomed).unwrap();
+    let doomed = vault.path().join("doomed");
     vault.run(&["ws", "new", doomed.to_str().unwrap()]);
     std::fs::remove_dir_all(&doomed).unwrap();
 
     vault
         .cmd()
-        .args(["--workspace", vault.path().to_str().unwrap(), "ws", "prune"])
+        .args(["ws", "prune"])
         .write_stdin("n\n")
         .assert()
         .success()
         .stderr(predicates::str::contains("cancelled"));
-
     assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 2);
-}
 
-#[test]
-fn ws_prune_on_a_healthy_registry_does_nothing_and_says_so() {
-    let vault = Vault::new();
-    vault
-        .cmd()
-        .args(["--workspace", vault.path().to_str().unwrap(), "ws", "prune"])
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("nothing to prune"));
-    assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 1);
-}
-
-#[test]
-fn ws_ls_marks_the_current_workspace() {
-    let vault = Vault::new();
-    let listing = vault.run(&["ws", "ls"]);
-    assert!(listing.contains('*'), "{listing}");
-}
-
-#[test]
-fn ws_ls_leads_with_an_id_the_way_ls_does() {
-    let vault = Vault::new();
-    let listing = vault.run_short(&["ws", "ls"]);
-    let row = listing.lines().next().unwrap();
-
-    let id = vault.json(&["ws", "ls"])[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let short = row_id(row);
-    assert!(id.starts_with(short), "`{short}` is not a prefix of {id}");
-    assert!(row.contains(vault.path().to_str().unwrap()), "{row}");
-    assert!(row.contains(vault.path().file_name().unwrap().to_str().unwrap()));
-}
-
-#[test]
-fn two_workspaces_with_one_name_are_told_apart_by_their_ids() {
-    // The registry keys on workspace id, so two vaults can share a name — a `notes` directory
-    // under two parents, or one deleted and remade. Without an id the rows are indistinguishable,
-    // which is the confusion this listing format exists to remove.
-    let vault = Vault::new();
-    let mut paths = Vec::new();
-    for parent in ["a", "b"] {
-        let path = vault.dir.path().join(parent).join("notes");
-        std::fs::create_dir_all(&path).unwrap();
-        vault.run(&["ws", "new", path.to_str().unwrap()]);
-        paths.push(path);
-    }
-
-    let listing = vault.run_short(&["ws", "ls"]);
-    let named: Vec<&str> = listing
-        .lines()
-        .filter(|line| line.contains("  notes  "))
-        .collect();
-    assert_eq!(named.len(), 2, "both vaults are named `notes`:\n{listing}");
-
-    let ids: Vec<&str> = named.iter().map(|line| row_id(line)).collect();
-    assert_ne!(ids[0], ids[1], "the two rows must be distinguishable");
-    for (id, path) in ids.iter().zip(&paths) {
-        assert!(listing.contains(path.to_str().unwrap()), "{listing}");
-        assert!(!id.is_empty());
-    }
+    vault.run(&["ws", "prune", "--yes"]);
+    let entries = vault.json(&["ws", "ls"]);
+    assert_eq!(
+        entries.as_array().unwrap().len(),
+        1,
+        "only the missing one goes"
+    );
+    assert_eq!(entries[0]["path"], vault.ws());
 }
 
 #[test]
 fn the_test_suite_never_touches_the_real_registry() {
-    // Guards the isolation the two tests above depend on, and that every test registering a
-    // workspace depends on. Without `JOT_REGISTRY` this passes on Linux and silently writes into
-    // the developer's `%APPDATA%` on Windows.
+    // Guards the isolation every test registering a workspace depends on. Without `JOT_REGISTRY`
+    // this passes on Linux and silently writes into the developer's `%APPDATA%` on Windows.
     let vault = Vault::new();
-    let registry = vault.dir.path().join("registry.toml");
-    assert!(registry.is_file(), "`ws new` wrote the redirected registry");
-
+    let registry = vault.path().join("registry.toml");
     let text = std::fs::read_to_string(&registry).unwrap();
-    assert!(text.contains(vault.path().to_str().unwrap()), "{text}");
-
-    // And the listing shows this vault alone, not whatever else the machine has registered.
+    assert!(text.contains(vault.ws()), "{text}");
     assert_eq!(vault.json(&["ws", "ls"]).as_array().unwrap().len(), 1);
 }
 
 #[test]
-fn ws_use_selects_by_id_by_default_and_by_name_only_when_asked() {
+fn an_old_format_workspace_is_refused_with_what_changed() {
     let vault = Vault::new();
-    let other = vault.dir.path().join("other");
-    std::fs::create_dir_all(&other).unwrap();
-    vault.run(&["ws", "new", other.to_str().unwrap()]);
+    let old = vault.path().join("old");
+    std::fs::create_dir_all(old.join(".jot")).unwrap();
+    std::fs::write(old.join(".jot/workspace.toml"), "schema_version = 1\n").unwrap();
+    std::fs::write(
+        old.join(format!("{HAND_ID}_a_slug.md")),
+        "---\ntitle: kept\n---\n",
+    )
+    .unwrap();
 
-    let entries = vault.json(&["ws", "ls"]);
-    let first = entries.as_array().unwrap()[0].clone();
-    let id = first["id"].as_str().unwrap();
-    let name = first["name"].as_str().unwrap();
-
-    let away = |v: &Vault| v.run(&["ws", "use", "--name", "other"]);
-
-    // A bare argument is an id.
-    away(&vault);
-    vault.run(&["ws", "use", id]);
-    assert_eq!(current(&vault)["id"], id);
-
-    // …and so is `--id`, with a prefix.
-    away(&vault);
-    vault.run(&["ws", "use", "--id", &id[..8]]);
-    assert_eq!(current(&vault)["id"], id);
-
-    // A name is only ever reached through `--name`.
-    away(&vault);
-    vault.run(&["ws", "use", "--name", name]);
-    assert_eq!(current(&vault)["id"], id);
-}
-
-#[test]
-fn a_name_passed_as_a_bare_argument_is_not_looked_up_as_a_name() {
-    // The point of the change: an argument's *meaning* must not depend on what is registered.
-    // `notes` is a real workspace name here and still fails, because a bare argument is an id.
-    let vault = Vault::new();
-    let path = vault.dir.path().join("notes");
-    std::fs::create_dir_all(&path).unwrap();
-    vault.run(&["ws", "new", path.to_str().unwrap()]);
-
-    assert_eq!(vault.code(&["ws", "use", "notes"]), 3);
-    vault.run(&["ws", "use", "--name", "notes"]);
-    assert_eq!(current(&vault)["name"], "notes");
-}
-
-#[test]
-fn ws_use_refuses_both_a_name_and_an_id_and_refuses_neither() {
-    let vault = Vault::new();
-    // clap's own XOR group: usage errors, exit 2.
-    assert_eq!(vault.code(&["ws", "use", "--id", "x", "--name", "y"]), 2);
-    assert_eq!(vault.code(&["ws", "use"]), 2);
-}
-
-#[test]
-fn ws_use_can_reach_a_workspace_whose_name_is_not_unique() {
-    // The gap this closes: matching on name alone made the second `notes` unreachable.
-    let vault = Vault::new();
-    let mut ids = Vec::new();
-    for parent in ["a", "b"] {
-        let path = vault.dir.path().join(parent).join("notes");
-        std::fs::create_dir_all(&path).unwrap();
-        vault.run(&["ws", "new", path.to_str().unwrap()]);
-        ids.push(current(&vault)["id"].as_str().unwrap().to_owned());
+    let assert = vault
+        .cmd()
+        .args(["--workspace", old.to_str().unwrap(), "ls"])
+        .assert()
+        .failure();
+    let output = assert.get_output();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+    for expected in [
+        "old format",
+        "workspace.toml",
+        "schema.json",
+        "no converter",
+        "hint",
+    ] {
+        assert!(stderr.contains(expected), "no `{expected}` in:\n{stderr}");
     }
-
-    // The shared name is refused rather than guessed at.
-    assert_eq!(vault.code(&["ws", "use", "--name", "notes"]), 4);
-    // And as a bare argument it is an id, which nothing matches — not a silent fallback to a name.
-    assert_eq!(vault.code(&["ws", "use", "notes"]), 3);
-
-    // Either one is reachable by id.
-    for id in &ids {
-        vault.run(&["ws", "use", id]);
-        assert_eq!(current(&vault)["id"].as_str().unwrap(), id);
-    }
-}
-
-#[test]
-fn ws_use_on_something_unknown_exits_not_found() {
-    let vault = Vault::new();
-    assert_eq!(vault.code(&["ws", "use", "ffffffff"]), 3);
-    assert_eq!(vault.code(&["ws", "use", "--name", "no-such-workspace"]), 3);
-}
-
-#[test]
-fn ws_ls_long_prints_full_workspace_uuids() {
-    let vault = Vault::new();
-    let listing = vault.run(&["ws", "ls"]);
-    let id = vault.json(&["ws", "ls"])[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(listing.contains(&id), "{listing}");
+    // Discovery refuses it too, rather than walking past it to some other workspace.
+    vault
+        .cmd()
+        .current_dir(&old)
+        .arg("ls")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("old format"));
+    assert!(
+        !old.join("workspace.toml").exists(),
+        "nothing was converted"
+    );
 }
 
 // =============================================================================================
@@ -434,273 +307,72 @@ fn ws_ls_long_prints_full_workspace_uuids() {
 // =============================================================================================
 
 #[test]
-fn new_writes_a_file_named_by_the_id_it_prints() {
+fn new_writes_a_file_named_exactly_by_the_id_it_prints() {
     let vault = Vault::new();
     let id = vault.new_note(&["-m", "a thought"]);
-    assert!(vault.path().join(format!("{id}.md")).exists(), "{id}");
+    assert!(vault.note_file(&id).is_file(), "{id}");
 }
 
 #[test]
-fn a_piped_body_becomes_a_note() {
+fn a_piped_body_becomes_a_note_and_an_empty_one_writes_nothing() {
     let vault = Vault::new();
     let output = vault
         .cmd()
-        .args([
-            "--workspace",
-            vault.path().to_str().unwrap(),
-            "--long",
-            "new",
-        ])
+        .args(["--workspace", vault.ws(), "--long", "new"])
         .write_stdin("captured from a pipe")
         .assert()
         .success();
     let id = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    let id = id.trim();
+    let file = std::fs::read_to_string(vault.note_file(id.trim())).unwrap();
+    assert!(file.contains("captured from a pipe"), "{file}");
 
-    let body = std::fs::read_to_string(vault.path().join(format!("{id}.md"))).unwrap();
-    assert!(body.contains("captured from a pipe"), "{body}");
-}
-
-#[test]
-fn an_empty_piped_body_writes_nothing() {
-    let vault = Vault::new();
     vault
         .cmd()
-        .args(["--workspace", vault.path().to_str().unwrap(), "new"])
+        .args(["--workspace", vault.ws(), "new"])
         .write_stdin("   \n\n")
         .assert()
         .success()
         .stderr(predicates::str::contains("nothing written"));
-
-    assert_eq!(count_notes(vault.path()), 0);
-}
-
-/// The title is the field that always gets filled in; the body is the optional half.
-#[test]
-fn a_title_with_no_body_is_a_note() {
-    let vault = Vault::new();
-    let id = vault.new_note(&["-t", "a thought I have not written yet"]);
-
-    let file = std::fs::read_to_string(vault.path().join(format!("{id}.md"))).unwrap();
-    assert!(
-        file.contains("title: a thought I have not written yet"),
-        "{file}"
-    );
     assert_eq!(count_notes(vault.path()), 1);
 }
 
 #[test]
-fn an_edit_that_would_empty_a_note_writes_nothing() {
+fn a_title_alone_is_a_note_and_set_reads_its_value_as_yaml() {
     let vault = Vault::new();
-    let id = vault.new_note(&["-t", "a title", "-m", "a body"]);
-
-    vault
-        .cmd()
-        .args([
-            "--workspace",
-            vault.path().to_str().unwrap(),
-            "edit",
-            &id,
-            "--no-title",
-            "-m",
-            "  ",
-        ])
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("nothing written"));
-
-    let file = std::fs::read_to_string(vault.path().join(format!("{id}.md"))).unwrap();
-    assert!(file.contains("title: a title"), "{file}");
-    assert!(file.contains("a body"), "{file}");
-}
-
-/// Clearing the body alone is fine — the title carries the note.
-#[test]
-fn an_edit_may_leave_a_note_with_only_a_title() {
-    let vault = Vault::new();
-    let id = vault.new_note(&["-t", "a title", "-m", "a body"]);
-    vault.run(&["edit", &id, "-m", ""]);
-
-    let file = std::fs::read_to_string(vault.path().join(format!("{id}.md"))).unwrap();
-    assert!(file.contains("title: a title"), "{file}");
-    assert!(!file.contains("a body"), "{file}");
+    let id = vault.new_note(&["-t", "a thought", "--set", "n=3", "--set", "label=\"3\""]);
+    let note = vault.json(&["show", &id]);
+    assert_eq!(note["title"], "a thought");
+    assert_eq!(note["fields"]["n"], 3);
+    assert_eq!(note["fields"]["label"], "3");
+    assert!(note["fields"]["created_at"].is_string(), "filled on create");
 }
 
 #[test]
-fn a_reply_gets_its_parents_thread_root() {
+fn a_note_that_fails_the_schema_is_refused_and_nothing_is_written() {
     let vault = Vault::new();
-    let root = vault.new_note(&["-m", "root"]);
-    let reply = vault.new_note(&["--reply", &root, "-m", "reply"]);
-    let deep = vault.new_note(&["--reply", &reply, "-m", "deep"]);
-
-    let rows = vault.json(&["ls", "--flat"]);
-    let row = |id: &str| {
-        rows.as_array()
-            .unwrap()
-            .iter()
-            .find(|r| r["id"] == id)
-            .unwrap()
-            .clone()
-    };
-    assert_eq!(row(&deep)["root"], root.as_str());
-    assert_eq!(row(&deep)["reply_to"], reply.as_str());
-}
-
-#[test]
-fn replying_to_a_note_that_does_not_exist_exits_not_found() {
-    let vault = Vault::new();
-    vault.new_note(&["-m", "root"]);
-    assert_eq!(vault.code(&["new", "--reply", "ffffffff", "-m", "x"]), 3);
-}
-
-#[test]
-fn the_slug_flag_puts_the_title_in_the_filename() {
-    let vault = Vault::new();
-    let id = vault.new_note(&["-t", "Hello There", "-m", "b", "--slug"]);
-    assert!(vault.path().join(format!("{id}_hello_there.md")).exists());
-}
-
-// =============================================================================================
-// Reading
-// =============================================================================================
-
-#[test]
-fn ls_shows_roots_and_flat_shows_everything() {
-    let vault = Vault::new();
-    let root = vault.new_note(&["-m", "root"]);
-    vault.new_note(&["--reply", &root, "-m", "reply"]);
-
-    assert_eq!(vault.json(&["ls"]).as_array().unwrap().len(), 1);
-    assert_eq!(vault.json(&["ls", "--flat"]).as_array().unwrap().len(), 2);
-}
-
-#[test]
-fn an_untitled_note_reads_as_untitled() {
-    let vault = Vault::new();
-    vault.new_note(&["-m", "no title here"]);
-    assert!(vault.run(&["ls"]).contains("Untitled"));
-}
-
-#[test]
-fn show_prints_the_body_and_raw_prints_the_file() {
-    let vault = Vault::new();
-    let id = vault.new_note(&["-t", "A title", "-m", "the body"]);
-
-    let human = vault.run(&["show", &id]);
+    let (code, stderr) = vault.fail(&["new", "-t", "x", "--set", "created_at=yesterday"]);
+    assert_eq!(code, 1);
     assert!(
-        human.contains("A title") && human.contains("the body"),
-        "{human}"
+        stderr.contains("schema.json") && stderr.contains("created_at"),
+        "{stderr}"
     );
-
-    let raw = vault.run(&["show", &id, "--raw"]);
-    assert!(raw.starts_with("---\n"), "{raw}");
-    assert!(raw.contains("title: A title"), "{raw}");
-    // No note file carries a root any more: it is derived from `relation:reply_to` at scan time.
-    assert!(!raw.contains("relation:root"), "{raw}");
+    assert_eq!(count_notes(vault.path()), 0);
 }
 
 #[test]
-fn thread_renders_the_worked_example_from_the_plan() {
-    // `A→B`, `B→C`, `C→D`, `C→E`, `A→F` — the shape `stage2.md` draws.
+fn title_is_refused_clearly_when_no_title_role_is_mapped() {
     let vault = Vault::new();
-    let a = vault.new_note(&["-t", "A", "-m", "a"]);
-    let b = vault.new_note(&["--reply", &a, "-t", "B", "-m", "b"]);
-    let c = vault.new_note(&["--reply", &b, "-t", "C", "-m", "c"]);
-    let d = vault.new_note(&["--reply", &c, "-t", "D", "-m", "d"]);
-    let e = vault.new_note(&["--reply", &c, "-t", "E", "-m", "e"]);
-    let f = vault.new_note(&["--reply", &a, "-t", "F", "-m", "f"]);
-
-    let json = vault.json(&["thread", &a]);
-    let ids = |value: &Value| {
-        value
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| {
-                row.as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_owned())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>()
-    };
-
-    assert_eq!(
-        ids(&json["paths"]),
-        vec![
-            vec![a.clone(), b.clone(), c.clone(), d.clone()],
-            vec![a.clone(), b.clone(), c.clone(), e.clone()],
-            vec![a.clone(), f.clone()],
-        ]
+    vault.settings(
+        "",
+        r#"{ "type": "object", "properties": { "name": { "type": "string" } } }"#,
     );
-    assert_eq!(
-        ids(&json["segments"]),
-        vec![
-            vec![a.clone(), b.clone(), c.clone()],
-            vec![a.clone(), f.clone()],
-            vec![c.clone(), d.clone()],
-            vec![c.clone(), e.clone()],
-        ]
-    );
-
-    // And the human tree draws the same shape.
-    let tree = vault.run(&["thread", &a]);
-    assert!(tree.contains("├─"), "{tree}");
-    assert!(tree.contains("└─"), "{tree}");
-}
-
-#[test]
-fn thread_path_walks_from_the_root_to_the_focus() {
-    let vault = Vault::new();
-    let a = vault.new_note(&["-m", "a"]);
-    let b = vault.new_note(&["--reply", &a, "-m", "b"]);
-    let c = vault.new_note(&["--reply", &b, "-m", "c"]);
-
-    let path = vault.run(&["thread", &c, "--path"]);
-    assert_eq!(path.trim(), format!("{a} → {b} → {c}"));
-}
-
-#[test]
-fn search_matches_titles_and_says_so_when_nothing_does() {
-    let vault = Vault::new();
-    vault.new_note(&["-t", "Findable", "-m", "x"]);
-    vault.new_note(&["-t", "Other", "-m", "y"]);
-
-    assert_eq!(vault.json(&["search", "find"]).as_array().unwrap().len(), 1);
+    let (code, stderr) = vault.fail(&["new", "-t", "x"]);
+    assert_eq!(code, 1);
     assert!(
-        vault
-            .json(&["search", "nope"])
-            .as_array()
-            .unwrap()
-            .is_empty()
+        stderr.contains("document:title") && stderr.contains("--set"),
+        "{stderr}"
     );
-}
-
-#[test]
-fn links_reports_out_in_and_quoted_by() {
-    let vault = Vault::new();
-    let target = vault.new_note(&["-t", "Target", "-m", "x"]);
-    let linker = vault.new_note(&["-m", &format!("see [[{target}]]")]);
-    let quoter = vault.new_note(&["--quote", &target, "-m", "quoting"]);
-
-    let json = vault.json(&["links", &target]);
-    assert_eq!(json["links_in"][0]["id"], linker.as_str());
-    assert_eq!(json["quoted_by"][0]["id"], quoter.as_str());
-
-    let outgoing = vault.json(&["links", &linker]);
-    assert_eq!(outgoing["links_out"][0]["target"], target.as_str());
-    assert_eq!(outgoing["links_out"][0]["state"], "present");
-}
-
-#[test]
-fn a_link_in_a_code_fence_is_not_a_link() {
-    let vault = Vault::new();
-    let target = vault.new_note(&["-m", "target"]);
-    let linker = vault.new_note(&["-m", &format!("```\n[[{target}]]\n```")]);
-
-    let json = vault.json(&["links", &linker]);
-    assert!(json["links_out"].as_array().unwrap().is_empty(), "{json}");
+    assert_eq!(count_notes(vault.path()), 0);
 }
 
 // =============================================================================================
@@ -708,152 +380,305 @@ fn a_link_in_a_code_fence_is_not_a_link() {
 // =============================================================================================
 
 #[test]
-fn edit_changes_a_title_without_touching_the_body() {
+fn edit_changes_one_field_and_keeps_the_body_and_an_undeclared_key() {
     let vault = Vault::new();
-    let id = vault.new_note(&["-t", "before", "-m", "the body"]);
+    let id = vault.new_note(&["-t", "before", "-m", "the body", "--set", "mood=calm"]);
 
     vault.run(&["edit", &id, "-t", "after"]);
 
-    let json = vault.json(&["show", &id]);
-    assert_eq!(json["title"], "after");
-    assert!(json["body"].as_str().unwrap().contains("the body"));
-}
-
-#[test]
-fn edit_can_remove_a_title() {
-    let vault = Vault::new();
-    let id = vault.new_note(&["-t", "doomed", "-m", "b"]);
-
-    vault.run(&["edit", &id, "--no-title"]);
-    assert!(vault.json(&["show", &id])["title"].is_null());
-}
-
-#[test]
-fn an_unknown_frontmatter_key_survives_an_edit() {
-    let vault = Vault::new();
-    let id = vault.new_note(&["-t", "t", "-m", "b"]);
-    let path = vault.path().join(format!("{id}.md"));
-
-    let original = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(
-        &path,
-        original.replace("title: t", "title: t\nsource: obsidian-import"),
-    )
-    .unwrap();
-
-    vault.run(&["edit", &id, "-t", "retitled"]);
-
-    let after = std::fs::read_to_string(&path).unwrap();
-    assert!(after.contains("source: obsidian-import"), "{after}");
-    assert!(after.contains("title: retitled"), "{after}");
-}
-
-// =============================================================================================
-// The delete lifecycle
-// =============================================================================================
-
-#[test]
-fn rm_hides_a_note_trash_shows_it_and_restore_brings_it_back() {
-    let vault = Vault::new();
-    let id = vault.new_note(&["-t", "temporary", "-m", "b"]);
-
-    vault.run(&["rm", &id]);
-    assert!(vault.json(&["ls", "--flat"]).as_array().unwrap().is_empty());
-    assert_eq!(vault.json(&["trash"]).as_array().unwrap().len(), 1);
+    let note = vault.json(&["show", &id]);
+    assert_eq!(note["title"], "after");
+    assert_eq!(note["fields"]["mood"], "calm");
     assert!(
-        vault
-            .path()
-            .join(".jot/.trash")
-            .join(format!("{id}.md"))
-            .exists()
+        note["body"].as_str().unwrap().contains("the body"),
+        "{note}"
+    );
+}
+
+/// The rule the redesign makes the CLI keep: jot never writes a note that fails the schema, and
+/// never loses what was typed. The buffer is refused, reopened on the same text with the reasons
+/// in it, and when the editor is quit without saving the draft is kept and its path printed.
+#[test]
+fn an_invalid_editor_buffer_is_refused_reopened_and_never_lost() {
+    let vault = Vault::new();
+    let id = vault.new_note(&["-t", "before"]);
+    let before = std::fs::read_to_string(vault.note_file(&id)).unwrap();
+
+    let typed =
+        "---\ntitle: typed in the editor\ncreated_at: yesterday\n---\n\nwords worth keeping\n";
+    let editor = ScriptedEditor::new(&vault.path().join("editor"), typed);
+    let assert = vault
+        .cmd()
+        .env("EDITOR", &editor.program)
+        .args(["--workspace", vault.ws(), "edit", &id])
+        .assert()
+        .failure();
+    let output = assert.get_output();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr.clone()).unwrap();
+
+    let reopened = editor.seen();
+    assert!(
+        reopened.contains("words worth keeping") && reopened.contains("created_at: yesterday"),
+        "the editor reopened on what was typed:\n{reopened}"
+    );
+    assert!(
+        reopened.contains("# jot:") && reopened.contains("`created_at`"),
+        "with the reason in the buffer:\n{reopened}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.note_file(&id)).unwrap(),
+        before,
+        "nothing was written"
     );
 
-    vault.run(&["restore", &id]);
-    assert_eq!(vault.json(&["ls", "--flat"]).as_array().unwrap().len(), 1);
-    assert!(vault.json(&["trash"]).as_array().unwrap().is_empty());
-    assert!(vault.path().join(format!("{id}.md")).exists());
+    let kept = stderr
+        .split("kept at `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .unwrap_or_else(|| panic!("no kept draft named in:\n{stderr}"));
+    let draft = std::fs::read_to_string(kept).unwrap();
+    assert!(draft.contains("words worth keeping"), "{draft}");
+    let _ = std::fs::remove_file(kept);
+}
+
+// =============================================================================================
+// Reading
+// =============================================================================================
+
+#[test]
+fn ls_and_show_json_have_the_documented_shape() {
+    let vault = Vault::new();
+    let id = vault.new_note(&["-t", "t", "-m", "the body", "--set", "extra=1"]);
+
+    let listing = vault.json(&["ls"]);
+    assert_eq!(listing["ordering"]["by"], "created_at");
+    assert_eq!(listing["ordering"]["key"], "created_at");
+    let row = &listing["notes"][0];
+    assert_eq!(row["id"], id.as_str(), "always the full id");
+    for key in ["id", "title", "created_at", "edited_at", "problems"] {
+        assert!(row.get(key).is_some(), "row lacks `{key}`: {row}");
+    }
+
+    let note = vault.json(&["show", &id[..8]]);
+    for key in [
+        "id",
+        "title",
+        "created_at",
+        "edited_at",
+        "problems",
+        "fields",
+        "hash",
+        "body",
+    ] {
+        assert!(note.get(key).is_some(), "note lacks `{key}`: {note}");
+    }
+    let keys: Vec<&str> = note["fields"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["title", "created_at", "extra"],
+        "schema order, then the rest"
+    );
+    assert_eq!(note["problems"].as_array().unwrap().len(), 0);
 }
 
 #[test]
-fn a_trash_and_restore_round_trip_leaves_the_file_byte_identical() {
+fn ls_says_once_that_it_is_ordered_by_mtime_when_no_created_at_role_is_mapped() {
     let vault = Vault::new();
-    let id = vault.new_note(&["-t", "t", "-m", "b"]);
-    let path = vault.path().join(format!("{id}.md"));
-    let before = std::fs::read(&path).unwrap();
+    vault.settings(
+        "\"document:title\" = \"title\"\n",
+        r#"{ "type": "object", "properties": { "title": { "type": "string" } } }"#,
+    );
+    vault.new_note(&["-t", "one"]);
+    vault.new_note(&["-t", "two"]);
 
-    vault.run(&["rm", &id]);
-    vault.run(&["restore", &id]);
-
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let stderr = vault.stderr(&["ls"]);
+    assert_eq!(
+        stderr.matches("modification time").count(),
+        1,
+        "said once:\n{stderr}"
+    );
+    let listing = vault.json(&["ls"]);
+    assert_eq!(listing["ordering"]["by"], "edited_at");
+    assert_eq!(listing["ordering"]["key"], Value::Null);
 }
 
 #[test]
-fn rm_never_cascades() {
+fn show_puts_each_problem_under_its_field_and_lists_a_missing_required_one() {
     let vault = Vault::new();
-    let parent = vault.new_note(&["-m", "parent"]);
-    let child = vault.new_note(&["--reply", &parent, "-m", "child"]);
+    std::fs::write(vault.note_file(HAND_ID), "---\ntitle: 7\n---\nbody\n").unwrap();
 
-    vault.run(&["rm", &parent]);
-
-    let rows = vault.json(&["ls", "--flat"]);
-    let rows = rows.as_array().unwrap();
-    assert_eq!(rows.len(), 1, "the child is still live");
-    assert_eq!(rows[0]["id"], child.as_str());
-    assert_eq!(rows[0]["parent"]["state"], "trashed");
+    let shown = vault.run(&["show", HAND_ID]);
+    let lines: Vec<&str> = shown.lines().collect();
+    let at = |prefix: &str| {
+        lines
+            .iter()
+            .position(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no `{prefix}` in:\n{shown}"))
+    };
+    let title = at("title: 7");
+    assert!(lines[title + 1].contains("! type"), "{shown}");
+    let created = at("created_at: (missing)");
+    assert!(lines[created + 1].contains("! required"), "{shown}");
+    assert!(shown.ends_with("body\n"), "{shown}");
 }
 
 #[test]
-fn purge_requires_confirmation_and_declining_keeps_the_note() {
+fn check_lists_problems_and_strays_and_exits_five_only_for_problems() {
     let vault = Vault::new();
-    let id = vault.new_note(&["-m", "keep me"]);
+    vault.new_note(&["-t", "fine"]);
+    std::fs::write(vault.path().join("README.md"), "not a note\n").unwrap();
+
+    let assert = vault
+        .cmd()
+        .args(["--workspace", vault.ws(), "check"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("stray  README.md"),
+        "a stray alone does not fail:\n{stdout}"
+    );
+
+    std::fs::write(
+        vault.note_file(HAND_ID),
+        "---\ncreated_at: yesterday\n---\n",
+    )
+    .unwrap();
+    let assert = vault
+        .cmd()
+        .args(["--workspace", vault.ws(), "check"])
+        .assert()
+        .failure();
+    assert_eq!(assert.get_output().status.code(), Some(5));
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("`created_at` (format)"), "{stdout}");
+}
+
+#[test]
+fn search_matches_frontmatter_text_and_says_so_when_nothing_does() {
+    let vault = Vault::new();
+    vault.new_note(&["-t", "Oranges and lemons"]);
+    vault.new_note(&["-t", "Something else"]);
+
+    let hits = vault.json(&["search", "lemon"]);
+    assert_eq!(hits["notes"].as_array().unwrap().len(), 1);
+    assert!(vault.stderr(&["search", "zzz"]).contains("nothing matches"));
+}
+
+#[test]
+fn links_reports_links_out_and_in() {
+    let vault = Vault::new();
+    let target = vault.new_note(&["-t", "target"]);
+    let source = vault.new_note(&["-t", "source", "-m", &format!("see [[{target}|it]]")]);
+
+    let out = vault.json(&["links", &source]);
+    assert_eq!(out["links_out"][0]["target"], target.as_str());
+    assert_eq!(out["links_out"][0]["label"], "it");
+    assert_eq!(out["links_out"][0]["state"], "present");
+    let back = vault.json(&["links", &target]);
+    assert_eq!(back["links_in"][0]["id"], source.as_str());
+}
+
+// =============================================================================================
+// Deleting
+// =============================================================================================
+
+#[test]
+fn rm_confirms_and_declining_keeps_the_note() {
+    let vault = Vault::new();
+    let id = vault.new_note(&["-t", "keep me"]);
 
     vault
         .cmd()
-        .args(["--workspace", vault.path().to_str().unwrap(), "purge", &id])
+        .args(["--workspace", vault.ws(), "rm", &id])
         .write_stdin("n\n")
         .assert()
         .success()
         .stderr(predicates::str::contains("cancelled"));
+    assert!(vault.note_file(&id).exists());
 
-    assert!(vault.path().join(format!("{id}.md")).exists());
+    vault
+        .cmd()
+        .args(["--workspace", vault.ws(), "rm", &id])
+        .write_stdin("y\n")
+        .assert()
+        .success();
+    assert!(!vault.note_file(&id).exists(), "the file is gone");
+    assert_eq!(vault.code(&["show", &id]), 3);
 }
 
+// =============================================================================================
+// Field batches
+// =============================================================================================
+
 #[test]
-fn purge_with_yes_removes_the_file_and_leaves_the_children_live_but_ungrouped() {
+fn field_rename_rewrites_every_note_the_schema_and_the_role() {
     let vault = Vault::new();
-    let root = vault.new_note(&["-m", "root"]);
-    let mid = vault.new_note(&["--reply", &root, "-m", "mid"]);
-    let leaf = vault.new_note(&["--reply", &mid, "-m", "leaf"]);
+    let a = vault.new_note(&["-t", "first"]);
+    let b = vault.new_note(&["-t", "second"]);
 
-    vault.run(&["purge", &mid, "--yes"]);
+    let stdout = vault.run(&["field", "rename", "title", "headline"]);
+    assert!(
+        stdout.contains(&a) && stdout.contains(&b),
+        "each note named:\n{stdout}"
+    );
 
-    assert!(!vault.path().join(format!("{mid}.md")).exists());
-    let rows = vault.json(&["ls", "--flat"]);
-    let leaf_row = rows
+    for id in [&a, &b] {
+        let file = std::fs::read_to_string(vault.note_file(id)).unwrap();
+        assert!(
+            file.contains("headline: ") && !file.contains("title:"),
+            "{file}"
+        );
+    }
+    let schema = std::fs::read_to_string(vault.path().join("schema.json")).unwrap();
+    assert!(
+        schema.contains("\"headline\"") && !schema.contains("\"title\""),
+        "{schema}"
+    );
+    let toml = std::fs::read_to_string(vault.path().join("workspace.toml")).unwrap();
+    assert!(
+        toml.contains("\"headline\""),
+        "the role follows the key:\n{toml}"
+    );
+
+    // …so the title still reads, and nothing is left with a problem.
+    let listing = vault.json(&["ls"]);
+    let mut titles: Vec<&str> = listing["notes"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| r["id"] == leaf.as_str())
-        .unwrap();
-    // The evidence that a chain was broken is the dangling parent, which lives in the file.
-    assert_eq!(leaf_row["parent"]["state"], "deleted");
-    // The root is derived, so purging the middle splits the subtree: the walk now stops at the id
-    // the surviving file still names. Grouping across *two* purges is what is genuinely lost.
-    assert_eq!(leaf_row["root"], mid.as_str());
-    assert_ne!(leaf_row["root"], root.as_str());
+        .map(|row| row["title"].as_str().unwrap())
+        .collect();
+    titles.sort_unstable();
+    assert_eq!(titles, ["first", "second"]);
+    vault.run(&["check"]);
 }
 
 #[test]
-fn a_note_whose_parent_was_purged_shows_up_in_the_timeline_as_a_root() {
+fn a_batch_that_would_leave_a_note_invalid_names_the_note_and_writes_nothing() {
     let vault = Vault::new();
-    let root = vault.new_note(&["-m", "root"]);
-    let child = vault.new_note(&["--reply", &root, "-m", "child"]);
+    let fine = vault.new_note(&["-t", "fine"]);
+    let before = std::fs::read_to_string(vault.note_file(&fine)).unwrap();
+    // Invalid already, and still invalid once filled: the batch must not write around it.
+    std::fs::write(
+        vault.note_file(HAND_ID),
+        "---\ncreated_at: yesterday\n---\n",
+    )
+    .unwrap();
 
-    vault.run(&["purge", &root, "--yes"]);
-
-    let roots = vault.json(&["ls"]);
-    assert_eq!(roots.as_array().unwrap().len(), 1);
-    assert_eq!(roots[0]["id"], child.as_str());
+    let (code, stderr) = vault.fail(&["field", "fill", "mood", "calm"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains(HAND_ID), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(vault.note_file(&fine)).unwrap(),
+        before
+    );
 }
 
 // =============================================================================================
@@ -861,131 +686,44 @@ fn a_note_whose_parent_was_purged_shows_up_in_the_timeline_as_a_root() {
 // =============================================================================================
 
 #[test]
-fn exit_codes_are_the_documented_ones() {
-    let vault = Vault::new();
-    vault.new_note(&["-m", "one"]);
-
-    assert_eq!(vault.code(&["show", "ffffffff"]), 3, "not found");
-    assert_eq!(vault.code(&["bogus"]), 2, "usage");
-    vault
-        .cmd()
-        .args(["--workspace", vault.path().to_str().unwrap(), "ls"])
-        .assert()
-        .success();
-}
-
-#[test]
 fn an_ambiguous_prefix_lists_the_candidates_and_exits_four() {
     let vault = Vault::new();
-    // Captured together, so they share a long timestamp prefix by construction.
-    vault.new_note(&["-t", "first", "-m", "a"]);
-    vault.new_note(&["-t", "second", "-m", "b"]);
+    // Captured together, so they share a prefix by construction: the ids are uuidv7.
+    let first = vault.new_note(&["-t", "first"]);
+    vault.new_note(&["-t", "second"]);
 
-    let assertion = vault
-        .cmd()
-        .args([
-            "--workspace",
-            vault.path().to_str().unwrap(),
-            "show",
-            "01a0",
-        ])
-        .assert()
-        .failure();
-    assert_eq!(assertion.get_output().status.code(), Some(4));
-
-    let stderr = String::from_utf8(assertion.get_output().stderr.clone()).unwrap();
+    let (code, stderr) = vault.fail(&["show", &first[..4]]);
+    assert_eq!(code, 4);
     assert!(
         stderr.contains("first") && stderr.contains("second"),
         "{stderr}"
     );
+    assert_eq!(vault.code(&["show", "ffffffff"]), 3, "not found");
+    assert_eq!(vault.code(&["bogus"]), 2, "usage");
 }
 
 #[test]
 fn a_printed_short_id_can_always_be_handed_straight_back() {
-    // The property that makes short ids usable at all. Ids captured together share a long prefix,
-    // so this fails immediately if the abbreviation width is fixed rather than computed.
+    // Ids captured together share a long prefix, so this fails immediately if the abbreviation
+    // width is fixed rather than computed.
     let vault = Vault::new();
     for i in 0..12 {
-        vault.new_note(&["-t", &format!("note {i}"), "-m", "x"]);
+        vault.new_note(&["-t", &format!("note {i}")]);
     }
-
-    let listing = vault.jot(&[
-        "--workspace",
-        vault.path().to_str().unwrap(),
-        "ls",
-        "--flat",
-    ]);
+    let listing = vault.jot(&["--workspace", vault.ws(), "ls"]);
     let shorts: Vec<&str> = listing
         .lines()
         .filter_map(|line| line.split_whitespace().next())
         .collect();
-    assert_eq!(shorts.len(), 12);
-
+    assert_eq!(shorts.len(), 12, "{listing}");
     for short in shorts {
+        assert!(short.len() >= 8, "`{short}` is under the floor");
         vault
             .cmd()
-            .args(["--workspace", vault.path().to_str().unwrap(), "show", short])
+            .args(["--workspace", vault.ws(), "show", short])
             .assert()
             .success();
     }
-}
-
-#[test]
-fn ls_prints_the_whole_millisecond_timestamp_in_the_id_column() {
-    // Eight characters of a UUIDv7 are all timestamp and nothing else: every note captured in the
-    // same minute printed the same string, which is the failure `shortid`'s module docs open on.
-    // Thirteen is where the timestamp ends and randomness begins, so this pins that the CLI's
-    // floor clears it — and clears it *on a hex digit*, since character 9 of the hyphenated form
-    // is a hyphen and a prefix ending there would read as a truncation bug.
-    let vault = Vault::new();
-    for i in 0..3 {
-        vault.new_note(&["-t", &format!("note {i}"), "-m", "x"]);
-    }
-
-    let full: Vec<String> = vault
-        .json(&["ls", "--flat"])
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| row["id"].as_str().unwrap().to_owned())
-        .collect();
-
-    let listing = vault.run_short(&["ls", "--flat"]);
-    let shorts: Vec<&str> = listing
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .collect();
-    assert_eq!(shorts.len(), 3, "{listing}");
-
-    for short in shorts {
-        assert!(
-            short.len() >= 13,
-            "`{short}` stops inside the timestamp:\n{listing}"
-        );
-        assert!(!short.ends_with('-'), "`{short}`");
-        assert!(
-            full.iter().any(|id| id.starts_with(short)),
-            "`{short}` is a prefix of none of {full:?}"
-        );
-    }
-}
-
-#[test]
-fn ws_ls_keeps_the_eight_character_floor_that_ls_no_longer_uses() {
-    // The two floors differ deliberately. A workspace id is a v4 — random from its first bit — so
-    // it has no timestamp prefix to get past, and widening it to match `jot ls` would spend five
-    // more columns to say nothing. Notes captured together can push past their floor; a lone
-    // workspace cannot, so this is an equality rather than a bound.
-    let vault = Vault::new();
-    let row = vault.run_short(&["ws", "ls"]);
-    let short = row_id(row.lines().next().unwrap());
-    assert_eq!(short.len(), 8, "{row}");
-
-    let id = vault.json(&["ws", "ls"])[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert!(id.starts_with(short), "`{short}` is not a prefix of {id}");
 }
 
 // =============================================================================================
@@ -999,15 +737,13 @@ fn every_command_works_from_a_subdirectory_of_the_workspace() {
     let nested = vault.path().join("a/b/c");
     std::fs::create_dir_all(&nested).unwrap();
 
-    // No `--workspace`: discovery has to walk up and find `.jot/`.
-    let output = vault
+    vault
         .cmd()
         .current_dir(&nested)
         .args(["--long", "show", &id])
         .assert()
-        .success();
-    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("a thought"), "{stdout}");
+        .success()
+        .stdout(predicates::str::contains("a thought"));
 }
 
 #[test]
@@ -1016,20 +752,19 @@ fn the_env_var_selects_the_workspace_when_there_is_no_flag() {
     let id = vault.new_note(&["-m", "from the env"]);
     let elsewhere = tempfile::tempdir().unwrap();
 
-    let output = vault
+    vault
         .cmd()
         .current_dir(elsewhere.path())
         .env("JOT_WORKSPACE", vault.path())
         .args(["--long", "show", &id])
         .assert()
-        .success();
-    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("from the env"), "{stdout}");
+        .success()
+        .stdout(predicates::str::contains("from the env"));
 }
 
 #[test]
 fn an_explicit_workspace_that_does_not_open_is_an_error_and_never_a_fallback() {
-    // Silently dropping to the next rule is exactly how a note lands in the wrong vault.
+    // Silently dropping to the next rule is exactly how a note lands in the wrong workspace.
     let vault = Vault::new();
     let elsewhere = tempfile::tempdir().unwrap();
 
@@ -1039,24 +774,21 @@ fn an_explicit_workspace_that_does_not_open_is_an_error_and_never_a_fallback() {
         .args(["new", "-m", "must not be captured"])
         .assert()
         .failure();
-
-    assert_eq!(count_notes(vault.path()), 0, "nothing landed in the vault");
+    assert_eq!(
+        count_notes(vault.path()),
+        0,
+        "nothing landed in the workspace"
+    );
 }
 
 #[test]
 fn verbose_says_which_workspace_was_chosen_and_why() {
     let vault = Vault::new();
-    vault
-        .cmd()
-        .args([
-            "--workspace",
-            vault.path().to_str().unwrap(),
-            "--verbose",
-            "ls",
-        ])
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("chosen by --workspace"));
+    assert!(
+        vault
+            .stderr(&["--verbose", "ls"])
+            .contains("chosen by --workspace")
+    );
 }
 
 // =============================================================================================
@@ -1072,34 +804,32 @@ fn json_output_is_clean_even_when_a_warning_is_printed() {
 
     let output = vault
         .cmd()
-        .args([
-            "--workspace",
-            vault.path().to_str().unwrap(),
-            "--json",
-            "ls",
-        ])
+        .args(["--workspace", vault.ws(), "--json", "ls"])
         .assert()
         .success();
-
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
     serde_json::from_str::<Value>(&stdout).expect("stdout is still valid JSON");
     let stderr = String::from_utf8(output.get_output().stderr.clone()).unwrap();
-    assert!(
-        stderr.contains("README.md"),
-        "the problem is reported: {stderr}"
-    );
+    assert!(stderr.contains("stray"), "the stray is reported: {stderr}");
 }
 
 #[test]
-fn index_status_counts_notes_and_reports_problems() {
+fn index_status_counts_notes_problems_and_strays() {
     let vault = Vault::new();
     vault.new_note(&["-m", "one"]);
-    let id = vault.new_note(&["-m", "two"]);
-    vault.run(&["rm", &id]);
+    std::fs::write(
+        vault.note_file(HAND_ID),
+        "---\ncreated_at: yesterday\n---\n",
+    )
+    .unwrap();
+    std::fs::write(vault.path().join("README.md"), "not a note\n").unwrap();
 
-    let json = vault.json(&["index", "status"]);
-    assert_eq!(json["active"], 1);
-    assert_eq!(json["trashed"], 1);
+    let status = vault.json(&["index", "status"]);
+    assert_eq!(status["notes"], 2);
+    assert_eq!(status["notes_with_problems"], 1);
+    assert_eq!(status["strays"], 1);
+    assert_eq!(status["writable"], true);
+    assert_eq!(vault.json(&["index", "rebuild"])["notes"], 2);
 }
 
 #[test]
@@ -1121,66 +851,9 @@ fn bare_jot_prints_help_rather_than_failing() {
         .stdout(predicates::str::contains("Usage:"));
 }
 
-/// `jot` is a CLI first: the browser is somewhere you go on purpose.
-///
-/// Stage 5 briefly made a bare `jot` open the TUI. Reverted — typing the program's name should
-/// tell you what it does, not capture your terminal.
-#[test]
-fn bare_jot_does_not_open_the_browser() {
-    let vault = Vault::new();
-    vault
-        .cmd()
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("Usage:"))
-        // The alternate-screen switch. If this ever appears, a bare `jot` has taken the terminal.
-        .stdout(predicates::function::function(|out: &str| {
-            !out.contains("\u{1b}[?1049h")
-        }));
-}
-
-/// `jot tui` asks for the browser explicitly, so a redirected stdout is refused rather than
-/// quietly downgraded to help — which is how a script ends up parsing a help page.
-///
-/// The harness gives the child a pipe, so this exercises the refusal rather than the browser,
-/// which is the half reachable without a pty.
-#[test]
-fn tui_without_a_terminal_is_refused_rather_than_downgraded() {
-    let vault = Vault::new();
-    vault
-        .cmd()
-        .arg("tui")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("needs a terminal"));
-}
-
-/// The globals are `global = true`, which is why `tui` needs no `--tui` twin: the option reads
-/// naturally after the subcommand, and that is the whole reason the flag was dropped.
-#[test]
-fn tui_takes_the_global_options_after_the_subcommand() {
-    let vault = Vault::new();
-    vault
-        .cmd()
-        .args(["tui", "--workspace"])
-        .arg(vault.path())
-        .assert()
-        .failure()
-        // Reached the TUI arm, which only happens once the workspace resolved.
-        .stderr(predicates::str::contains("needs a terminal"));
-}
-
-/// There is one spelling. A `--tui` flag existed briefly and was removed.
-#[test]
-fn there_is_no_tui_flag() {
-    let vault = Vault::new();
-    vault
-        .cmd()
-        .arg("--tui")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("unexpected argument"));
-}
+// =============================================================================================
+// Helpers
+// =============================================================================================
 
 /// The registry's current workspace, as JSON.
 fn current(vault: &Vault) -> Value {
@@ -1194,18 +867,67 @@ fn current(vault: &Vault) -> Value {
         .clone()
 }
 
-/// The id token of a `jot ws ls` row, skipping the `*` current-workspace marker.
-fn row_id(row: &str) -> &str {
-    row.split_whitespace()
-        .find(|token| *token != "*")
-        .expect("every row leads with an id")
-}
-
-/// How many notes are in the vault root.
+/// How many `*.md` files are in the workspace root.
 fn count_notes(root: &Path) -> usize {
     std::fs::read_dir(root)
         .unwrap()
         .flatten()
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
         .count()
+}
+
+/// A stand-in `$EDITOR`: its first run replaces the buffer with fixed text; every later run copies
+/// the buffer it was handed to `seen.md` and saves nothing — a person reading the reasons and
+/// quitting.
+struct ScriptedEditor {
+    dir: PathBuf,
+    program: PathBuf,
+}
+
+impl ScriptedEditor {
+    fn new(dir: &Path, first: &str) -> ScriptedEditor {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("first.md"), first).unwrap();
+        #[cfg(windows)]
+        let program = {
+            let program = dir.join("editor.cmd");
+            std::fs::write(
+                &program,
+                "@echo off\r\n\
+                 if exist \"%~dp0ran\" goto again\r\n\
+                 copy /y \"%~dp0first.md\" \"%~1\" >nul\r\n\
+                 type nul > \"%~dp0ran\"\r\n\
+                 exit /b 0\r\n\
+                 :again\r\n\
+                 copy /y \"%~1\" \"%~dp0seen.md\" >nul\r\n\
+                 exit /b 0\r\n",
+            )
+            .unwrap();
+            program
+        };
+        #[cfg(not(windows))]
+        let program = {
+            use std::os::unix::fs::PermissionsExt;
+            let program = dir.join("editor.sh");
+            std::fs::write(
+                &program,
+                "#!/bin/sh\n\
+                 d=$(dirname \"$0\")\n\
+                 if [ -e \"$d/ran\" ]; then cp \"$1\" \"$d/seen.md\"; \
+                 else cp \"$d/first.md\" \"$1\"; touch \"$d/ran\"; fi\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            program
+        };
+        ScriptedEditor {
+            dir: dir.to_path_buf(),
+            program,
+        }
+    }
+
+    /// The buffer the editor was handed the second time.
+    fn seen(&self) -> String {
+        std::fs::read_to_string(self.dir.join("seen.md")).expect("the editor was reopened")
+    }
 }

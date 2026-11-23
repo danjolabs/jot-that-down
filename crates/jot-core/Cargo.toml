@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Domain, vault I/O, index, and thread algebra for jot-that-down."
+description = "The schema-first workspace engine behind jot-that-down: files, settings, actions, events, index."
 
 [lib]
 name = "jot_core"
@@ -20,10 +20,12 @@ uuid = { workspace = true }
 blake3 = "1.8"
 directories = "6.0.0"
 indexmap = { version = "2.14", features = ["serde"] }
+# JSON Schema validation of frontmatter (`docs/plans/redesign.md`). Default features off: they pull
+# in an HTTP client, and `$ref` is resolved from local files only, by a retriever in `schema.rs`.
+jsonschema = { version = "0.63", default-features = false }
 markdown = "1.0.0"
-# The watcher lives in core, not in the TUI: the desktop surface needs the same change events, and a
-# surface that grew its own would be domain logic on the wrong side of the seam. That surface is
-# deferred (docs/plans/todo/desktop.md), which changes when it is built and not where this belongs.
+# The watcher lives in core: it is an event source for `Action::Sync`, and a surface that grew its
+# own would be domain logic on the wrong side of the seam.
 notify = "8.0"
 rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2.0.20"

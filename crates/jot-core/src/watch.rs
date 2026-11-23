@@ -1,24 +1,15 @@
-//! Watching a vault for changes made outside jot.
+//! Watching a workspace for changes made outside jot: a trigger for `Action::Sync`.
 //!
-//! Lives in core rather than in the TUI because the desktop surface needs the same events, and a
-//! surface that grew its own watcher would be domain logic on the wrong side of the seam. What a
-//! surface gets back is a [`Receiver`] of [`Change`] — no paths, no notify types, nothing that
-//! leaks the filesystem into a view.
+//! The watcher reports only "something changed". It carries no path and no notify type, because
+//! the answer is always the same — run `Action::Sync`, which diffs the files against the index and
+//! produces the precise [`Event`](crate::action::Event)s. A burst is debounced into one trigger.
 //!
 //! # Why the watch is not recursive
 //!
-//! A vault is two flat directories: notes live directly in the workspace root, trashed notes
-//! directly in `.jot/.trash/`. Nothing is nested, so [`RecursiveMode::NonRecursive`] on each is
-//! sufficient — and it is also what keeps the watcher away from `.jot/index.db`.
-//!
-//! That matters more than it looks. `sync()` writes the index, the index lives under `.jot/`, and
-//! a recursive watch on the root would see those writes, report them as vault changes, and drive
-//! the surface to sync again — a loop with no fixed point that a stage-4 vault would enter within
-//! milliseconds of opening. Watching the two directories that actually hold notes means the loop
-//! is unrepresentable rather than filtered out afterwards.
-//!
-//! The trash is watched for the same reason it is scanned: from stage 1b, location *is* state, so
-//! a file dragged into `.jot/.trash/` by hand is a state change and this is how it is noticed.
+//! A workspace is one flat directory, so a non-recursive watch on the root sees every note and
+//! both settings files. It is also what keeps the watcher away from `.jot/`: a sync writes
+//! `index.db`, and a recursive watch would report that write, trigger another sync, and loop.
+//! Watching only the root makes that loop unrepresentable rather than filtered.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -37,19 +28,12 @@ use crate::error::{Error, Result};
 /// write-truncate-rename dance.
 pub const DEBOUNCE: Duration = Duration::from_millis(200);
 
-/// Something in the vault changed. Coalesced: the answer to it is always one `sync()`.
-///
-/// Deliberately carries no path. A surface cannot do anything useful with "this file moved" that it
-/// would not do with "something moved" — it re-syncs and re-reads — and a payload would be a
-/// promise the debouncer cannot keep, since coalescing a burst means most of the paths are gone by
-/// the time anyone looks.
+/// Something in the workspace changed: run `Action::Sync`. Coalesced, and deliberately without a
+/// payload — coalescing a burst means most of the paths would be gone by the time anyone looked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Change {
-    /// At least one note file was created, written, renamed or removed.
-    Vault,
-}
+pub struct SyncNeeded;
 
-/// A live watch over one vault.
+/// A live watch over one workspace root.
 ///
 /// Dropping it stops the watch and closes the channel. Nothing here borrows the [`Workspace`], on
 /// purpose: `Workspace` owns a `rusqlite::Connection` and is `Send` but not `Sync`, so the watcher
@@ -60,15 +44,11 @@ pub enum Change {
 pub struct Watcher {
     /// Held only so the watch outlives this struct's construction. Dropping it unwatches.
     _inner: RecommendedWatcher,
-    rx: Receiver<Change>,
+    rx: Receiver<SyncNeeded>,
 }
 
 impl Watcher {
-    /// Start watching a workspace root and its trash.
-    ///
-    /// `root` is the workspace root; the trash is derived from it, and is watched only if it
-    /// exists — a vault that has never trashed a note has no `.jot/.trash/` yet, and that is not
-    /// an error.
+    /// Start watching a workspace root.
     ///
     /// # Errors
     ///
@@ -85,7 +65,7 @@ impl Watcher {
     /// As [`Watcher::new`].
     pub fn with_debounce(root: &Path, debounce: Duration) -> Result<Self> {
         let (raw_tx, raw_rx) = mpsc::channel::<Event>();
-        let (tx, rx) = mpsc::channel::<Change>();
+        let (tx, rx) = mpsc::channel::<SyncNeeded>();
 
         let watch_err = |path: &Path, e: notify::Error| Error::Watch {
             path: path.to_path_buf(),
@@ -105,13 +85,6 @@ impl Watcher {
             .watch(root, RecursiveMode::NonRecursive)
             .map_err(|e| watch_err(root, e))?;
 
-        let trash = crate::fs::trash_dir(root);
-        if trash.is_dir() {
-            inner
-                .watch(&trash, RecursiveMode::NonRecursive)
-                .map_err(|e| watch_err(&trash, e))?;
-        }
-
         thread::spawn(move || debounce_loop(&raw_rx, &tx, debounce));
 
         Ok(Watcher { _inner: inner, rx })
@@ -122,62 +95,61 @@ impl Watcher {
     /// Disconnects when the watcher is dropped, which is how an event loop learns to stop
     /// selecting on it.
     #[must_use]
-    pub fn changes(&self) -> &Receiver<Change> {
+    pub fn changes(&self) -> &Receiver<SyncNeeded> {
         &self.rx
     }
 }
 
-/// Collapse a burst of filesystem events into one [`Change`] per quiet period.
+/// Collapse a burst of filesystem events into one [`SyncNeeded`] per quiet period.
 ///
 /// Blocks for the first event, then keeps extending the window while events keep arriving, so a
 /// client rewriting 500 files produces one message rather than 500. The extension is deliberate:
 /// a fixed window starting at the first event would fire mid-burst and make the surface sync
 /// against a half-written vault.
-fn debounce_loop(raw: &Receiver<Event>, out: &Sender<Change>, debounce: Duration) {
+fn debounce_loop(raw: &Receiver<Event>, out: &Sender<SyncNeeded>, debounce: Duration) {
     loop {
         // Block until something happens. A disconnect means the watcher was dropped.
         let Ok(first) = raw.recv() else { return };
-        let mut interesting = is_note_event(&first);
+        let mut interesting = is_relevant(&first);
 
         // Keep draining until the vault has been quiet for a whole `debounce`.
         loop {
             match raw.recv_timeout(debounce) {
-                Ok(event) => interesting |= is_note_event(&event),
+                Ok(event) => interesting |= is_relevant(&event),
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
 
-        // A burst of nothing but editor swap files is not a vault change. Staying quiet here is
-        // what stops `:w` in vim costing two syncs instead of one.
-        if interesting && out.send(Change::Vault).is_err() {
+        // A burst of nothing but editor swap files is not a change. Staying quiet here is what
+        // stops `:w` in vim costing two syncs instead of one.
+        if interesting && out.send(SyncNeeded).is_err() {
             return;
         }
     }
 }
 
-/// Whether an event touches a file a scan would read.
-///
-/// The directories being watched already exclude the index, so this is about the *other* noise a
-/// real editor makes: `.swp`, `4913`, `.md~`, and the dotfiles a sync client scatters. A scan only
-/// ever reads `*.md`, so anything else cannot change an answer.
-///
-/// Note the deliberate breadth on the other axis: every [`EventKind`] counts, including
-/// [`EventKind::Access`]-adjacent metadata changes, because `mtime` is half of stage 4's fast path
-/// and a touch that moves it is a change the index must see.
-fn is_note_event(event: &Event) -> bool {
+/// Whether an event touches a file a sync reads: a `*.md` that is not a dot-file, or one of the
+/// two settings files. Editor noise (`.swp`, `4913`, `.md~`) cannot change an answer. Every kind
+/// but access counts, because mtime is half of the sync's fast path.
+fn is_relevant(event: &Event) -> bool {
     if matches!(event.kind, EventKind::Access(_)) {
         return false;
     }
-    event.paths.iter().map(PathBuf::as_path).any(is_note_path)
+    event
+        .paths
+        .iter()
+        .map(PathBuf::as_path)
+        .any(is_relevant_path)
 }
 
-/// Whether a path is a note file: a `*.md` whose name does not start with a dot.
-fn is_note_path(path: &Path) -> bool {
+fn is_relevant_path(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    !name.starts_with('.') && name.ends_with(".md")
+    name == crate::settings::WORKSPACE_TOML
+        || name == crate::settings::SCHEMA_JSON
+        || (!name.starts_with('.') && name.to_ascii_lowercase().ends_with(".md"))
 }
 
 #[cfg(test)]
@@ -192,7 +164,7 @@ mod tests {
     /// Short debounce so the tests do not spend their time sleeping.
     const QUICK: Duration = Duration::from_millis(50);
 
-    fn wait_for_change(w: &Watcher) -> Option<Change> {
+    fn wait_for_change(w: &Watcher) -> Option<SyncNeeded> {
         w.changes().recv_timeout(PATIENCE).ok()
     }
 
@@ -203,7 +175,7 @@ mod tests {
 
         fs::write(tmp.path().join("01a0.md"), "hello").unwrap();
 
-        assert_eq!(wait_for_change(&w), Some(Change::Vault));
+        assert_eq!(wait_for_change(&w), Some(SyncNeeded));
     }
 
     #[test]
@@ -215,7 +187,7 @@ mod tests {
             fs::write(tmp.path().join(format!("note{i}.md")), "x").unwrap();
         }
 
-        assert_eq!(wait_for_change(&w), Some(Change::Vault));
+        assert_eq!(wait_for_change(&w), Some(SyncNeeded));
 
         // The whole point: 50 writes are one message, not 50. Give the debouncer a further quiet
         // period and it must have nothing more to say.
@@ -232,8 +204,8 @@ mod tests {
         fs::create_dir_all(&jot).unwrap();
         let w = Watcher::with_debounce(tmp.path(), QUICK).unwrap();
 
-        // This is the feedback loop the module exists to make unrepresentable: `sync()` writes
-        // these three files on every pass, and a recursive watch would report each one.
+        // The feedback loop the module exists to make unrepresentable: a sync writes these files,
+        // and a recursive watch would report each one.
         fs::write(jot.join("index.db"), "not really a database").unwrap();
         fs::write(jot.join("index.db-wal"), "nor this").unwrap();
         fs::write(jot.join("index.db-shm"), "nor this").unwrap();
@@ -245,23 +217,11 @@ mod tests {
     }
 
     #[test]
-    fn a_file_moved_into_the_trash_reports_a_change() {
+    fn a_settings_file_edit_reports_a_change() {
         let tmp = tempfile::tempdir().unwrap();
-        let trash = crate::fs::trash_dir(tmp.path());
-        fs::create_dir_all(&trash).unwrap();
-
-        let note = tmp.path().join("01a0.md");
-        fs::write(&note, "hello").unwrap();
-
-        // Watch only after the note exists, so the change under test is the move alone.
         let w = Watcher::with_debounce(tmp.path(), QUICK).unwrap();
-        fs::rename(&note, trash.join("01a0.md")).unwrap();
-
-        assert_eq!(
-            wait_for_change(&w),
-            Some(Change::Vault),
-            "location is state, so a hand-move into the trash is a change"
-        );
+        fs::write(tmp.path().join("schema.json"), "{}").unwrap();
+        assert_eq!(wait_for_change(&w), Some(SyncNeeded));
     }
 
     #[test]
@@ -293,7 +253,7 @@ mod tests {
             thread::sleep(Duration::from_millis(60));
         }
 
-        assert_eq!(wait_for_change(&w), Some(Change::Vault));
+        assert_eq!(wait_for_change(&w), Some(SyncNeeded));
         assert!(
             started.elapsed() >= Duration::from_millis(300),
             "a fixed window from the first event would have fired mid-burst; \
@@ -313,14 +273,5 @@ mod tests {
             rx.recv_timeout(PATIENCE),
             Err(RecvTimeoutError::Disconnected | RecvTimeoutError::Timeout)
         ));
-    }
-
-    #[test]
-    fn watching_a_vault_with_no_trash_directory_is_not_an_error() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(
-            Watcher::with_debounce(tmp.path(), QUICK).is_ok(),
-            "a vault that has never trashed a note has no `.jot/.trash/` yet"
-        );
     }
 }

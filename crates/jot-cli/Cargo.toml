@@ -12,13 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 jot-core = { workspace = true }
-jot-tui = { path = "../jot-tui" }
 
 anyhow = { workspace = true }
 chrono = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true }
 
 clap = { version = "4.5", features = ["derive", "env"] }
 clap_complete = "4.5"

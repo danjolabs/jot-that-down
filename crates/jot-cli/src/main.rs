@@ -3,13 +3,13 @@
 //! # The seam
 //!
 //! This crate contains **no domain logic**. It parses arguments, chooses a workspace, calls
-//! `jot-core`, and formats what comes back. It never opens a note file, never walks the vault, and
-//! never decides what a thread is. If a command here seems to need a new rule, the rule belongs in
-//! core — that is the whole reason three surfaces can exist without becoming three subtly different
-//! applications.
+//! `jot-core`, and formats what comes back. It never opens a note file, never walks the workspace,
+//! and never decides whether a note is valid: every write is a core [`Action`], and what happened
+//! comes back as an [`Outcome`]. If a command here seems to need a new rule, the rule belongs in
+//! core.
 //!
-//! The one deliberate exception is [`editor`], which writes a temp file outside the vault so that
-//! `$EDITOR` has something to open. What comes back still goes through core's write path.
+//! The one deliberate exception is [`editor`], which writes a scratch file outside the workspace so
+//! that `$EDITOR` has something to open. What comes back still goes through core's write path.
 //!
 //! # Exit codes
 //!
@@ -18,61 +18,79 @@
 //! | Code | Meaning |
 //! | --- | --- |
 //! | 0 | success |
-//! | 1 | runtime error |
+//! | 1 | runtime error, including a write core refused |
 //! | 2 | usage error (clap's own) |
 //! | 3 | no such note or workspace |
-//! | 4 | ambiguous id prefix |
+//! | 4 | ambiguous id prefix or workspace name |
+//! | 5 | `jot check` found problems |
 
-mod compose;
 mod context;
 mod editor;
 mod output;
 
-use anyhow::{Context as _, Result, bail};
-use chrono::{DateTime, Duration, Utc};
+use anyhow::{Context as _, anyhow};
 use clap::{CommandFactory, Parser, Subcommand};
 use context::Context;
-use jot_core::note::{Note, NoteId};
-use jot_core::query::{Draft, Edit, FileSort, Resolution, SearchQuery, State, TimelineQuery};
-use jot_core::registry::Entry;
-use jot_core::shortid;
-use jot_core::workspace::Workspace;
-use output::{IdWidth, MIN_ID_WIDTH, MIN_WORKSPACE_ID_WIDTH, Style};
-use serde_json::json;
+use editor::{Composed, Verdict};
+use jot_core::registry::{Entry, Registry};
+use jot_core::snapshot::Resolution;
+use jot_core::{
+    Action, Document, Event, Failure, Fields, NoteId, Outcome, Problem, Rejection, Workspace,
+};
+use output::{MIN_ID_WIDTH, Style};
+use serde_json::{Value, json};
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use uuid::Uuid;
 
 /// Exit code for "the thing you named does not exist".
 const EXIT_NOT_FOUND: u8 = 3;
-/// Exit code for "the prefix you gave matches more than one note".
+/// Exit code for "what you named matches more than one thing".
 const EXIT_AMBIGUOUS: u8 = 4;
+/// Exit code for "`jot check` found something wrong".
+const EXIT_PROBLEMS: u8 = 5;
 
 /// A failure that knows which exit code it deserves.
-struct Failure {
+struct Exit {
     error: anyhow::Error,
     code: u8,
 }
 
-impl Failure {
-    fn runtime(error: anyhow::Error) -> Failure {
-        Failure { error, code: 1 }
+impl Exit {
+    fn runtime(error: anyhow::Error) -> Exit {
+        Exit { error, code: 1 }
+    }
+
+    fn not_found(error: anyhow::Error) -> Exit {
+        Exit {
+            error,
+            code: EXIT_NOT_FOUND,
+        }
     }
 }
 
-impl From<anyhow::Error> for Failure {
-    fn from(error: anyhow::Error) -> Failure {
-        Failure::runtime(error)
+impl From<anyhow::Error> for Exit {
+    fn from(error: anyhow::Error) -> Exit {
+        Exit::runtime(error)
+    }
+}
+
+impl From<jot_core::Error> for Exit {
+    fn from(error: jot_core::Error) -> Exit {
+        Exit::runtime(error.into())
     }
 }
 
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
-        Err(failure) => {
-            eprintln!("jot: {:#}", failure.error);
-            ExitCode::from(failure.code)
+        Err(exit) => {
+            // An exit with an empty message has already said everything on stderr.
+            let message = format!("{:#}", exit.error);
+            if !message.is_empty() {
+                eprintln!("jot: {message}");
+            }
+            ExitCode::from(exit.code)
         }
     }
 }
@@ -86,9 +104,9 @@ fn main() -> ExitCode {
     name = "jot",
     version,
     about = "Capture a thought before it goes.",
-    long_about = "jot — a personal capture tool over a directory of markdown files.\n\n\
-                  Notes reply to notes and quote notes, so an idea can grow a structure while it \
-                  is being written instead of demanding a folder decision first."
+    long_about = "jot — a personal capture tool over a folder of markdown files.\n\n\
+                  Each file is a note named by its id; its frontmatter is typed by the \
+                  workspace's schema.json, so the folder reads like a table that works offline."
 )]
 struct Cli {
     /// Act on the workspace at this path, overriding discovery.
@@ -99,7 +117,7 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Print full UUIDs instead of short ids.
+    /// Print full ids instead of short ones.
     #[arg(long, global = true)]
     long: bool,
 
@@ -121,34 +139,29 @@ enum Command {
     New(NewArgs),
     /// List notes, newest first.
     #[command(visible_alias = "ls")]
-    List(LsArgs),
-    /// Print one note in full.
+    List(ListArgs),
+    /// Print one note in full, with its problems beside its fields.
     Show(ShowArgs),
-    /// Print the thread a note belongs to.
-    Thread(ThreadArgs),
-    /// Change a note's title or body.
+    /// Change a note's frontmatter or body.
     Edit(EditArgs),
-    /// Move a note to the trash.
+    /// Delete a note's file. Irreversible; confirms.
     #[command(visible_alias = "rm")]
-    Remove(IdArgs),
-    /// Bring a note back out of the trash.
-    Restore(IdArgs),
-    /// Delete a note for good. Irreversible.
-    Purge(PurgeArgs),
-    /// List what is in the trash.
-    Trash,
-    /// Search titles.
+    Remove(RemoveArgs),
+    /// Find notes whose frontmatter text contains a string.
     Search(SearchArgs),
-    /// Show a note's links, backlinks, and quotes.
+    /// Show a note's links and the notes linking to it.
     Links(IdArgs),
+    /// Change one frontmatter key in every note at once.
+    #[command(subcommand)]
+    Field(FieldCommand),
+    /// List notes with problems, stray files, and settings errors.
+    Check,
     /// Manage workspaces.
     #[command(subcommand, visible_alias = "ws")]
     Workspace(WsCommand),
-    /// Inspect the vault index.
+    /// Inspect the index.
     #[command(subcommand)]
     Index(IndexCommand),
-    /// Browse the vault full-screen.
-    Tui,
     /// Print a shell completion script.
     Completions {
         /// The shell to generate for.
@@ -156,74 +169,37 @@ enum Command {
     },
 }
 
+/// `key=value`, the value read as YAML.
+type Assignment = (String, Value);
+
 #[derive(clap::Args)]
 struct NewArgs {
-    /// The note's title.
+    /// The title: sets the key `workspace.toml` maps to `document:title`.
     #[arg(short, long)]
     title: Option<String>,
-    /// The note's body. Optional: a title on its own is a note. Without this, jot reads stdin
-    /// when piped, or opens $EDITOR.
+    /// Set a frontmatter key. The value is read as YAML: `n=3` is a number, `n="3"` a string.
+    #[arg(long, value_name = "KEY=VALUE", value_parser = assignment)]
+    set: Vec<Assignment>,
+    /// The body. Without it, jot reads stdin when piped; with no field set either, it opens
+    /// $EDITOR.
     #[arg(short = 'm', long)]
     message: Option<String>,
-    /// Reply to this note, joining its thread.
-    #[arg(long, value_name = "ID")]
-    reply: Option<String>,
-    /// Quote this note. Never changes the thread.
-    #[arg(long, value_name = "ID")]
-    quote: Option<String>,
-    /// Put a slug derived from the title in the filename.
-    #[arg(long)]
-    slug: bool,
 }
 
 #[derive(clap::Args)]
-struct LsArgs {
-    /// Show replies as well as thread roots.
-    #[arg(long)]
-    flat: bool,
-    /// Only notes created since then — `2d`, `3h`, or a date.
-    #[arg(long, value_name = "WHEN")]
-    since: Option<String>,
+struct ListArgs {
     /// Show at most this many.
     #[arg(short = 'n', long)]
     limit: Option<usize>,
-    /// Sort by something other than creation time.
-    #[arg(long, value_enum)]
-    sort: Option<Sort>,
-}
-
-#[derive(clap::ValueEnum, Clone, Copy)]
-enum Sort {
-    /// Newest first.
-    Created,
-    /// Most recently written first.
-    Edited,
-    /// Alphabetical; untitled last.
-    Title,
 }
 
 #[derive(clap::Args)]
 struct ShowArgs {
     /// The note's id, or a unique prefix of it.
     id: String,
-    /// Print the file's bytes exactly, frontmatter included.
+    /// Print the file's bytes exactly.
     #[arg(long)]
     raw: bool,
-}
-
-#[derive(clap::Args)]
-struct ThreadArgs {
-    /// The note's id, or a unique prefix of it.
-    id: String,
-    /// Draw the whole tree. The default.
-    #[arg(long, conflicts_with_all = ["path", "segments"])]
-    tree: bool,
-    /// Print only the line from the root to this note.
-    #[arg(long, conflicts_with_all = ["tree", "segments"])]
-    path: bool,
-    /// Print the thread cut into chains at its branch points.
-    #[arg(long, conflicts_with_all = ["tree", "path"])]
-    segments: bool,
 }
 
 #[derive(clap::Args)]
@@ -231,14 +207,35 @@ struct EditArgs {
     /// The note's id, or a unique prefix of it.
     id: String,
     /// Replace the title.
-    #[arg(short, long, conflicts_with = "no_title")]
+    #[arg(short, long)]
     title: Option<String>,
-    /// Remove the title. Refused if it would leave the note with no title and no body.
-    #[arg(long)]
-    no_title: bool,
-    /// Replace the body. Without this or --title, jot opens $EDITOR.
+    /// Set a frontmatter key, the value read as YAML.
+    #[arg(long, value_name = "KEY=VALUE", value_parser = assignment)]
+    set: Vec<Assignment>,
+    /// Remove a frontmatter key.
+    #[arg(long, value_name = "KEY")]
+    unset: Vec<String>,
+    /// Replace the body. With no flag at all, jot opens $EDITOR on the whole note.
     #[arg(short = 'm', long)]
     message: Option<String>,
+}
+
+impl EditArgs {
+    fn has_changes(&self) -> bool {
+        self.title.is_some()
+            || self.message.is_some()
+            || !self.set.is_empty()
+            || !self.unset.is_empty()
+    }
+}
+
+#[derive(clap::Args)]
+struct RemoveArgs {
+    /// The note's id, or a unique prefix of it.
+    id: String,
+    /// Skip the confirmation prompt.
+    #[arg(short = 'y', long)]
+    yes: bool,
 }
 
 #[derive(clap::Args)]
@@ -248,72 +245,92 @@ struct IdArgs {
 }
 
 #[derive(clap::Args)]
-struct PurgeArgs {
-    /// The note's id, or a unique prefix of it.
-    id: String,
-    /// Skip the confirmation prompt.
-    #[arg(short = 'y', long)]
-    yes: bool,
-}
-
-#[derive(clap::Args)]
 struct SearchArgs {
-    /// A substring of the title.
+    /// Text to find in any frontmatter string, case-insensitively.
     query: String,
-    /// Only notes created since then.
-    #[arg(long, value_name = "WHEN")]
-    since: Option<String>,
-    /// Only notes created before then.
-    #[arg(long, value_name = "WHEN")]
-    until: Option<String>,
-    /// Search the trash too.
-    #[arg(long)]
-    trashed: bool,
 }
 
-/// How a command names the workspace it acts on: **by id, or by name, never both**.
+#[derive(Subcommand)]
+enum FieldCommand {
+    /// Set KEY to VALUE in every note that lacks it.
+    Fill {
+        /// The key.
+        key: String,
+        /// The value, read as YAML.
+        #[arg(value_parser = yaml_value)]
+        value: Value,
+    },
+    /// Remove KEY from every note that has it. Confirms.
+    #[command(visible_alias = "rm")]
+    Remove {
+        /// The key.
+        key: String,
+        /// Skip the confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Rename FROM to TO in every note, in schema.json, and in workspace.toml's [roles].
+    Rename {
+        /// The key now.
+        from: String,
+        /// The key after.
+        to: String,
+    },
+}
+
+/// How `ws use` and `ws remove` name a registered workspace: **by path, or by name, never both**.
 ///
-/// # Why id is the default
-///
-/// A workspace name is display-only. It is seeded from the directory's basename at `init`,
-/// `workspace.toml` says it is "safe to edit by hand", and **nothing enforces uniqueness** — two
-/// vaults called `notes` under different parents are a normal state, as is one vault deleted and
-/// remade. The id is the identity: minted once, immutable, and what the registry keys on.
-///
-/// So a bare `jot workspace use <ID>` means the id, and a name has to be asked for explicitly. The
-/// previous behaviour — try the name, fall back to an id prefix — made the *meaning* of an argument
-/// depend on what happened to be registered, which is the wrong thing to be clever about when the
-/// answer decides where your notes get captured.
+/// The registry is keyed by path, so a path is the identity and a bare argument means one. Names
+/// are display-only and not unique — two folders called `notes` under different parents is a normal
+/// state — so a name has to be asked for with `--name`, and one matching several is refused.
 #[derive(clap::Args)]
 #[command(group(
     clap::ArgGroup::new("selector")
         .required(true)
-        .args(["target", "id", "name"])
+        .args(["path", "name"])
 ))]
 struct WorkspaceSelector {
-    /// The workspace's id, or a unique prefix of it. Same as `--id`.
-    #[arg(value_name = "ID")]
-    target: Option<String>,
+    /// The workspace's folder.
+    #[arg(value_name = "PATH")]
+    path: Option<PathBuf>,
 
-    /// Select by id, or a unique prefix of it.
-    #[arg(long, value_name = "ID")]
-    id: Option<String>,
-
-    /// Select by name. Names are not unique, so this fails if more than one matches.
+    /// Select by name instead. Fails if more than one workspace has it.
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
 }
 
 impl WorkspaceSelector {
-    /// Resolve to exactly one registered workspace.
-    ///
-    /// The `ArgGroup` above makes the three forms mutually exclusive and requires one, so this
-    /// cannot see an empty or over-specified selector.
-    fn resolve(&self, registry: &jot_core::registry::Registry) -> Result<Uuid, Failure> {
-        match (&self.name, self.id.as_ref().or(self.target.as_ref())) {
-            (Some(name), _) => resolve_workspace_by_name(registry, name),
-            (None, Some(id)) => resolve_workspace_by_id(registry, id),
-            (None, None) => unreachable!("the `selector` group requires one of the three"),
+    fn resolve<'r>(&self, registry: &'r Registry) -> Result<&'r Entry, Exit> {
+        if let Some(path) = &self.path {
+            return registry.get(path).ok_or_else(|| {
+                Exit::not_found(anyhow!(
+                    "no registered workspace at `{}`\n\
+                     hint: `jot ws list` shows them; `jot ws add <path>` registers one",
+                    path.display()
+                ))
+            });
+        }
+        let name = self
+            .name
+            .as_deref()
+            .expect("the selector group requires one");
+        let matched = registry.named(name);
+        match matched.as_slice() {
+            [entry] => Ok(*entry),
+            [] => Err(Exit::not_found(anyhow!(
+                "no registered workspace is named `{name}`\nhint: `jot ws list` shows the names"
+            ))),
+            many => {
+                let mut listing = format!("{} workspaces are named `{name}`:\n", many.len());
+                for entry in many {
+                    listing.push_str(&format!("  {}\n", entry.path().display()));
+                }
+                listing.push_str("hint: select one by its path");
+                Err(Exit {
+                    error: anyhow!(listing),
+                    code: EXIT_AMBIGUOUS,
+                })
+            }
         }
     }
 }
@@ -327,18 +344,24 @@ enum WsCommand {
     Use(WorkspaceSelector),
     /// Register an existing workspace.
     Add {
-        /// The directory holding `.jot/`.
+        /// The folder holding `workspace.toml`.
         path: PathBuf,
+        /// A display name. Defaults to the folder name.
+        #[arg(long)]
+        name: Option<String>,
     },
-    /// Create a workspace and register it.
+    /// Create a workspace — `workspace.toml` and `schema.json` — and register it.
     New {
-        /// Where to create it.
+        /// Where to create it. Markdown files already there are left alone.
         path: PathBuf,
+        /// A display name. Defaults to the folder name.
+        #[arg(long)]
+        name: Option<String>,
     },
-    /// Unregister a workspace. The directory and its notes are left alone.
+    /// Unregister a workspace. The folder and its notes are left alone.
     #[command(visible_alias = "rm")]
     Remove(WorkspaceSelector),
-    /// Unregister every workspace whose directory is gone.
+    /// Unregister every workspace whose folder is gone.
     Prune {
         /// Skip the confirmation prompt.
         #[arg(short = 'y', long)]
@@ -348,34 +371,50 @@ enum WsCommand {
 
 #[derive(Subcommand)]
 enum IndexCommand {
-    /// Note counts, and any problems the scan is holding.
+    /// Note, problem and stray counts, and the state of the settings.
     Status,
-    /// Discard the in-memory view and read the vault again.
+    /// Throw the index away and rebuild it from the files.
     Rebuild,
+}
+
+/// Parses `key=value`, reading the value as YAML.
+fn assignment(text: &str) -> Result<Assignment, String> {
+    let (key, value) = text
+        .split_once('=')
+        .ok_or_else(|| format!("`{text}` is not KEY=VALUE"))?;
+    if key.trim().is_empty() {
+        return Err(format!("`{text}` names no key"));
+    }
+    Ok((key.to_owned(), yaml_value(value)?))
+}
+
+/// A value typed on the command line, read as one YAML value — the same YAML 1.2 core reading a
+/// note's frontmatter gets, by core's own parser, so `3` here is what `3` in a file is.
+fn yaml_value(text: &str) -> Result<Value, String> {
+    if text.contains(['\n', '\r']) {
+        return Err(String::from("a value must be on one line"));
+    }
+    let doc = Document::parse(&format!("---\nvalue: {text}\n---\n"));
+    if let Some(problem) = doc.problems.first() {
+        return Err(format!(
+            "`{text}` is not a value jot can store: {}",
+            problem.message
+        ));
+    }
+    doc.fields
+        .get("value")
+        .cloned()
+        .ok_or_else(|| format!("`{text}` is not a single YAML value"))
 }
 
 // =============================================================================================
 // Dispatch
 // =============================================================================================
 
-fn run() -> Result<(), Failure> {
+fn run() -> Result<(), Exit> {
     let cli = Cli::parse();
     let style = Style::new(cli.long, cli.no_color);
 
-    // No arguments opens the browser, which is stage 5's headline: `jot` is a thing you *read* as
-    // well as a thing you type at. `jot tui` is the explicit form, and both land in the same arm
-    // below once a workspace has been resolved.
-    //
-    // Unless nobody is looking. `jot | less`, a CI step, a script capturing output — none of them
-    // can drive a full-screen app, and switching to the alternate screen there produces escape
-    // codes in a pipe rather than a user interface. A bare `jot` in that situation keeps its
-    // stage-3 behaviour and prints help, which is also the only thing a script could have wanted.
-    // `jot tui` asked explicitly, and is refused explicitly below rather than silently downgraded.
-    // `jot` is a CLI first. A bare invocation prints help, as it has since stage 3 — the browser
-    // is somewhere you go on purpose, via `jot tui`, not somewhere you land by typing the
-    // program's name. There is deliberately no `--tui` twin: the global options are `global =
-    // true`, so `jot tui --workspace ~/notes` already reads the way you would want it to, and a
-    // second spelling would be a second thing to keep in step for no reach it does not have.
     let Some(command) = cli.command.as_ref() else {
         Cli::command().print_help().map_err(anyhow::Error::from)?;
         return Ok(());
@@ -394,89 +433,172 @@ fn run() -> Result<(), Failure> {
     }
 
     let mut context = Context::open(cli.workspace.as_deref(), cli.verbose)?;
-    report_problems(&context.workspace);
-    // Short ids are only meaningful against the vault they have to be distinct from, so the table
-    // is built once here, after the workspace is open and before anything is rendered.
-    let style = style.with_abbreviations(context.workspace.abbreviations(MIN_ID_WIDTH));
+    let workspace = &mut context.workspace;
+    if !matches!(command, Command::Check | Command::Index(_)) {
+        report_problems(workspace);
+    }
+    // Short ids are only meaningful against the workspace they have to be distinct from, so the
+    // table is built once here, after the workspace is open and before anything is rendered.
+    let style = style.with_abbreviations(workspace.abbreviations(MIN_ID_WIDTH));
 
     match command {
-        Command::New(args) => new(&mut context.workspace, args, &cli, &style),
-        Command::List(args) => list(&context.workspace, args, &cli, &style),
-        Command::Show(args) => show(&context.workspace, args, &cli, &style),
-        Command::Thread(args) => thread(&context.workspace, args, &cli, &style),
-        Command::Edit(args) => edit(&mut context.workspace, args, &cli, &style),
-        Command::Remove(args) => remove(&mut context.workspace, args, &style),
-        Command::Restore(args) => restore(&mut context.workspace, args, &style),
-        Command::Purge(args) => purge(&mut context.workspace, args, &style),
-        Command::Trash => trash(&context.workspace, &cli, &style),
-        Command::Search(args) => search(&context.workspace, args, &cli, &style),
-        Command::Links(args) => links(&context.workspace, args, &cli, &style),
-        Command::Index(args) => index(&mut context.workspace, args, &cli),
-        // The seam in one line: the TUI is handed an already-opened workspace and owns nothing
-        // else. It syncs on its own from here, because a full-screen app syncs repeatedly where a
-        // command syncs once.
-        Command::Tui => {
-            if !std::io::stdout().is_terminal() {
-                return Err(Failure::runtime(anyhow::anyhow!(
-                    "`jot tui` needs a terminal; stdout is redirected"
-                )));
-            }
-            jot_tui::run(context.workspace, &compose::Editor).map_err(Failure::runtime)
-        }
+        Command::New(args) => new(workspace, args, &cli, &style),
+        Command::List(args) => list(workspace, args, &cli, &style),
+        Command::Show(args) => show(workspace, args, &cli, &style),
+        Command::Edit(args) => edit(workspace, args, &cli, &style),
+        Command::Remove(args) => remove(workspace, args, &style),
+        Command::Search(args) => search(workspace, args, &cli, &style),
+        Command::Links(args) => links(workspace, args, &cli, &style),
+        Command::Field(args) => field(workspace, args, &style),
+        Command::Check => check(workspace, &cli, &style),
+        Command::Index(args) => index(workspace, args, &cli),
         Command::Workspace(_) | Command::Completions { .. } => unreachable!("handled above"),
     }
 }
 
-/// Print the scan's problems on stderr without blocking the command.
-///
-/// Warnings go to stderr precisely so that `jot ls --json | jq` keeps working while a broken file
-/// is still being complained about.
+/// One line on stderr when anything is wrong, pointing at `jot check`. Never blocks a command, and
+/// never on stdout, so `jot ls --json | jq` keeps working while a broken file is complained about.
 fn report_problems(workspace: &Workspace) {
-    let problems = workspace.problems();
-    if !problems.is_empty() {
-        eprintln!("{}", output::problems(problems));
+    let mut parts = Vec::new();
+    let notes = workspace.problems().len();
+    if notes > 0 {
+        parts.push(format!("{} with problems", output::count(notes, "note")));
+    }
+    let strays = workspace.strays().len();
+    if strays > 0 {
+        parts.push(output::count(strays, "stray file"));
+    }
+    if !parts.is_empty() {
+        eprintln!("jot: {} — `jot check` lists them", parts.join(", "));
     }
 }
 
 // =============================================================================================
-// Resolving ids
+// Resolving ids, and reading outcomes
 // =============================================================================================
 
 /// Turn a user-supplied prefix into a note id, or fail with the right exit code.
 ///
 /// Ambiguity **lists the candidates and never guesses** — picking one would be picking which of
 /// your notes to edit at random.
-fn resolve(workspace: &Workspace, prefix: &str, style: &Style) -> Result<NoteId, Failure> {
+fn resolve(workspace: &Workspace, prefix: &str) -> Result<NoteId, Exit> {
     match workspace.resolve(prefix) {
-        Resolution::Unique(meta) => Ok(meta.id),
-        Resolution::None => Err(Failure {
-            error: anyhow::anyhow!("no note matches `{prefix}`"),
-            code: EXIT_NOT_FOUND,
-        }),
+        Resolution::Unique(row) => Ok(row.id),
+        Resolution::None => Err(Exit::not_found(anyhow!("no note matches `{prefix}`"))),
         Resolution::Ambiguous(candidates) => {
             let mut listing = format!("`{prefix}` matches {} notes:\n", candidates.len());
-            for meta in &candidates {
-                listing.push_str(&format!(
-                    "  {}  {}\n",
-                    meta.id,
-                    meta.title.as_deref().unwrap_or("Untitled")
-                ));
+            for row in &candidates {
+                listing.push_str(&format!("  {}  {}\n", row.id, row.display_title()));
             }
-            // UUIDv7 ids share a long timestamp prefix, so this happens easily among notes
-            // captured together. The full id always works.
             listing.push_str("hint: use more characters, or the full id");
-            let _ = style;
-            Err(Failure {
-                error: anyhow::anyhow!(listing),
+            Err(Exit {
+                error: anyhow!(listing),
                 code: EXIT_AMBIGUOUS,
             })
         }
     }
 }
 
-/// The state a note is in, for rendering.
-fn state_of(workspace: &Workspace, id: NoteId) -> State {
-    workspace.state_of(id).unwrap_or(State::Active)
+/// The key `-t` sets, or a clear refusal when `workspace.toml` maps no title.
+fn title_key(workspace: &Workspace) -> Result<String, Exit> {
+    workspace.settings().roles().title.clone().ok_or_else(|| {
+        Exit::runtime(anyhow!(
+            "-t sets the key mapped to `document:title`, and this workspace maps none\n\
+             hint: map one under [roles] in workspace.toml, or set the key with --set <key>=<value>"
+        ))
+    })
+}
+
+/// What a person is told about a refusal: a headline, then one line per reason.
+fn reasons(rejection: &Rejection) -> Vec<String> {
+    match rejection {
+        Rejection::Invalid { problems } | Rejection::InvalidValue { problems, .. } => {
+            problems.iter().map(ToString::to_string).collect()
+        }
+        Rejection::Settings { errors } => errors.iter().map(ToString::to_string).collect(),
+        Rejection::NotesInvalid { notes } => notes
+            .iter()
+            .flat_map(|(id, problems)| problems.iter().map(move |p| format!("{id}: {p}")))
+            .collect(),
+        other => vec![other.to_string()],
+    }
+}
+
+fn refusal(rejection: &Rejection) -> anyhow::Error {
+    let headline = match rejection {
+        Rejection::Invalid { .. } => String::from("the note does not satisfy schema.json"),
+        Rejection::Settings { .. } => {
+            String::from("the workspace settings are broken, so jot will not write")
+        }
+        Rejection::InvalidValue { key, .. } => format!("that value is not valid for `{key}`"),
+        Rejection::NotesInvalid { notes } => format!(
+            "{} would not satisfy schema.json afterwards, so nothing was written; fix them first",
+            output::count(notes.len(), "note")
+        ),
+        other => return anyhow!("{other}"),
+    };
+    let mut text = format!("{headline}:");
+    for reason in reasons(rejection) {
+        text.push_str(&format!("\n  {reason}"));
+    }
+    anyhow!(text)
+}
+
+/// The events of a single-note outcome, or the error to exit with.
+fn done(outcome: Outcome) -> Result<Vec<Event>, Exit> {
+    match outcome {
+        Outcome::Done(events) => Ok(events),
+        Outcome::Rejected(rejection) => Err(Exit::runtime(refusal(&rejection))),
+        Outcome::Failed(failure) => Err(Exit::runtime(anyhow!("{failure}"))),
+        Outcome::Partial { .. } => Err(Exit::runtime(anyhow!(
+            "only part of the change was applied; run it again"
+        ))),
+    }
+}
+
+/// What an editor loop makes of an outcome: refusals the buffer can fix reopen it, anything else
+/// stops with the buffer kept.
+fn verdict(outcome: Outcome) -> Verdict<Vec<Event>> {
+    match outcome {
+        Outcome::Done(events) => Verdict::Accept(events),
+        Outcome::Rejected(
+            rejection @ (Rejection::Invalid { .. } | Rejection::Unrepresentable { .. }),
+        ) => Verdict::Retry(reasons(&rejection)),
+        Outcome::Rejected(rejection) => Verdict::Abort(format!("{:#}", refusal(&rejection))),
+        Outcome::Failed(Failure::Changed { id }) => Verdict::Abort(format!(
+            "note `{id}` changed on disk while it was open in the editor, so nothing was written \
+             — run `jot edit` again and copy your changes across"
+        )),
+        Outcome::Failed(failure) => Verdict::Abort(failure.to_string()),
+        Outcome::Partial { .. } => Verdict::Abort(String::from("only part of the change applied")),
+    }
+}
+
+/// The id an outcome created.
+fn created(events: &[Event]) -> Option<&NoteId> {
+    events.iter().find_map(|event| match event {
+        Event::NoteCreated { id } => Some(id),
+        _ => None,
+    })
+}
+
+/// After a write: the id on stdout, or the whole note as JSON.
+fn report_note(workspace: &Workspace, id: &NoteId, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    if cli.json {
+        let (note, row) = load(workspace, id)?;
+        emit(&output::note_json(&note, &row))
+    } else {
+        println!("{}", style.show(id));
+        Ok(())
+    }
+}
+
+fn load(workspace: &Workspace, id: &NoteId) -> Result<(jot_core::Note, jot_core::Row), Exit> {
+    let note = workspace.get(id)?;
+    match (note, workspace.row(id)) {
+        (Some(note), Some(row)) => Ok((note, row)),
+        _ => Err(Exit::not_found(anyhow!("no note `{id}`"))),
+    }
 }
 
 // =============================================================================================
@@ -484,458 +606,417 @@ fn state_of(workspace: &Workspace, id: NoteId) -> State {
 // =============================================================================================
 
 /// `jot new` — the capture path, and the one that has to be fast.
-fn new(workspace: &mut Workspace, args: &NewArgs, cli: &Cli, style: &Style) -> Result<(), Failure> {
-    let reply = args
-        .reply
-        .as_deref()
-        .map(|prefix| resolve(workspace, prefix, style))
-        .transpose()?;
-    let quote = args
-        .quote
-        .as_deref()
-        .map(|prefix| resolve(workspace, prefix, style))
-        .transpose()?;
-
-    let mut draft = Draft {
-        title: args.title.clone(),
-        reply_to: reply,
-        quote,
-        ..Draft::default()
-    };
-    if args.slug {
-        draft = draft.slugged();
+fn new(workspace: &mut Workspace, args: &NewArgs, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    let mut fields = Fields::new();
+    if let Some(title) = &args.title {
+        fields.insert(title_key(workspace)?, Value::String(title.clone()));
+    }
+    for (key, value) in &args.set {
+        fields.insert(key.clone(), value.clone());
     }
 
-    // The three input paths, in the priority order stage 3 fixes: an explicit `-m`, then a pipe,
-    // then the editor. Each exists because it removes friction from a different context.
-    draft.body = match &args.message {
+    // The input paths, in priority order: an explicit `-m`, then a pipe, then — only when nothing
+    // was given at all — the editor. A field given on the command line is a capture already: a
+    // title alone is a note, and it is written rather than opened.
+    let body = match &args.message {
         Some(message) => message.clone(),
         None if !std::io::stdin().is_terminal() => read_stdin()?,
-        None => {
-            let seed = editor::seed(
-                &seed_frontmatter(&draft),
-                "\n",
-                &workspace.manifest().schema,
-            );
-            let edited = editor::edit(workspace.schema(), &seed).map_err(Failure::runtime)?;
-            if edited.is_empty() {
-                // A note that was never written is the failure this app exists to prevent — but a
-                // buffer left wholly untouched is how every editor-driven tool says "cancel". A
-                // title with no body is not that: it is a capture, and it gets written.
-                eprintln!("jot: nothing typed, nothing written");
-                return Ok(());
-            }
-
-            // The buffer is authoritative for everything a new note may declare. `reply_to` is
-            // included — choosing a parent is a normal thing to do while writing, and unlike an
-            // *edit* it re-parents nothing. There is no root to warn about any more: it is
-            // derived from `reply_to` and no note file carries one.
-            draft.title = edited.frontmatter.title.clone();
-            draft.quote = edited.frontmatter.quote;
-            draft.reply_to = edited.frontmatter.reply_to;
-            // Carries any key the schema declares that jot does not interpret, so a filled-in
-            // custom field survives instead of being silently dropped.
-            draft.extra = Some(edited.frontmatter.clone());
-            edited.body
-        }
+        None if !fields.is_empty() => String::new(),
+        None => return new_in_editor(workspace, cli, style),
     };
-
-    // A note needs a title *or* a body; neither is how you cancel. The title alone is enough,
-    // because a title is what a captured thought starts as.
-    if draft.is_empty() {
-        eprintln!("jot: no title and no body, nothing written");
+    if fields.is_empty() && body.trim().is_empty() {
+        eprintln!("jot: nothing typed, nothing written");
         return Ok(());
     }
 
-    let note = workspace.create(draft).map_err(anyhow::Error::from)?;
-    if cli.json {
-        emit(&output::note_json(&note, State::Active))?;
-    } else {
-        println!("{}", style.show(note.id));
+    let events = done(workspace.apply(Action::Create { fields, body }))?;
+    let id = created(&events).cloned().context("core created no note")?;
+    report_note(workspace, &id, cli, style)
+}
+
+/// `jot new` with nothing given: `$EDITOR` on the workspace's template, until it is valid.
+fn new_in_editor(workspace: &mut Workspace, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    // Before the editor opens, not after: finding out the settings are broken once the note is
+    // typed would be the worst moment to.
+    workspace
+        .check_writable()
+        .map_err(|r| Exit::runtime(refusal(&r)))?;
+    let seed = workspace
+        .template()
+        .map_err(|r| Exit::runtime(refusal(&r)))?;
+    let template = Document::parse(&seed);
+
+    let composed = editor::compose(&seed, |text| {
+        // Changed only in whitespace is the same as untouched.
+        let doc = Document::parse(text);
+        if doc.problems.is_empty() && doc.fields == template.fields && doc.body.trim().is_empty() {
+            return Verdict::Accept(None);
+        }
+        match Action::create_from_text(text) {
+            Ok(action) => match verdict(workspace.apply(action)) {
+                Verdict::Accept(events) => Verdict::Accept(Some(events)),
+                Verdict::Retry(reasons) => Verdict::Retry(reasons),
+                Verdict::Abort(message) => Verdict::Abort(message),
+            },
+            Err(rejection) => Verdict::Retry(reasons(&rejection)),
+        }
+    })?;
+    match composed {
+        Composed::Done(Some(events)) => {
+            let id = created(&events).cloned().context("core created no note")?;
+            report_note(workspace, &id, cli, style)
+        }
+        Composed::Done(None) | Composed::Untouched => {
+            eprintln!("jot: nothing typed, nothing written");
+            Ok(())
+        }
     }
-    Ok(())
 }
 
-/// The frontmatter an editor seed carries, so a title can be typed into the block.
-fn seed_frontmatter(draft: &Draft) -> jot_core::frontmatter::Frontmatter {
-    let mut frontmatter = jot_core::frontmatter::Frontmatter::new();
-    frontmatter.title = draft.title.clone();
-    frontmatter.reply_to = draft.reply_to;
-    frontmatter.quote = draft.quote;
-    frontmatter
-}
-
-fn read_stdin() -> Result<String, Failure> {
+fn read_stdin() -> Result<String, Exit> {
     let mut body = String::new();
     std::io::stdin()
         .read_to_string(&mut body)
-        .context("cannot read the note body from stdin")
-        .map_err(Failure::runtime)?;
+        .context("cannot read the note body from stdin")?;
     Ok(body)
 }
 
 /// `jot ls`.
-fn list(workspace: &Workspace, args: &LsArgs, cli: &Cli, style: &Style) -> Result<(), Failure> {
-    let rows = match args.sort {
-        // A sort other than creation order is a *file listing*, not a timeline: paging a timeline
-        // depends on ids being the sort key, and they are not once you sort by title.
-        Some(sort) => {
-            let mut rows = workspace.files(match sort {
-                Sort::Created => FileSort::Created,
-                Sort::Edited => FileSort::Edited,
-                Sort::Title => FileSort::Title,
-            });
-            if let Some(limit) = args.limit {
-                rows.truncate(limit);
-            }
-            rows
-        }
-        None => {
-            let mut query = TimelineQuery {
-                flat: args.flat,
-                limit: args.limit,
-                ..TimelineQuery::default()
-            };
-            if let Some(since) = &args.since {
-                query.since = Some(parse_when(since).map_err(Failure::runtime)?);
-            }
-            workspace.timeline(&query).items
-        }
-    };
-
-    if cli.json {
-        emit(&json!(
-            rows.iter().map(output::row_json).collect::<Vec<_>>()
-        ))?;
-    } else if rows.is_empty() {
-        eprintln!("jot: no notes");
-    } else {
-        for row in &rows {
-            println!("{}", output::row(row, style));
-        }
+fn list(workspace: &Workspace, args: &ListArgs, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    let mut listing = workspace.list();
+    if let Some(limit) = args.limit {
+        listing.rows.truncate(limit);
     }
+    if cli.json {
+        return emit(&output::listing_json(&listing));
+    }
+    if listing.rows.is_empty() {
+        eprintln!("jot: no notes");
+        return Ok(());
+    }
+    if listing.ordering == jot_core::Ordering::EditedAt {
+        // Said once, because the order is not the one a timeline promises.
+        eprintln!(
+            "jot: ordered by modification time — workspace.toml maps no `document:created_at`"
+        );
+    }
+    print!("{}", output::listing(&listing, style));
     Ok(())
 }
 
 /// `jot show`.
-fn show(workspace: &Workspace, args: &ShowArgs, cli: &Cli, style: &Style) -> Result<(), Failure> {
-    let id = resolve(workspace, &args.id, style)?;
-    let note = load(workspace, id)?;
-    let state = state_of(workspace, id);
-
+fn show(workspace: &Workspace, args: &ShowArgs, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    let id = resolve(workspace, &args.id)?;
+    let (note, row) = load(workspace, &id)?;
     if cli.json {
-        emit(&output::note_json(&note, state))?;
+        emit(&output::note_json(&note, &row))
     } else if args.raw {
-        // The file's own bytes, which is what `--raw` promises. Rendered through the schema so it
-        // is exactly what jot would write, not a guess.
-        print!(
-            "{}",
-            String::from_utf8_lossy(&note.to_bytes(&workspace.manifest().schema))
-        );
+        print!("{}", note.text);
+        Ok(())
     } else {
-        println!("{}", output::show(&note, state, style));
+        print!("{}", output::show(&note, &row, style));
+        Ok(())
     }
-    Ok(())
-}
-
-fn load(workspace: &Workspace, id: NoteId) -> Result<Note, Failure> {
-    workspace
-        .get(id)
-        .map_err(anyhow::Error::from)?
-        .ok_or_else(|| Failure {
-            error: anyhow::anyhow!("no note `{id}`"),
-            code: EXIT_NOT_FOUND,
-        })
-}
-
-/// `jot thread`.
-fn thread(
-    workspace: &Workspace,
-    args: &ThreadArgs,
-    cli: &Cli,
-    style: &Style,
-) -> Result<(), Failure> {
-    let id = resolve(workspace, &args.id, style)?;
-    let thread = workspace.thread(id).ok_or_else(|| Failure {
-        error: anyhow::anyhow!("no note `{id}`"),
-        code: EXIT_NOT_FOUND,
-    })?;
-
-    if cli.json {
-        emit(&output::thread_json(&thread))?;
-    } else if args.path {
-        println!("{}", output::path(&thread, style));
-    } else if args.segments {
-        println!("{}", output::segments(&thread.tree.segments(), style));
-    } else {
-        print!("{}", output::tree(&thread, style));
-    }
-    Ok(())
 }
 
 /// `jot edit`.
-fn edit(
-    workspace: &mut Workspace,
-    args: &EditArgs,
-    cli: &Cli,
-    style: &Style,
-) -> Result<(), Failure> {
-    let id = resolve(workspace, &args.id, style)?;
+fn edit(workspace: &mut Workspace, args: &EditArgs, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    let id = resolve(workspace, &args.id)?;
+    let (note, _) = load(workspace, &id)?;
 
-    let mut change = Edit::new();
-    if let Some(title) = &args.title {
-        change = change.title(title.clone());
-    }
-    if args.no_title {
-        change = change.clear_title();
-    }
-    if let Some(message) = &args.message {
-        change = change.body(message.clone());
-    }
-
-    // No flags means "open it": that is what `jot edit <id>` reads as.
-    let note = load(workspace, id)?;
-    if change.is_empty() {
-        let seed = editor::seed(&note.frontmatter, &note.body, &workspace.manifest().schema);
-        let edited = editor::edit(workspace.schema(), &seed).map_err(Failure::runtime)?;
-        if edited.unchanged {
-            eprintln!("jot: no changes");
-            return Ok(());
+    let events = if args.has_changes() {
+        // Flags rewrite the note from its fields, and a key jot could not read is not among them:
+        // writing from them would drop it without a word.
+        if note.problems.iter().any(Problem::is_conversion) {
+            return Err(Exit::runtime(anyhow!(
+                "`{id}`'s frontmatter could not be fully read, so editing it with flags could \
+                 drop what jot cannot read\nhint: `jot edit {}` opens it in $EDITOR",
+                style.show(&id)
+            )));
         }
-        warn_dropped_keys(&note, &edited);
+        let mut fields = note.fields.clone();
+        if let Some(title) = &args.title {
+            fields.insert(title_key(workspace)?, Value::String(title.clone()));
+        }
+        for (key, value) in &args.set {
+            fields.insert(key.clone(), value.clone());
+        }
+        for key in &args.unset {
+            if fields.shift_remove(key).is_none() {
+                eprintln!("jot: `{key}` is not set on this note");
+            }
+        }
+        let body = args.message.clone().unwrap_or(note.body);
+        done(workspace.apply(Action::Edit {
+            id: id.clone(),
+            fields,
+            body,
+            expected_hash: Some(note.hash),
+        }))?
+    } else {
+        workspace
+            .check_writable()
+            .map_err(|r| Exit::runtime(refusal(&r)))?;
+        // The hash of the bytes the editor starts from, so a file changed underneath it is a
+        // refused write rather than a silent overwrite.
+        let expected = note.hash;
+        let composed = editor::compose(&note.text, |text| {
+            match Action::edit_from_text(id.clone(), text, Some(expected)) {
+                Ok(action) => verdict(workspace.apply(action)),
+                Err(rejection) => Verdict::Retry(reasons(&rejection)),
+            }
+        })?;
+        match composed {
+            Composed::Done(events) => events,
+            Composed::Untouched => Vec::new(),
+        }
+    };
 
-        change = Edit {
-            body: Some(edited.body),
-            title: field(edited.frontmatter.title),
-            quote: field(edited.frontmatter.quote),
-        };
+    if events.is_empty() {
+        eprintln!("jot: no changes");
+        return Ok(());
     }
+    report_note(workspace, &id, cli, style)
+}
 
-    // The same rule `new` capture applies, applied to what the note would become: a title *or* a
-    // body, either one on its own being enough. Emptying both is not an edit anyone means to make
-    // — `jot remove` is how a note goes away — so it is refused rather than written.
-    if would_be_blank(&note, &change) {
-        eprintln!("jot: that would leave no title and no body; nothing written");
-        eprintln!(
-            "hint: `jot remove {}` is how a note goes away",
-            style.show(id)
-        );
+/// `jot rm` — deletes the file, so it confirms.
+fn remove(workspace: &mut Workspace, args: &RemoveArgs, style: &Style) -> Result<(), Exit> {
+    let id = resolve(workspace, &args.id)?;
+    let title = workspace
+        .row(&id)
+        .map(|row| row.display_title().to_owned())
+        .unwrap_or_default();
+    if !args.yes
+        && !confirm(&format!(
+            "permanently delete {} ({title})? jot keeps no copy",
+            style.show(&id)
+        ))?
+    {
         return Ok(());
     }
 
-    let note = workspace.edit(id, change).map_err(anyhow::Error::from)?;
-    if cli.json {
-        emit(&output::note_json(&note, state_of(workspace, id)))?;
-    } else {
-        println!("{}", style.show(note.id));
-    }
-    Ok(())
-}
-
-/// Whether applying `change` would leave the note with neither a title nor a body.
-///
-/// Both halves have to be read through the change, not off the file: `--no-title` on a note whose
-/// body is already blank empties it just as surely as `-m ""` on an untitled one does.
-fn would_be_blank(note: &Note, change: &Edit) -> bool {
-    use jot_core::query::Field;
-
-    let title = match &change.title {
-        Field::Unchanged => note.frontmatter.title.as_deref(),
-        Field::Cleared => None,
-        Field::Set(title) => Some(title.as_str()),
-    };
-    let body = change.body.as_deref().unwrap_or(&note.body);
-
-    title.unwrap_or_default().trim().is_empty() && body.trim().is_empty()
-}
-
-/// An editor round-trip states every field, so absence means "removed", not "unchanged".
-fn field<T>(value: Option<T>) -> jot_core::query::Field<T> {
-    value.map_or(jot_core::query::Field::Cleared, jot_core::query::Field::Set)
-}
-
-/// Warn when the editor changed a key the [`Edit`] type cannot carry back.
-///
-/// Silence here would be the worst option: the key would look edited in the buffer, be preserved
-/// from the file, and differ from what was typed with nothing said about it.
-fn warn_dropped_keys(before: &Note, after: &editor::Edited) {
-    let names = |fm: &jot_core::frontmatter::Frontmatter| {
-        let mut names: Vec<(String, String)> = fm
-            .unknown()
-            .iter()
-            .map(|key| (key.name().to_owned(), key.source().to_owned()))
-            .collect();
-        names.sort();
-        names
-    };
-    if names(&before.frontmatter) != names(&after.frontmatter) {
-        eprintln!(
-            "jot: warning: frontmatter keys jot does not interpret were changed in the editor \
-             and were not applied — they are preserved from the file as it was.\n\
-             hint: edit those keys in the note file directly."
-        );
-    }
-    if after.frontmatter.reply_to != before.frontmatter.reply_to {
-        eprintln!(
-            "jot: warning: `relation:reply_to` cannot be changed by an edit — re-parenting is not \
-             supported — so the original was kept."
-        );
-    }
-}
-
-/// `jot rm`.
-fn remove(workspace: &mut Workspace, args: &IdArgs, style: &Style) -> Result<(), Failure> {
-    let id = resolve(workspace, &args.id, style)?;
-    let replies = workspace.thread(id).map_or(0, |t| t.tree.len() - 1);
-    workspace.trash(id).map_err(anyhow::Error::from)?;
-
-    eprintln!("jot: trashed {}", style.show(id));
-    if replies > 0 {
-        // Trash never cascades, and someone who just trashed a note with a live subtree under it
-        // should be told rather than discovering it later.
-        eprintln!("jot: {replies} replies below it stay live; trash never cascades");
-    }
-    Ok(())
-}
-
-/// `jot restore`.
-fn restore(workspace: &mut Workspace, args: &IdArgs, style: &Style) -> Result<(), Failure> {
-    let id = resolve(workspace, &args.id, style)?;
-    workspace.restore(id).map_err(anyhow::Error::from)?;
-    eprintln!("jot: restored {}", style.show(id));
-    Ok(())
-}
-
-/// `jot purge` — the only irreversible command, so it confirms.
-fn purge(workspace: &mut Workspace, args: &PurgeArgs, style: &Style) -> Result<(), Failure> {
-    let id = resolve(workspace, &args.id, style)?;
-
-    if !args.yes {
-        let meta = workspace.meta(id);
-        let title = meta
-            .and_then(|meta| meta.title.clone())
-            .unwrap_or_else(|| "Untitled".into());
-        if !confirm(&format!(
-            "permanently delete {id} ({title})? this cannot be undone"
-        ))? {
-            return Ok(());
-        }
-    }
-
-    workspace.purge(id).map_err(anyhow::Error::from)?;
-    eprintln!("jot: purged {}", style.show(id));
-    Ok(())
-}
-
-/// `jot trash`.
-fn trash(workspace: &Workspace, cli: &Cli, style: &Style) -> Result<(), Failure> {
-    let rows = workspace.trashed();
-    if cli.json {
-        emit(&json!(
-            rows.iter().map(output::row_json).collect::<Vec<_>>()
-        ))?;
-    } else if rows.is_empty() {
-        eprintln!("jot: the trash is empty");
-    } else {
-        for row in &rows {
-            println!("{}", output::row(row, style));
-        }
+    let linked = workspace.backlinks(&id).len();
+    done(workspace.apply(Action::Delete { id: id.clone() }))?;
+    eprintln!("jot: deleted {}", style.show(&id));
+    if linked > 0 {
+        // Nothing cascades; the links dangle, which is a designed state — but worth saying.
+        eprintln!("jot: {} still link to it", output::count(linked, "note"));
     }
     Ok(())
 }
 
 /// `jot search`.
-fn search(
-    workspace: &Workspace,
-    args: &SearchArgs,
-    cli: &Cli,
-    style: &Style,
-) -> Result<(), Failure> {
-    let mut query = SearchQuery::new(&args.query);
-    if args.trashed {
-        query = query.include_trashed();
-    }
-    if let Some(since) = &args.since {
-        query.since = Some(parse_when(since).map_err(Failure::runtime)?);
-    }
-    if let Some(until) = &args.until {
-        query.until = Some(parse_when(until).map_err(Failure::runtime)?);
-    }
-
-    let rows = workspace.search(&query);
+fn search(workspace: &Workspace, args: &SearchArgs, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    let listing = workspace.search(&args.query);
     if cli.json {
-        emit(&json!(
-            rows.iter().map(output::row_json).collect::<Vec<_>>()
-        ))?;
-    } else if rows.is_empty() {
+        emit(&output::listing_json(&listing))
+    } else if listing.rows.is_empty() {
         eprintln!("jot: nothing matches `{}`", args.query);
+        Ok(())
     } else {
-        for row in &rows {
-            println!("{}", output::row(row, style));
-        }
+        print!("{}", output::listing(&listing, style));
+        Ok(())
     }
-    Ok(())
 }
 
 /// `jot links`.
-fn links(workspace: &Workspace, args: &IdArgs, cli: &Cli, style: &Style) -> Result<(), Failure> {
-    let id = resolve(workspace, &args.id, style)?;
-    let outgoing = workspace.links_in(id).map_err(anyhow::Error::from)?;
-    let backlinks = workspace.backlinks(id);
-    let quoted_by = workspace.quoted_by(id);
-
+fn links(workspace: &Workspace, args: &IdArgs, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    let id = resolve(workspace, &args.id)?;
+    let outgoing = workspace.links_in(&id)?;
+    let backlinks = workspace.backlinks(&id);
     if cli.json {
         emit(&json!({
-            "id": id.to_string(),
+            "id": id.as_str(),
             "links_out": outgoing.iter()
                 .map(|(link, target)| output::link_json(link, target))
                 .collect::<Vec<_>>(),
-            "links_in": backlinks.iter().map(output::meta_json).collect::<Vec<_>>(),
-            "quoted_by": quoted_by.iter().map(output::meta_json).collect::<Vec<_>>(),
+            "links_in": backlinks.iter().map(output::row_json).collect::<Vec<_>>(),
+        }))
+    } else {
+        print!("{}", output::links(&outgoing, &backlinks, style));
+        Ok(())
+    }
+}
+
+/// `jot field` — the three batch actions.
+///
+/// Core computes which notes a batch touches and refuses the whole batch, naming the notes, if any
+/// of them would come out invalid; this prints what happened, from the events.
+fn field(workspace: &mut Workspace, command: &FieldCommand, style: &Style) -> Result<(), Exit> {
+    let (action, what) = match command {
+        FieldCommand::Fill { key, value } => (
+            Action::FillField {
+                key: key.clone(),
+                value: value.clone(),
+            },
+            format!("setting `{key}` to {value}"),
+        ),
+        FieldCommand::Remove { key, yes } => {
+            let holding = workspace
+                .snapshot()
+                .notes()
+                .filter(|record| record.fields().contains_key(key))
+                .count();
+            if holding > 0
+                && !yes
+                && !confirm(&format!(
+                    "remove `{key}` and its value from {}? jot keeps no copy",
+                    output::count(holding, "note")
+                ))?
+            {
+                return Ok(());
+            }
+            (
+                Action::RemoveField { key: key.clone() },
+                format!("removing `{key}`"),
+            )
+        }
+        FieldCommand::Rename { from, to } => (
+            Action::RenameField {
+                from: from.clone(),
+                to: to.clone(),
+            },
+            format!("renaming `{from}` to `{to}`"),
+        ),
+    };
+
+    let plan = workspace
+        .decide(&action)
+        .map_err(|r| Exit::runtime(refusal(&r)))?;
+    if plan.is_noop() {
+        eprintln!("jot: nothing to do — no note needs it");
+        return Ok(());
+    }
+    let outcome = workspace.execute(plan);
+
+    for event in outcome.events() {
+        match event {
+            Event::BatchStarted { total, .. } => {
+                eprintln!("jot: {what} in {}", output::count(*total, "note"));
+            }
+            Event::NoteChanged { id, .. } => {
+                let title = workspace
+                    .row(id)
+                    .map(|row| row.display_title().to_owned())
+                    .unwrap_or_default();
+                println!("{}  {title}", style.show(id));
+            }
+            Event::SettingsChanged { file } => eprintln!("jot: updated {}", file.file_name()),
+            Event::BatchFinished { applied, .. } => {
+                eprintln!("jot: {} rewritten", output::count(*applied, "note"));
+            }
+            _ => {}
+        }
+    }
+
+    match outcome {
+        Outcome::Done(_) => Ok(()),
+        Outcome::Rejected(rejection) => Err(Exit::runtime(refusal(&rejection))),
+        Outcome::Failed(failure) => Err(Exit::runtime(anyhow!("{failure}"))),
+        Outcome::Partial {
+            failed, settings, ..
+        } => {
+            for (id, failure) in &failed {
+                eprintln!("jot: {} failed: {failure}", style.show(id));
+            }
+            if let Some(failure) = settings {
+                eprintln!("jot: the settings were not updated: {failure}");
+            }
+            // Every batch step is idempotent, so a rerun picks up exactly where this stopped.
+            Err(Exit::runtime(anyhow!(
+                "the change was only partly applied; run the same command again to finish it"
+            )))
+        }
+    }
+}
+
+/// `jot check` — exits 5 when a note has problems or the settings are broken. Strays are listed
+/// but do not fail it: a `README.md` beside the notes is ordinary.
+fn check(workspace: &Workspace, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    let settings = workspace.settings();
+    let problems: Vec<(jot_core::Row, Vec<Problem>)> = workspace
+        .problems()
+        .into_iter()
+        .filter_map(|(id, problems)| workspace.row(&id).map(|row| (row, problems)))
+        .collect();
+    let strays = workspace.strays();
+
+    if cli.json {
+        emit(&json!({
+            "settings": {
+                "errors": settings.errors().iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "warnings": settings.warnings().iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "stale": settings.is_stale(),
+            },
+            "notes": problems.iter().map(|(row, problems)| json!({
+                "id": row.id.as_str(),
+                "title": row.title,
+                "problems": problems.iter().map(output::problem_json).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "strays": strays.iter().map(output::stray_json).collect::<Vec<_>>(),
         }))?;
     } else {
-        print!(
-            "{}",
-            output::links(&outgoing, &backlinks, &quoted_by, style)
-        );
+        // Settings errors were already printed on the way in, by `Context::open`.
+        print!("{}", output::check(&problems, &strays, style));
+        if problems.is_empty() && settings.errors().is_empty() {
+            eprintln!("jot: no problems");
+        }
     }
-    Ok(())
+
+    if problems.is_empty() && settings.errors().is_empty() {
+        Ok(())
+    } else {
+        Err(Exit {
+            error: anyhow!(""),
+            code: EXIT_PROBLEMS,
+        })
+    }
 }
 
 /// `jot index`.
-fn index(workspace: &mut Workspace, command: &IndexCommand, cli: &Cli) -> Result<(), Failure> {
-    let report = match command {
-        IndexCommand::Status => workspace.sync().map_err(anyhow::Error::from)?,
-        IndexCommand::Rebuild => workspace.rebuild().map_err(anyhow::Error::from)?,
-    };
-    let (active, trashed) = workspace.counts();
+fn index(workspace: &mut Workspace, command: &IndexCommand, cli: &Cli) -> Result<(), Exit> {
+    // `open` already synced, so `status` has nothing to do but report.
+    if let IndexCommand::Rebuild = command {
+        let events = done(workspace.rebuild())?;
+        if !cli.json {
+            eprintln!(
+                "jot: rebuilt the index; {} it had been missing",
+                output::count(events.len(), "change")
+            );
+        }
+    }
+    let settings = workspace.settings();
+    let notes = workspace.snapshot().len();
+    let problems = workspace.problems().len();
+    let strays = workspace.strays().len();
 
     if cli.json {
         emit(&json!({
             "root": workspace.root().display().to_string(),
-            "name": workspace.name(),
-            "active": active,
-            "trashed": trashed,
-            "problems": report.problems.iter().map(std::string::ToString::to_string)
-                .collect::<Vec<_>>(),
-        }))?;
+            "notes": notes,
+            "notes_with_problems": problems,
+            "strays": strays,
+            "writable": settings.is_writable(),
+            "stale": settings.is_stale(),
+        }))
     } else {
+        println!("workspace  {}", workspace.root().display());
+        println!("notes      {notes} ({problems} with problems)");
+        println!("strays     {strays}");
         println!(
-            "workspace  {} ({})",
-            workspace.name(),
-            workspace.root().display()
+            "settings   {}",
+            match (settings.is_writable(), settings.is_stale()) {
+                (true, _) => "valid",
+                (false, true) => "broken — reading with the last valid settings",
+                (false, false) => "broken",
+            }
         );
-        println!("notes      {active} active, {trashed} trashed");
-        println!("problems   {}", report.problems.len());
-        for problem in &report.problems {
-            println!("  {problem}");
-        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// `jot ws` — the one command group that works without an existing workspace.
-fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failure> {
+fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Exit> {
     let mut registry = context::load_registry()?;
 
     match command {
@@ -946,241 +1027,132 @@ fn workspaces(command: &WsCommand, cli: &Cli, style: &Style) -> Result<(), Failu
                     entries
                         .iter()
                         .map(|entry| json!({
-                            "id": entry.id().to_string(),
                             "name": entry.name(),
                             "path": entry.path().display().to_string(),
-                            "current": registry.current() == Some(entry.id()),
+                            "current": is_current(&registry, entry),
                             "stale": entry.is_stale(),
-                            "last_opened": entry.last_opened().to_rfc3339(),
                         }))
                         .collect::<Vec<_>>()
                 ))?;
             } else if entries.is_empty() {
                 eprintln!("jot: no registered workspaces — try `jot ws new <path>`");
             } else {
-                // Not `MIN_ID_WIDTH`: a workspace id is v4, so it is random from its first bit and
-                // has no timestamp prefix to get past — see `MIN_WORKSPACE_ID_WIDTH`. The set to
-                // be unique within is the registry, which is a handful of entries rather than a
-                // vault's worth of notes.
-                let short =
-                    shortid::abbreviate(entries.iter().map(|e| e.id()), MIN_WORKSPACE_ID_WIDTH);
                 for entry in entries {
-                    let id_text = match style.width {
-                        IdWidth::Long => entry.id().to_string(),
-                        IdWidth::Abbreviated => short
-                            .get(&entry.id())
-                            .cloned()
-                            .unwrap_or_else(|| entry.id().to_string()),
-                    };
-                    let current = registry.current() == Some(entry.id());
-                    println!("{}", output::workspace(entry, &id_text, current, style));
+                    let current = is_current(&registry, entry);
+                    println!("{}", output::workspace(entry, current, style));
                 }
             }
         }
 
         WsCommand::Use(selector) => {
-            let id = selector.resolve(&registry)?;
-            registry.set_current(id);
+            let entry = selector.resolve(&registry)?.clone();
+            registry.set_current(entry.path());
             context::save_registry(&registry)?;
-            let name = registry.get(id).map_or("?", Entry::name);
-            eprintln!("jot: now using `{name}` ({id})");
-        }
-
-        WsCommand::Add { path } => {
-            let workspace = Workspace::open(path)
-                .with_context(|| format!("`{}`", path.display()))
-                .map_err(Failure::runtime)?;
-            register(&mut registry, &workspace)?;
-            eprintln!("jot: registered `{}`", workspace.name());
-        }
-
-        WsCommand::Remove(selector) => {
-            let id = selector.resolve(&registry)?;
-            let entry = registry
-                .remove(id)
-                .expect("the selector returned a live id");
-            // `Registry::remove` deliberately leaves a dangling `current` alone — that is its
-            // documented behaviour and right for a library — so the surface is what has to notice.
-            // A `current` pointing at an entry that no longer exists would make the next bare
-            // `jot new` fail with nothing to act on.
-            if registry.current() == Some(id) {
-                registry.clear_current();
-            }
-            context::save_registry(&registry)?;
-
-            eprintln!("jot: unregistered `{}` ({id})", entry.name());
-            // Said every time, unprompted. `remove` is about the *registry*, and someone typing it
-            // after `jot rm` — which does move a file — should not have to wonder.
             eprintln!(
-                "jot: the directory is untouched: {}",
+                "jot: now using `{}` ({})",
+                entry.name(),
                 entry.path().display()
             );
         }
 
-        WsCommand::Prune { yes } => {
-            let stale: Vec<(Uuid, String, PathBuf)> = registry
-                .stale_entries()
-                .map(|entry| {
-                    (
-                        entry.id(),
-                        entry.name().to_owned(),
-                        entry.path().to_path_buf(),
-                    )
-                })
-                .collect();
+        WsCommand::Add { path, name } => {
+            let workspace = Workspace::open(path)
+                .map_err(|e| context::opening(e, format!("`{}`", path.display())))?;
+            let entry = register(&mut registry, &workspace, name.clone())?;
+            eprintln!(
+                "jot: registered `{}` ({})",
+                entry.name(),
+                entry.path().display()
+            );
+        }
 
+        WsCommand::New { path, name } => {
+            let workspace = Workspace::init(path)
+                .map_err(|e| context::opening(e, format!("`{}`", path.display())))?;
+            let entry = register(&mut registry, &workspace, name.clone())?;
+            eprintln!(
+                "jot: created `{}` at {}",
+                entry.name(),
+                entry.path().display()
+            );
+        }
+
+        WsCommand::Remove(selector) => {
+            let entry = selector.resolve(&registry)?.clone();
+            let was_current = is_current(&registry, &entry);
+            registry.remove(entry.path());
+            // `Registry::remove` leaves a dangling `current` alone, which is right for a library;
+            // the surface is what has to notice, or the next bare `jot new` has nowhere to go.
+            if was_current {
+                registry.clear_current();
+            }
+            context::save_registry(&registry)?;
+            eprintln!("jot: unregistered `{}`", entry.name());
+            // Said every time: `remove` is about the *registry*, and someone typing it after
+            // `jot rm` — which does delete a file — should not have to wonder.
+            eprintln!("jot: the folder is untouched: {}", entry.path().display());
+        }
+
+        WsCommand::Prune { yes } => {
+            let stale: Vec<Entry> = registry.stale_entries().cloned().collect();
             if stale.is_empty() {
                 eprintln!("jot: nothing to prune — every registered workspace is present");
                 return Ok(());
             }
-
-            for (id, name, path) in &stale {
-                eprintln!("  {id}  {name}  {}", path.display());
+            for entry in &stale {
+                eprintln!("  {}  {}", entry.name(), entry.path().display());
             }
-            // Confirmed even though nothing on disk is deleted, because "stale" is
-            // `!path.exists()` — and an external drive that is merely **unmounted** looks exactly
-            // like a vault that is gone. Pruning that loses the registration for a vault whose
-            // notes are perfectly fine, and re-adding it means finding the path again.
+            // Confirmed even though nothing on disk is deleted, because "stale" is a missing
+            // folder — and an external drive that is merely unmounted looks exactly like one.
             if !yes
                 && !confirm(&format!(
-                    "unregister {} workspace(s) whose directory is missing? \
-                     check that none is on an unmounted drive",
-                    stale.len()
+                    "unregister {} whose folder is missing? check that none is on an unmounted drive",
+                    output::count(stale.len(), "workspace")
                 ))?
             {
                 return Ok(());
             }
-
-            for (id, _, _) in &stale {
-                registry.remove(*id);
-                if registry.current() == Some(*id) {
+            for entry in &stale {
+                if is_current(&registry, entry) {
                     registry.clear_current();
                 }
+                registry.remove(entry.path());
             }
             context::save_registry(&registry)?;
-            eprintln!("jot: pruned {} workspace(s)", stale.len());
-        }
-
-        WsCommand::New { path } => {
-            let workspace = Workspace::init(path).map_err(anyhow::Error::from)?;
-            register(&mut registry, &workspace)?;
-            eprintln!(
-                "jot: created `{}` at {}",
-                workspace.name(),
-                workspace.root().display()
-            );
+            eprintln!("jot: pruned {}", output::count(stale.len(), "workspace"));
         }
     }
-    let _ = style;
     Ok(())
 }
 
-/// Find the workspace whose id starts with `prefix`.
-///
-/// The default path, because the id is the identity. Matching is case-insensitive against the
-/// hyphenated form, so a full id and a short prefix both work — the same rule
-/// [`Snapshot::resolve`](jot_core::snapshot::Snapshot::resolve) uses for notes.
-fn resolve_workspace_by_id(
-    registry: &jot_core::registry::Registry,
-    prefix: &str,
-) -> Result<Uuid, Failure> {
-    let needle = prefix.trim().to_ascii_lowercase();
-    let matched: Vec<&Entry> = registry
-        .entries()
-        .filter(|entry| !needle.is_empty() && entry.id().to_string().starts_with(&needle))
-        .collect();
-
-    match matched.len() {
-        1 => Ok(matched[0].id()),
-        0 => Err(Failure {
-            error: anyhow::anyhow!(
-                "no registered workspace has an id starting with `{prefix}`\n\
-                 hint: `jot workspace list` shows the ids, or select by name with \
-                 `--name {prefix}`"
-            ),
-            code: EXIT_NOT_FOUND,
-        }),
-        _ => Err(ambiguous_workspace(prefix, &matched, "start with that id")),
-    }
+/// Whether `entry` is the registry's current workspace. Through `Registry::get`, so the comparison
+/// is the registry's own — case-insensitive on Windows.
+fn is_current(registry: &Registry, entry: &Entry) -> bool {
+    registry
+        .current()
+        .and_then(|current| registry.get(current))
+        .is_some_and(|current| current.path() == entry.path())
 }
 
-/// Find the workspace called `name`.
-///
-/// Only ever an exact match, and it can legitimately find several: a workspace name is display-only
-/// and **nothing enforces uniqueness**, so two vaults can answer to one name. That is reported with
-/// their ids rather than guessed at, which is the whole reason the id is what a bare argument means.
-fn resolve_workspace_by_name(
-    registry: &jot_core::registry::Registry,
-    name: &str,
-) -> Result<Uuid, Failure> {
-    let matched: Vec<&Entry> = registry
-        .entries()
-        .filter(|entry| entry.name() == name)
-        .collect();
-
-    match matched.len() {
-        1 => Ok(matched[0].id()),
-        0 => Err(Failure {
-            error: anyhow::anyhow!(
-                "no registered workspace is named `{name}`\n\
-                 hint: `jot workspace list` shows the names"
-            ),
-            code: EXIT_NOT_FOUND,
-        }),
-        _ => Err(ambiguous_workspace(name, &matched, "share that name")),
-    }
-}
-
-/// The candidate listing both ambiguity paths print.
-fn ambiguous_workspace(target: &str, candidates: &[&Entry], why: &str) -> Failure {
-    let mut listing = format!(
-        "`{target}` is ambiguous: {} workspaces {why}:\n",
-        candidates.len()
-    );
-    for entry in candidates {
-        listing.push_str(&format!(
-            "  {}  {}  {}\n",
-            entry.id(),
-            entry.name(),
-            entry.path().display()
-        ));
-    }
-    listing.push_str("hint: select one by its id, or a unique prefix of it");
-    Failure {
-        error: anyhow::anyhow!(listing),
-        code: EXIT_AMBIGUOUS,
-    }
-}
-
-/// Add a workspace to the registry and make it current.
-///
-/// Making it current is the right default for both `add` and `new`: you asked for it by name, so
-/// it is the one you meant to work in.
-///
-/// Any *other* entry pointing at the same directory is dropped first. The registry keys on the
-/// workspace id, which is correct — that id is the vault's identity and survives the folder being
-/// moved — but it means a directory that was deleted and remade carries a new id, and the old
-/// entry would linger as a second row naming the same path. One path is one workspace to a person
-/// looking at `jot ws ls`, so the stale row goes.
-fn register(registry: &mut jot_core::registry::Registry, workspace: &Workspace) -> Result<()> {
-    let id = workspace.id();
-    let stale: Vec<uuid::Uuid> = registry
-        .entries()
-        .filter(|entry| entry.id() != id && entry.path() == workspace.root())
-        .map(Entry::id)
-        .collect();
-    for old in stale {
-        registry.remove(old);
-    }
-
-    registry.upsert(Entry::new(
-        id,
-        workspace.root().to_path_buf(),
-        workspace.name(),
-        Utc::now(),
-    ));
-    registry.set_current(id);
-    context::save_registry(registry)
+/// Add a workspace to the registry and make it current — you named it, so it is the one you meant
+/// to work in. A name already set is kept unless a new one is given.
+fn register(
+    registry: &mut Registry,
+    workspace: &Workspace,
+    name: Option<String>,
+) -> Result<Entry, Exit> {
+    let root = workspace.root();
+    let name = name.or_else(|| {
+        registry
+            .get(root)
+            .and_then(Entry::explicit_name)
+            .map(str::to_owned)
+    });
+    let entry = Entry::new(root, name);
+    registry.upsert(entry.clone());
+    registry.set_current(root);
+    context::save_registry(registry)?;
+    Ok(entry)
 }
 
 // =============================================================================================
@@ -1191,15 +1163,14 @@ fn register(registry: &mut jot_core::registry::Registry, workspace: &Workspace) 
 ///
 /// Defaults to no, and anything that is not `y`/`yes` is a no: a prompt that proceeds on a stray
 /// keystroke is not a confirmation. The question goes to stderr so a piped stdout stays clean.
-fn confirm(question: &str) -> Result<bool, Failure> {
+fn confirm(question: &str) -> Result<bool, Exit> {
     eprint!("jot: {question} [y/N] ");
     std::io::stderr().flush().map_err(anyhow::Error::from)?;
 
     let mut answer = String::new();
     std::io::stdin()
         .read_line(&mut answer)
-        .context("cannot read a confirmation")
-        .map_err(Failure::runtime)?;
+        .context("cannot read a confirmation")?;
 
     if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
         return Ok(true);
@@ -1209,49 +1180,11 @@ fn confirm(question: &str) -> Result<bool, Failure> {
 }
 
 /// Write a JSON value to stdout, one document, newline-terminated.
-fn emit(value: &serde_json::Value) -> Result<(), Failure> {
-    let text = serde_json::to_string_pretty(value)
-        .context("cannot serialize the result as JSON")
-        .map_err(Failure::runtime)?;
+fn emit(value: &Value) -> Result<(), Exit> {
+    let text =
+        serde_json::to_string_pretty(value).context("cannot serialize the result as JSON")?;
     println!("{text}");
     Ok(())
-}
-
-/// Parse a `--since` / `--until` value: a duration like `2d`, or an RFC 3339 date.
-///
-/// Relative first, because that is what gets typed. `3h` means "three hours ago", which reads the
-/// way the flag reads and not the way a duration usually does.
-fn parse_when(text: &str) -> Result<DateTime<Utc>> {
-    let text = text.trim();
-    if let Some(duration) = parse_duration(text) {
-        return Ok(Utc::now() - duration);
-    }
-    if let Ok(when) = DateTime::parse_from_rfc3339(text) {
-        return Ok(when.with_timezone(&Utc));
-    }
-    if let Ok(date) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
-        return Ok(date
-            .and_hms_opt(0, 0, 0)
-            .expect("midnight is a valid time")
-            .and_utc());
-    }
-    bail!("cannot read `{text}` as a time (try `2d`, `6h`, or `2026-08-31`)")
-}
-
-/// `90m`, `6h`, `2d`, `3w` — a number and a unit.
-fn parse_duration(text: &str) -> Option<Duration> {
-    let split = text.find(|c: char| !c.is_ascii_digit())?;
-    if split == 0 {
-        return None;
-    }
-    let value: i64 = text[..split].parse().ok()?;
-    match &text[split..] {
-        "m" => Some(Duration::minutes(value)),
-        "h" => Some(Duration::hours(value)),
-        "d" => Some(Duration::days(value)),
-        "w" => Some(Duration::weeks(value)),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -1261,57 +1194,21 @@ mod tests {
     #[test]
     fn the_command_tree_is_internally_consistent() {
         // clap's own assertions: conflicting flags that name missing arguments, duplicate short
-        // options, and so on. Cheap, and it catches a mis-wired `conflicts_with` at test time.
+        // options, and so on. Cheap, and it catches a mis-wired group at test time.
         Cli::command().debug_assert();
     }
 
+    /// A value is read the way frontmatter is, so `--set` cannot store something a file holding
+    /// the same text would not.
     #[test]
-    fn a_relative_duration_reads_as_time_ago() {
-        let two_days = parse_when("2d").unwrap();
-        let elapsed = Utc::now() - two_days;
-        assert!((elapsed.num_hours() - 48).abs() <= 1, "{elapsed}");
-    }
-
-    #[test]
-    fn every_duration_unit_parses() {
-        for (text, expected) in [
-            ("90m", Duration::minutes(90)),
-            ("6h", Duration::hours(6)),
-            ("2d", Duration::days(2)),
-            ("3w", Duration::weeks(3)),
-        ] {
-            assert_eq!(parse_duration(text), Some(expected), "{text}");
-        }
-    }
-
-    #[test]
-    fn a_plain_date_parses_as_midnight_utc() {
-        let when = parse_when("2026-08-31").unwrap();
-        assert_eq!(when.to_rfc3339(), "2026-08-31T00:00:00+00:00");
-    }
-
-    #[test]
-    fn an_rfc_3339_timestamp_parses() {
-        assert!(parse_when("2026-08-31T12:00:00Z").is_ok());
-    }
-
-    #[test]
-    fn nonsense_is_refused_rather_than_silently_meaning_now() {
-        for text in ["tomorrow", "", "d", "2x", "-1d"] {
-            assert!(parse_when(text).is_err(), "`{text}` should not parse");
-        }
-    }
-
-    #[test]
-    fn an_editor_round_trip_treats_an_absent_field_as_a_removal() {
-        // Every field is stated in the buffer, so a title that is gone was deleted on purpose.
-        assert!(matches!(
-            field(None::<String>),
-            jot_core::query::Field::Cleared
-        ));
-        assert!(matches!(
-            field(Some("t".to_owned())),
-            jot_core::query::Field::Set(_)
-        ));
+    fn a_set_value_is_read_as_yaml() {
+        assert_eq!(assignment("n=3").unwrap(), ("n".into(), json!(3)));
+        assert_eq!(assignment("n=\"3\"").unwrap().1, json!("3"));
+        assert_eq!(assignment("done=true").unwrap().1, json!(true));
+        assert_eq!(assignment("tags=[a, b]").unwrap().1, json!(["a", "b"]));
+        assert_eq!(assignment("url=a=b").unwrap().1, json!("a=b"));
+        assert!(assignment("x=.nan").is_err(), "not a number JSON can hold");
+        assert!(assignment("=3").is_err());
+        assert!(assignment("novalue").is_err());
     }
 }

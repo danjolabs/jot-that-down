@@ -14,64 +14,35 @@
 
 use chrono::{DateTime, Local, Utc};
 use jot_core::link::Link;
-use jot_core::note::{NoteId, NoteMeta};
-use jot_core::query::{Ref, Row, State};
-use jot_core::snapshot::Problem;
-use jot_core::thread::{Segment, Thread, TreeNode};
+use jot_core::registry::Entry;
+use jot_core::snapshot::{Ref, Stray};
+use jot_core::{Listing, Note, NoteId, Ordering, Problem, Row};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-/// The floor on an abbreviated note id: the whole millisecond timestamp, and no less.
+/// The floor on an abbreviated note id.
 ///
-/// Thirteen characters of the hyphenated form — `01a03d60-0000` — are exactly a UUIDv7's leading
-/// 48 bits, which is where the timestamp ends and randomness begins (see [`jot_core::shortid`],
-/// whose module docs open on this). The old floor of eight covered only the top 32 of those bits:
-/// one shared value per roughly 65 seconds, so a vault captured in one sitting printed the same
-/// string on every row and told you nothing you did not already know. Thirteen is the first width
-/// at which two notes captured a second apart look different, and at which a printed id carries
-/// its own capture time.
-///
-/// It is also the floor the TUI uses (`MIN_SHORT_ID`), so an id read out of `jot ls` is the same
-/// string the browser shows for that note. The two constants are deliberately equal and there is
-/// no mechanism holding them so: they are in different crates, and neither depends on the other.
-///
-/// A floor only. [`Snapshot::abbreviations`](jot_core::snapshot::Snapshot::abbreviations) pushes it
-/// up whenever thirteen characters are not unique — a burst of same-millisecond captures — and
-/// never pulls it down, so what is printed can always be handed back to a resolver.
-pub const MIN_ID_WIDTH: usize = 13;
-
-/// The floor on an abbreviated *workspace* id, which is a different number for a real reason.
-///
-/// A workspace id is **UUIDv4** where a note id is v7 — minted that way deliberately, and
-/// `Manifest::id` in `jot-core` records why: nothing decodes a workspace's creation time or sorts
-/// on it, and the id is written into a `workspace.toml` people commit. A v4 is random from its
-/// first bit, so the timestamp-prefix argument behind [`MIN_ID_WIDTH`] simply does not apply here:
-/// eight characters separate every workspace anyone will ever register, and thirteen would be five
-/// characters of noise in a column read next to a name and a path.
-///
-/// So this stays at the conventional floor, and says so by naming it rather than by repeating the
-/// number. Vaults created before the v4 switch carry a v7 id and a stale prefix table would widen
-/// for them — which is the abbreviation rule doing its job, not a reason to raise the floor for
-/// everyone.
-pub const MIN_WORKSPACE_ID_WIDTH: usize = jot_core::shortid::MIN_WIDTH;
+/// The id carries no meaning any more — nothing decodes a timestamp out of it — so the old
+/// argument for printing a UUIDv7's whole millisecond prefix is gone, and the floor is the
+/// conventional eight. [`Workspace::abbreviations`](jot_core::Workspace::abbreviations) still
+/// widens any id that eight characters do not make unique, so what is printed always resolves.
+pub const MIN_ID_WIDTH: usize = jot_core::shortid::MIN_WIDTH;
 
 /// How ids are printed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdWidth {
-    /// The shortest prefix that is unique in this vault, floored at [`MIN_ID_WIDTH`].
+    /// The shortest prefix that is unique in this workspace, floored at [`MIN_ID_WIDTH`].
     Abbreviated,
-    /// The full UUID, for scripting and for feeding back to `jot`.
+    /// The full id, for scripting and for feeding back to `jot`.
     Long,
 }
 
 /// Everything the renderers need to know about how this invocation should look.
 ///
-/// Holds the vault's abbreviation table, because a short id is only meaningful relative to the
-/// notes it has to be distinct from — see
-/// [`Snapshot::abbreviations`](jot_core::snapshot::Snapshot::abbreviations). The table is shared
-/// rather than copied so `Style` stays cheap to pass around.
+/// Holds the workspace's abbreviation table, because a short id is only meaningful relative to the
+/// notes it has to be distinct from. Shared rather than copied so `Style` stays cheap to pass.
 #[derive(Debug, Clone)]
 pub struct Style {
     /// Whether to emit ANSI colour.
@@ -100,7 +71,7 @@ impl Style {
         }
     }
 
-    /// Attach the vault's abbreviation table.
+    /// Attach the workspace's abbreviation table.
     pub fn with_abbreviations(mut self, table: BTreeMap<NoteId, String>) -> Style {
         self.abbreviations = Arc::new(table);
         self
@@ -108,16 +79,15 @@ impl Style {
 
     /// Render an id at this invocation's width.
     ///
-    /// An id the table does not know — a dangling `reply_to`, a link to a purged note — falls back
-    /// to the full UUID rather than to a fixed-width guess. There is nothing to be unique *against*
-    /// for a note the vault does not hold, and a truncation that cannot be resolved would be worse
-    /// than a long one that can.
-    pub fn show(&self, id: NoteId) -> String {
+    /// An id the table does not know — a link to a deleted note — falls back to the full id: there
+    /// is nothing for it to be unique against, and a truncation that cannot be resolved would be
+    /// worse than a long one that can.
+    pub fn show(&self, id: &NoteId) -> String {
         match self.width {
             IdWidth::Long => id.to_string(),
             IdWidth::Abbreviated => self
                 .abbreviations
-                .get(&id)
+                .get(id)
                 .cloned()
                 .unwrap_or_else(|| id.to_string()),
         }
@@ -135,19 +105,19 @@ impl Style {
         self.paint("2", text)
     }
 
-    fn id(&self, id: NoteId) -> String {
+    fn id(&self, id: &NoteId) -> String {
         self.paint("33", &self.show(id))
     }
 
-    fn title(&self, meta: &NoteMeta) -> String {
-        match meta
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
-            Some(title) => self.paint("1", title),
-            None => self.dim("Untitled"),
+    fn warn(&self, text: &str) -> String {
+        self.paint("31", text)
+    }
+
+    fn title(&self, row: &Row) -> String {
+        if row.title.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+            self.paint("1", row.display_title())
+        } else {
+            self.dim(row.display_title())
         }
     }
 }
@@ -156,188 +126,118 @@ impl Style {
 // Human output
 // =============================================================================================
 
-/// One listing row: `<id>  <title>  <when>  <counts>`.
-pub fn row(row: &Row, style: &Style) -> String {
-    let mut line = format!(
-        "{}  {}  {}",
-        style.id(row.note.id),
-        style.title(&row.note),
-        style.dim(&relative(row.note.created_at))
-    );
+/// A listing as aligned rows: `<id>  [<created>]  <edited>  <title>  [<n> problems]`.
+///
+/// The fixed-width columns come first so they line up without measuring titles. The created
+/// column is left out when the listing is not ordered by it — no `document:created_at` is mapped,
+/// so every cell would be blank.
+pub fn listing(listing: &Listing, style: &Style) -> String {
+    let ids: Vec<String> = listing.rows.iter().map(|r| style.show(&r.id)).collect();
+    let width = ids.iter().map(|id| id.chars().count()).max().unwrap_or(0);
+    let with_created = matches!(listing.ordering, Ordering::CreatedAt { .. });
 
-    let mut tags: Vec<String> = Vec::new();
-    if row.state == State::Trashed {
-        tags.push("trashed".to_owned());
+    let mut out = String::new();
+    for (row, id) in listing.rows.iter().zip(&ids) {
+        out.push_str(&style.paint("33", &format!("{id:<width$}")));
+        out.push_str("  ");
+        if with_created {
+            out.push_str(&style.dim(&format!("{:<16}", created(row.created_at.as_deref()))));
+            out.push_str("  ");
+        }
+        out.push_str(&style.dim(&format!("{:>8}", relative(row.edited_at))));
+        out.push_str("  ");
+        out.push_str(&style.title(row));
+        if row.problems > 0 {
+            out.push_str(&style.warn(&format!("  [{}]", count(row.problems, "problem"))));
+        }
+        out.push('\n');
     }
-    if row.replies > 0 {
-        // Both numbers, because "3 replies" under a note with a nine-note subtree is a different
-        // thing from one with three, and the timeline is where you decide what to open.
-        tags.push(if row.descendants == row.replies {
-            format!("{} replies", row.replies)
-        } else {
-            format!("{} replies, {} in thread", row.replies, row.descendants)
-        });
-    }
-    if let Some(Ref::Trashed(parent)) = &row.parent {
-        tags.push(format!("parent {} trashed", style.show(parent.id)));
-    }
-    if let Some(Ref::Deleted(id)) = &row.parent {
-        tags.push(format!("parent {} deleted", style.show(*id)));
-    }
-    if !tags.is_empty() {
-        line.push_str(&style.dim(&format!("  [{}]", tags.join("; "))));
-    }
-    line
+    out
 }
 
-/// One `jot ws ls` row: `<marker> <id>  <name>  <path>`.
-///
-/// Shaped like [`row`] on purpose — id first, then the human label, then the detail — because a
-/// workspace listing answers the same question a note listing does: *which one of these do I mean?*
-/// The id is what makes that answerable when two rows share a name, which happens whenever a vault
-/// is deleted and remade, since the registry keys on the id rather than the path.
-///
-/// `id_text` is precomputed by the caller: an abbreviation is only meaningful relative to the set
-/// it has to be unique within, and that set is the registry rather than any vault.
-pub fn workspace(
-    entry: &jot_core::registry::Entry,
-    id_text: &str,
-    current: bool,
-    style: &Style,
-) -> String {
+/// One `jot ws ls` row: `<marker> <name>  <path>`.
+pub fn workspace(entry: &Entry, current: bool, style: &Style) -> String {
     let marker = if current { "*" } else { " " };
     // A stale entry is a registered path that is no longer there. Said plainly, because it is
-    // usually a moved folder rather than a lost vault.
+    // usually a moved folder rather than a lost workspace.
     let stale = if entry.is_stale() { "  (missing)" } else { "" };
     format!(
-        "{marker} {}  {}  {}{}",
-        style.paint("33", id_text),
-        style.paint("1", entry.name()),
+        "{marker} {}  {}{}",
+        style.paint("1", &entry.name()),
         entry.path().display(),
         style.dim(stale)
     )
 }
 
-/// A note in full: its metadata, then its body.
-pub fn show(note: &jot_core::note::Note, state: State, style: &Style) -> String {
-    let meta = note.meta();
-    let mut out = format!("{}  {}\n", style.id(note.id), style.title(&meta));
-    out.push_str(&style.dim(&format!("created  {}\n", absolute(meta.created_at))));
-    if state == State::Trashed {
-        out.push_str(&style.dim("state    trashed\n"));
+/// A note in full: a header line, the frontmatter in schema order with each problem under the key
+/// it concerns, then the body.
+///
+/// A required key the note lacks is listed as `(missing)`, and a key jot could not read as
+/// `(not read)`, so every problem sits beside a key — except the ones about the block as a whole,
+/// which follow the keys.
+pub fn show(note: &Note, row: &Row, style: &Style) -> String {
+    fn about<'a>(note: &'a Note, key: &'a str) -> impl Iterator<Item = &'a Problem> {
+        note.problems
+            .iter()
+            .filter(move |p| p.key.as_deref() == Some(key))
     }
-    if let Some(parent) = meta.reply_to {
-        out.push_str(&style.dim(&format!("reply to {}\n", style.show(parent))));
-    }
-    if let Some(quoted) = meta.quote {
-        out.push_str(&style.dim(&format!("quotes   {}\n", style.show(quoted))));
-    }
-    out.push('\n');
-    out.push_str(note.body.trim_start_matches('\n'));
-    out
-}
+    let key_line = |out: &mut String, key: &str, value: &str| {
+        out.push_str(&format!("{}: {value}\n", style.paint("36", key)));
+        for problem in about(note, key) {
+            out.push_str(&style.warn(&format!("  ! {}: {}\n", problem.rule, problem.message)));
+        }
+    };
 
-/// A thread as an indented tree, ancestors shown above the focus.
-pub fn tree(thread: &Thread, style: &Style) -> String {
-    let mut out = String::new();
-    for ancestor in &thread.ancestors {
-        out.push_str(&format!(
-            "{}  {}\n",
-            style.dim(&style.show(ancestor.id)),
-            style.dim(ancestor.title.as_deref().unwrap_or("Untitled"))
-        ));
+    let mut out = format!("{}  {}\n", style.id(&note.id), style.title(row));
+    for (key, value) in &note.fields {
+        key_line(&mut out, key, &value_text(value));
     }
-    if !thread.ancestors.is_empty() {
-        out.push_str(&style.dim("│\n"));
+    let mut absent: Vec<&str> = Vec::new();
+    for key in note.problems.iter().filter_map(|p| p.key.as_deref()) {
+        if !note.fields.contains_key(key) && !absent.contains(&key) {
+            absent.push(key);
+        }
     }
-    out.push_str(&format!(
-        "{}  {}\n",
-        style.id(thread.tree.id()),
-        style.title(&thread.tree.note)
-    ));
-    branches(&thread.tree, "", &mut out, style);
-    out
-}
-
-/// The recursive half of [`tree`], drawing the box-drawing prefixes.
-fn branches(node: &TreeNode, prefix: &str, out: &mut String, style: &Style) {
-    let last = node.children.len().saturating_sub(1);
-    for (i, child) in node.children.iter().enumerate() {
-        let (branch, carry) = if i == last {
-            ("└─ ", "   ")
+    for key in absent {
+        let what = if about(note, key).any(|p| p.rule == "required") {
+            "(missing)"
         } else {
-            ("├─ ", "│  ")
+            "(not read)"
         };
-        out.push_str(&format!(
-            "{prefix}{}{}  {}\n",
-            style.dim(branch),
-            style.id(child.id()),
-            style.title(&child.note)
-        ));
-        branches(child, &format!("{prefix}{}", style.dim(carry)), out, style);
+        key_line(&mut out, key, &style.dim(what));
     }
+    for problem in note.problems.iter().filter(|p| p.key.is_none()) {
+        out.push_str(&style.warn(&format!("! {}: {}\n", problem.rule, problem.message)));
+    }
+
+    out.push('\n');
+    let body = note.body.trim_start_matches(['\n', '\r']);
+    out.push_str(body);
+    if !body.is_empty() && !body.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
-/// The one line through the focus: root → … → focus.
-pub fn path(thread: &Thread, style: &Style) -> String {
-    thread
-        .path_to_focus()
-        .iter()
-        .map(|id| style.show(*id))
-        .collect::<Vec<_>>()
-        .join(" → ")
-}
-
-/// Every segment of a thread, one per line.
-pub fn segments(segments: &[Segment], style: &Style) -> String {
-    segments
-        .iter()
-        .map(|segment| {
-            segment
-                .nodes
-                .iter()
-                .map(|id| style.show(*id))
-                .collect::<Vec<_>>()
-                .join(" → ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// A note's links and the notes linking back to it.
-pub fn links(
-    outgoing: &[(Link, Ref)],
-    backlinks: &[NoteMeta],
-    quoted_by: &[NoteMeta],
-    style: &Style,
-) -> String {
+/// A note's outgoing links and the notes linking back to it.
+pub fn links(outgoing: &[(Link, Ref)], backlinks: &[Row], style: &Style) -> String {
     let mut out = String::new();
     section(&mut out, "links out", outgoing.len(), style);
     for (link, target) in outgoing {
-        let state = match target {
-            Ref::Present(_) => "",
-            Ref::Trashed(_) => " (trashed)",
-            Ref::Deleted(_) => " (deleted)",
+        let what = match target {
+            Ref::Present(row) => style.title(row),
+            Ref::Missing(_) => style.dim("(missing)"),
         };
-        let label = link.label.as_deref().unwrap_or("");
-        out.push_str(&format!(
-            "  {}{}{}\n",
-            style.id(link.target),
-            style.dim(state),
-            if label.is_empty() {
-                String::new()
-            } else {
-                format!("  {label}")
-            }
-        ));
+        let label = link
+            .label
+            .as_deref()
+            .map(|l| style.dim(&format!("  as \"{l}\"")))
+            .unwrap_or_default();
+        out.push_str(&format!("  {}  {what}{label}\n", style.id(&link.target)));
     }
     section(&mut out, "links in", backlinks.len(), style);
-    for meta in backlinks {
-        out.push_str(&format!("  {}  {}\n", style.id(meta.id), style.title(meta)));
-    }
-    section(&mut out, "quoted by", quoted_by.len(), style);
-    for meta in quoted_by {
-        out.push_str(&format!("  {}  {}\n", style.id(meta.id), style.title(meta)));
+    for row in backlinks {
+        out.push_str(&format!("  {}  {}\n", style.id(&row.id), style.title(row)));
     }
     out
 }
@@ -346,33 +246,58 @@ fn section(out: &mut String, name: &str, count: usize, style: &Style) {
     out.push_str(&style.dim(&format!("{name} ({count})\n")));
 }
 
-/// Problems the scan is holding, for stderr. Never blocks a command.
-pub fn problems(problems: &[Problem]) -> String {
-    problems
-        .iter()
-        .map(|problem| format!("jot: {problem}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// `jot check`: each note with its problems, then each stray.
+pub fn check(problems: &[(Row, Vec<Problem>)], strays: &[Stray], style: &Style) -> String {
+    let mut out = String::new();
+    for (row, problems) in problems {
+        out.push_str(&format!("{}  {}\n", style.id(&row.id), style.title(row)));
+        for problem in problems {
+            out.push_str(&style.warn(&format!("  ! {problem}\n")));
+        }
+    }
+    for stray in strays {
+        let name = stray.path.file_name().map_or_else(
+            || stray.path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        out.push_str(&format!(
+            "{}  {name}  {}\n",
+            style.warn("stray"),
+            style.dim(&stray.reason)
+        ));
+    }
+    out
+}
+
+/// `1 problem`, `2 problems`.
+pub fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// A frontmatter value as a person reads it: a string bare, anything else as compact JSON.
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }
 
 // =============================================================================================
 // Time
 // =============================================================================================
 
-/// A short relative time — `3m`, `5h`, `2d`, `4mo`, `1y`.
-///
-/// A note with no `created_at` is one whose id is not a UUIDv7. That is a real state rather than
-/// an error, so it reads as `—` and never as a fabricated date.
+/// A short relative time — `3m`, `5h`, `2d`, `4mo`, `1y`. `—` when there is none.
 fn relative(when: Option<DateTime<Utc>>) -> String {
     let Some(when) = when else {
         return "—".to_owned();
     };
     let seconds = (Utc::now() - when).num_seconds();
-    if seconds < 0 {
-        // A clock that moved backwards, or a hand-written id. Not worth a special vocabulary.
-        return "just now".to_owned();
-    }
     let (value, unit) = match seconds {
+        // A clock that moved backwards is not worth a special vocabulary.
         s if s < 60 => return "just now".to_owned(),
         s if s < 3_600 => (s / 60, "m"),
         s if s < 86_400 => (s / 3_600, "h"),
@@ -383,109 +308,91 @@ fn relative(when: Option<DateTime<Utc>>) -> String {
     format!("{value}{unit}")
 }
 
-/// A full local timestamp, for `jot show`.
-fn absolute(when: Option<DateTime<Utc>>) -> String {
-    when.map_or_else(
-        || "—".to_owned(),
-        |when| {
-            when.with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        },
-    )
+/// A `document:created_at` value for the listing: a date-time in local time to the minute, a date
+/// as written, anything else as written, and `—` for none.
+fn created(text: Option<&str>) -> String {
+    let Some(text) = text else {
+        return "—".to_owned();
+    };
+    match DateTime::parse_from_rfc3339(text) {
+        Ok(when) => when
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
+        Err(_) => text.to_owned(),
+    }
+}
+
+fn rfc3339(when: DateTime<Utc>) -> String {
+    when.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 // =============================================================================================
 // JSON
 // =============================================================================================
 
-/// A note's metadata as JSON.
+/// A listing row.
 ///
-/// Ids are **always full UUIDs** here regardless of `--long`: a short id is a reading convenience,
-/// and emitting one into a machine-readable document would produce a value that may not resolve.
-pub fn meta_json(meta: &NoteMeta) -> Value {
+/// Ids are **always full** here regardless of `--long`: a short id is a reading convenience, and
+/// emitting one into a machine-readable document would produce a value that may stop resolving.
+pub fn row_json(row: &Row) -> Value {
     json!({
-        "id": meta.id.to_string(),
-        "title": meta.title,
-        "created_at": meta.created_at.map(|t| t.to_rfc3339()),
-        "root": meta.root.map(|id| id.to_string()),
-        "reply_to": meta.reply_to.map(|id| id.to_string()),
-        "quote": meta.quote.map(|id| id.to_string()),
+        "id": row.id.as_str(),
+        "title": row.title,
+        "created_at": row.created_at,
+        "edited_at": row.edited_at.map(rfc3339),
+        "problems": row.problems,
     })
 }
 
-/// A reference in its three states.
-pub fn ref_json(reference: &Ref) -> Value {
-    let state = match reference {
-        Ref::Present(_) => "present",
-        Ref::Trashed(_) => "trashed",
-        Ref::Deleted(_) => "deleted",
+/// A listing: its order, and its rows.
+pub fn listing_json(listing: &Listing) -> Value {
+    let ordering = match &listing.ordering {
+        Ordering::CreatedAt { key } => json!({ "by": "created_at", "key": key }),
+        Ordering::EditedAt => json!({ "by": "edited_at", "key": null }),
     };
-    json!({ "id": reference.id().to_string(), "state": state })
+    json!({
+        "ordering": ordering,
+        "notes": listing.rows.iter().map(row_json).collect::<Vec<_>>(),
+    })
 }
 
-/// A listing row.
-pub fn row_json(row: &Row) -> Value {
-    let mut value = meta_json(&row.note);
-    let map = value.as_object_mut().expect("meta_json builds an object");
-    map.insert("state".into(), json!(row.state.as_str()));
-    map.insert("replies".into(), json!(row.replies));
-    map.insert("descendants".into(), json!(row.descendants));
-    map.insert("is_root".into(), json!(row.is_root()));
+/// A whole note: the row's fields, then the frontmatter, its problems, the hash, and the body.
+pub fn note_json(note: &Note, row: &Row) -> Value {
+    let mut value = row_json(row);
+    let map = value.as_object_mut().expect("row_json builds an object");
+    map.insert("fields".into(), Value::Object(note.fields.clone()));
     map.insert(
-        "edited_at".into(),
-        json!(row.edited_at.map(|t| t.to_rfc3339())),
+        "problems".into(),
+        json!(note.problems.iter().map(problem_json).collect::<Vec<_>>()),
     );
-    map.insert(
-        "parent".into(),
-        row.parent.as_ref().map_or(Value::Null, ref_json),
-    );
-    value
-}
-
-/// A whole note, body included.
-pub fn note_json(note: &jot_core::note::Note, state: State) -> Value {
-    let mut value = meta_json(&note.meta());
-    let map = value.as_object_mut().expect("meta_json builds an object");
-    map.insert("state".into(), json!(state.as_str()));
+    map.insert("hash".into(), json!(note.hash.to_string()));
     map.insert("body".into(), json!(note.body));
     value
 }
 
-/// A thread: ancestors, the tree, and both projections.
-pub fn thread_json(thread: &Thread) -> Value {
-    json!({
-        "focus": thread.focus.to_string(),
-        "root": thread.root().id.to_string(),
-        "ancestors": thread.ancestors.iter().map(meta_json).collect::<Vec<_>>(),
-        "tree": tree_json(&thread.tree),
-        "paths": thread.tree.paths().iter()
-            .map(|p| p.iter().map(std::string::ToString::to_string).collect::<Vec<_>>())
-            .collect::<Vec<_>>(),
-        "segments": thread.tree.segments().iter()
-            .map(|s| s.nodes.iter().map(std::string::ToString::to_string).collect::<Vec<_>>())
-            .collect::<Vec<_>>(),
-    })
+/// One problem.
+pub fn problem_json(problem: &Problem) -> Value {
+    json!({ "key": problem.key, "rule": problem.rule, "message": problem.message })
 }
 
-fn tree_json(node: &TreeNode) -> Value {
-    let mut value = meta_json(&node.note);
-    let map = value.as_object_mut().expect("meta_json builds an object");
-    map.insert(
-        "children".into(),
-        json!(node.children.iter().map(tree_json).collect::<Vec<_>>()),
-    );
-    value
+/// One stray file.
+pub fn stray_json(stray: &Stray) -> Value {
+    json!({ "path": stray.path.display().to_string(), "reason": stray.reason })
 }
 
 /// One extracted link and what it resolves to.
 pub fn link_json(link: &Link, target: &Ref) -> Value {
+    let state = match target {
+        Ref::Present(_) => "present",
+        Ref::Missing(_) => "missing",
+    };
     json!({
-        "target": link.target.to_string(),
+        "target": link.target.as_str(),
         "label": link.label,
         "offset": link.span.start,
         "length": link.span.end - link.span.start,
-        "state": ref_json(target)["state"],
+        "state": state,
     })
 }
 
@@ -493,60 +400,6 @@ pub fn link_json(link: &Link, target: &Ref) -> Value {
 mod tests {
     use super::*;
     use chrono::Duration;
-
-    /// A colourless style whose abbreviation table knows the fixture note.
-    ///
-    /// The table is built the way the real one is — through `shortid::abbreviate` at
-    /// [`MIN_ID_WIDTH`] — rather than from a hand-written string, so a change to the floor cannot
-    /// leave these tests asserting against a width the CLI no longer prints.
-    fn plain() -> Style {
-        Style {
-            color: false,
-            width: IdWidth::Abbreviated,
-            abbreviations: jot_core::shortid::abbreviate([meta(None).id.into()], MIN_ID_WIDTH)
-                .into_iter()
-                .map(|(id, short)| (NoteId::from(id), short))
-                .collect::<BTreeMap<_, _>>()
-                .into(),
-        }
-    }
-
-    fn meta(title: Option<&str>) -> NoteMeta {
-        let id: NoteId = "01a03d60-0000-7000-8000-00000000000a".parse().unwrap();
-        NoteMeta {
-            id,
-            created_at: id.created_at(),
-            title: title.map(str::to_owned),
-            root: Some(id),
-            reply_to: None,
-            quote: None,
-        }
-    }
-
-    #[test]
-    fn an_untitled_note_reads_as_untitled_rather_than_as_a_blank() {
-        let rendered = plain().title(&meta(None));
-        assert_eq!(rendered, "Untitled");
-        // A title that is only whitespace is untitled too, or the listing gains a blank line.
-        assert_eq!(plain().title(&meta(Some("   "))), "Untitled");
-    }
-
-    #[test]
-    fn a_plain_style_emits_no_escape_codes() {
-        let rendered = row(
-            &Row {
-                note: meta(Some("t")),
-                state: State::Active,
-                parent: None,
-                replies: 0,
-                descendants: 0,
-                quoted: 0,
-                edited_at: None,
-            },
-            &plain(),
-        );
-        assert!(!rendered.contains('\x1b'), "{rendered}");
-    }
 
     #[test]
     fn relative_time_reads_in_the_largest_unit_that_fits() {
@@ -557,114 +410,16 @@ mod tests {
         assert_eq!(ago(Duration::days(2)), "2d");
         assert_eq!(ago(Duration::days(70)), "2mo");
         assert_eq!(ago(Duration::days(800)), "2y");
-    }
-
-    #[test]
-    fn a_note_with_no_creation_time_prints_a_dash_and_never_a_made_up_date() {
-        assert_eq!(relative(None), "—");
-        assert_eq!(absolute(None), "—");
-    }
-
-    #[test]
-    fn a_future_timestamp_does_not_render_as_a_negative_age() {
         assert_eq!(relative(Some(Utc::now() + Duration::hours(1))), "just now");
+        assert_eq!(relative(None), "—");
     }
 
+    /// A `created_at` that is not a date-time is shown as written, never re-dated: jot does not
+    /// auto-fix what it reads.
     #[test]
-    fn the_id_floor_is_the_whole_millisecond_timestamp_and_stops_there() {
-        // 48 bits of timestamp are twelve hex characters, and the hyphenated form puts a hyphen
-        // after the first eight of them — so the timestamp ends at character 13 and the prefix
-        // ends on a hex digit rather than on a hyphen. A floor of 12 or 14 would be a mistake in
-        // opposite directions: one short of the whole timestamp, or one into the randomness.
-        assert_eq!(MIN_ID_WIDTH, 13);
-        let short = plain().show(meta(None).id);
-        assert_eq!(short, "01a03d60-0000");
-        assert!(
-            !short.ends_with('-'),
-            "`{short}` would read as a truncation"
-        );
-        assert!(meta(None).id.to_string().starts_with(&short));
-    }
-
-    #[test]
-    fn a_workspace_id_keeps_the_conventional_floor_because_it_is_a_v4() {
-        // The two floors differ on purpose: a v4 is random from its first bit, so there is no
-        // timestamp prefix to get past and eight characters separate a registry's worth of
-        // workspaces. If these ever become equal it should be a decision, not a drift.
-        assert_eq!(MIN_WORKSPACE_ID_WIDTH, 8);
-        // A `const` block, so raising the workspace floor to meet the note floor stops the build
-        // rather than a test run — both are compile-time constants and there is nothing to wait
-        // for.
-        const { assert!(MIN_WORKSPACE_ID_WIDTH < MIN_ID_WIDTH) };
-    }
-
-    #[test]
-    fn json_always_carries_full_ids_even_when_the_human_output_is_short() {
-        assert_eq!(plain().show(meta(None).id).len(), MIN_ID_WIDTH);
-
-        let value = meta_json(&meta(Some("t")));
-        assert_eq!(
-            value["id"].as_str().unwrap(),
-            "01a03d60-0000-7000-8000-00000000000a"
-        );
-    }
-
-    #[test]
-    fn a_row_json_reports_the_three_states_of_its_parent() {
-        let id: NoteId = "01a03d61-0000-7000-8000-00000000000b".parse().unwrap();
-        let cases = [
-            (Ref::Present(meta(None)), "present"),
-            (Ref::Trashed(meta(None)), "trashed"),
-            (Ref::Deleted(id), "deleted"),
-        ];
-        for (reference, expected) in cases {
-            assert_eq!(ref_json(&reference)["state"], expected);
-        }
-    }
-
-    #[test]
-    fn row_json_has_the_documented_keys() {
-        let value = row_json(&Row {
-            note: meta(Some("t")),
-            state: State::Active,
-            parent: None,
-            replies: 1,
-            descendants: 3,
-            quoted: 0,
-            edited_at: None,
-        });
-        for key in [
-            "id",
-            "title",
-            "created_at",
-            "root",
-            "reply_to",
-            "quote",
-            "state",
-            "replies",
-            "descendants",
-            "is_root",
-            "edited_at",
-            "parent",
-        ] {
-            assert!(value.get(key).is_some(), "missing `{key}` in {value}");
-        }
-    }
-
-    #[test]
-    fn an_id_the_table_does_not_know_falls_back_to_the_full_uuid() {
-        // A dangling `reply_to`, or a link to a purged note: there is nothing for it to be unique
-        // against, and a truncation that cannot be resolved would be worse than a long one.
-        let unknown: NoteId = "01a03dff-0000-7000-8000-00000000ffff".parse().unwrap();
-        assert_eq!(plain().show(unknown), unknown.to_string());
-    }
-
-    #[test]
-    fn the_long_width_ignores_the_abbreviation_table_entirely() {
-        let long = Style {
-            width: IdWidth::Long,
-            ..plain()
-        };
-        assert_eq!(long.show(meta(None).id), meta(None).id.to_string());
+    fn a_created_at_jot_cannot_read_as_a_time_is_shown_as_written() {
+        assert_eq!(created(Some("2026-08-31")), "2026-08-31");
+        assert_eq!(created(Some("yesterday")), "yesterday");
+        assert_eq!(created(None), "—");
     }
 }

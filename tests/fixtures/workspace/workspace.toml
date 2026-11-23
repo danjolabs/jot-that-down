@@ -1,0 +1,9 @@
+# The schema-first workspace fixture for jot-core's tests (docs/plans/redesign.md).
+# Tests copy this folder into a temporary directory before opening it; never open it in place.
+
+[id]
+format = "uuidv7"
+
+[roles]
+"document:title" = "title"
+"document:created_at" = "created_at"

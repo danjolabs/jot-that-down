@@ -1,60 +1,20 @@
 //! The crate-wide error taxonomy and `Result` alias.
 //!
-//! # The rule this file exists to enforce
+//! These are the failures of *calls*: opening a workspace, reading a file, talking to the index.
+//! The outcome of an action is not an [`Error`] — it is an [`Outcome`](crate::action::Outcome),
+//! whose [`Rejection`](crate::action::Rejection) and [`Failure`](crate::action::Failure) say what
+//! was refused and what IO declined. A note that fails its schema is not an error either: it is a
+//! [`Problem`](crate::problem::Problem) on the note.
 //!
-//! From `docs/plans/overview.md`: *"Core errors name the file or note involved; a message that says
-//! only 'parse error' is a bug."* Every variant below therefore carries the [`Path`] or the
-//! [`Uuid`] it concerns, and its `Display` prints it. There is deliberately **no** catch-all
-//! `Other(String)` variant and **no** `#[from]` conversion — a bare `impl From<io::Error>` would
-//! discard the path at exactly the moment it becomes interesting, which is the failure mode this
-//! taxonomy is built to prevent. Wrap explicitly at the call site instead:
-//!
-//! ```
-//! use jot_core::error::{Error, Result};
-//! use std::path::Path;
-//!
-//! fn read(path: &Path) -> Result<String> {
-//!     std::fs::read_to_string(path).map_err(|source| Error::Read {
-//!         path: path.to_path_buf(),
-//!         source,
-//!     })
-//! }
-//! ```
-//!
-//! # Strictness
-//!
-//! Per the stage-1 dispatch rulings U9/U10, stage 1 has **hard errors only** — there is no
-//! `Anomaly` type and no warnings channel. Every deviation from the note format is an [`Error`]
-//! naming the path, including a filename UUID that disagrees with the frontmatter `id`.
-//!
-//! The one exception is the workspace registry, which is a cache: a missing or corrupt registry
-//! costs one re-add and never data, so its read failures must never propagate into
-//! `Workspace::open`. Those variants are still `Error`s, but [`Error::is_registry_recoverable`]
-//! lets the registry's load path swallow exactly them and nothing else.
-//!
-//! # Stability
-//!
-//! This file is **frozen for the remainder of stage 1**. Stages 2 and 4 extend it; wave-3 and
-//! wave-4 stage-1 tasks consume it and add no variants.
-//!
-//! Two payload conventions worth knowing before you match on anything:
-//!
-//! - Ids are carried as [`uuid::Uuid`], not as `note::NoteId`. `NoteId` does not exist when this
-//!   file lands, and keeping `error` free of a dependency on `note` avoids a module cycle. Callers
-//!   holding a `NoteId` pass its inner `Uuid`.
-//! - Failures originating in a third-party parser (YAML, TOML) carry the parser's own diagnostic as
-//!   a `message: String` rather than as a `#[source]` of that crate's error type. That keeps the
-//!   frozen enum from pinning the public API to a specific YAML or TOML crate, and those
-//!   diagnostics already carry line and column — see `docs/runs/stage1/yaml-crate.md`.
+//! Every variant names the file or the thing it concerns. There is no `Other(String)` and no
+//! blanket `From<io::Error>`: a bare conversion would discard the path at the moment it matters.
 
 use std::path::{Path, PathBuf};
-
-use uuid::Uuid;
 
 /// The result type used throughout `jot-core`.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Everything that can go wrong inside `jot-core` during stage 1.
+/// Everything a `jot-core` call can fail with.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     // ---------------------------------------------------------------- filesystem
@@ -90,8 +50,8 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// The rename step of an atomic write failed. The staged file is named as well as the target,
-    /// because recovering by hand needs both.
+    /// The rename step of an atomic write failed. Both files are named, because recovering by
+    /// hand needs both.
     #[error("cannot rename `{from}` onto `{to}`: {source}")]
     Rename {
         from: PathBuf,
@@ -100,7 +60,7 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// A file could not be removed — a staged temp file after a failed atomic write, say.
+    /// A file could not be removed.
     #[error("cannot remove `{path}`: {source}")]
     Remove {
         path: PathBuf,
@@ -108,136 +68,41 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// A file on the vault path is not valid UTF-8. Notes and manifests are text; a note that is
-    /// not decodable is not a note, and saying so beats a generic I/O error.
+    /// A settings file is not valid UTF-8.
     #[error("`{path}` is not valid UTF-8")]
     NotUtf8 { path: PathBuf },
 
-    // ------------------------------------------------------------- note filenames
-    /// A file in the vault is not named `<uuid>.md` or `<uuid>_<slug>.md`.
-    #[error("`{path}` is not a note filename (expected `<uuid>.md` or `<uuid>_<slug>.md`)")]
-    InvalidNoteFilename { path: PathBuf },
-
-    // -------------------------------------------------------------- frontmatter
-    /// The file does not open with a `---` fence.
-    #[error("`{path}` has no frontmatter: expected a `---` fence on the first line")]
-    MissingFrontmatterFence { path: PathBuf },
-
-    /// The file opens with `---` but never closes the block.
-    #[error("`{path}` has an unterminated frontmatter block: no closing `---` fence")]
-    UnterminatedFrontmatter { path: PathBuf },
-
-    /// The frontmatter block is not well-formed YAML. `message` is the YAML parser's own
-    /// diagnostic, which carries line and column within the block.
-    #[error("`{path}` has malformed frontmatter YAML: {message}")]
-    MalformedYaml { path: PathBuf, message: String },
-
-    /// The frontmatter block parsed as YAML but is not a mapping — an empty block, a bare scalar,
-    /// or a sequence.
-    #[error("`{path}`: frontmatter must be a YAML mapping")]
-    FrontmatterNotAMapping { path: PathBuf },
-
-    /// The frontmatter block uses YAML this version cannot slice into per-key source spans, so an
-    /// unknown key's bytes could not be carried through a write.
-    ///
-    /// Stage 1's byte-replay path preserved such a block whether or not it understood it. One
-    /// rendering write path cannot, so this is refused rather than mangled: explicit `?` keys,
-    /// anchors and aliases, a flow collection continuing at column zero, a non-string key, and a
-    /// duplicated key all land here.
-    #[error("`{path}`: frontmatter cannot be preserved through a write: {message}")]
-    UnpreservableFrontmatter { path: PathBuf, message: String },
-
-    /// A known frontmatter key holds a value of the wrong YAML shape — `title` as a sequence, say.
-    #[error("`{path}`: frontmatter key `{field}` has the wrong type: {message}")]
-    InvalidFrontmatterField {
-        path: PathBuf,
-        field: String,
-        message: String,
-    },
-
-    /// A key the schema declares as a `relation:*` role holds something
-    /// that is not a UUID.
-    #[error("`{path}`: frontmatter key `{field}` is not a UUID: `{value}`")]
-    InvalidNoteIdValue {
-        path: PathBuf,
-        field: String,
-        value: String,
-    },
-
-    /// A frontmatter key could not be emitted as YAML. `key` rather than a note id or a path,
-    /// because rendering runs on a `Frontmatter` that knows neither — the identity is the
-    /// filename's, and a note being created has an id before it has a filename.
-    #[error("cannot serialize frontmatter key `{key}`: {message}")]
-    SerializeFrontmatter { key: String, message: String },
-
-    /// Recomputing `relation:root` walked `relation:reply_to` upward and came back to a note it
-    /// had already visited. Dangling references are a designed state; a cycle is not.
-    #[error("`{path}`: reply chain cycles back to note `{id}`")]
-    ReplyCycle { path: PathBuf, id: Uuid },
-
-    // --------------------------------------------------------------- note lifecycle
-    /// A command named a note the vault does not hold, in either state. Distinct from a *dangling
-    /// reference*, which is a designed state and never an error: this is a person asking for a
-    /// note that is not there.
-    #[error("no note `{id}` in this workspace")]
-    NoteNotFound { id: Uuid },
-
-    /// `create` was given a `reply_to` naming a note that does not exist.
-    ///
-    /// Separate from [`Error::NoteNotFound`] because the subject is different: the note being
-    /// asked for is fine, and it is the *parent* that is missing. Replying to a **trashed** note
-    /// is allowed — it is still a real note — so only outright absence lands here.
-    #[error("cannot reply to note `{id}`: no such note in this workspace")]
-    ReplyTargetMissing { id: Uuid },
-
-    /// `trash` was called on a note that is already in `.jot/.trash/`.
-    #[error("note `{id}` is already in the trash")]
-    AlreadyTrashed { id: Uuid },
-
-    /// `restore` was called on a note that is not in the trash.
-    #[error("note `{id}` is not in the trash")]
-    NotTrashed { id: Uuid },
-
     // ---------------------------------------------------------------- workspace
-    /// The path is not a workspace: it has no `.jot/` directory.
-    #[error("`{path}` is not a jot workspace: no `.jot/` directory")]
+    /// The path is not a workspace: it has no `workspace.toml`.
+    #[error("`{path}` is not a jot workspace: no `workspace.toml`")]
     NotAWorkspace { path: PathBuf },
 
-    /// `init` was pointed at a directory that already has a `.jot/`. Never a silent overwrite (U3).
-    #[error("`{path}` is already a jot workspace")]
+    /// The path holds a workspace in the format before the schema-first redesign:
+    /// `.jot/workspace.toml`, and no `workspace.toml` at the root.
+    #[error(
+        "`{path}` is a jot workspace in the old format (`.jot/workspace.toml`, `<id>_<slug>.md`, `[[schema.frontmatter]]`). The format changed: a workspace is now a folder with `workspace.toml` and `schema.json` at its root. This version of jot cannot open the old format, and there is no converter yet"
+    )]
+    OldFormat { path: PathBuf },
+
+    /// `init` was pointed at a directory that already has a `workspace.toml` or `schema.json`.
+    /// Never a silent overwrite.
+    #[error("`{path}` already exists; refusing to overwrite it")]
     WorkspaceExists { path: PathBuf },
 
-    /// `discover` walked up from this path to the filesystem root without finding a `.jot/`.
+    /// `discover` walked up to the filesystem root without finding a `workspace.toml`.
     #[error("no jot workspace found in `{from}` or any parent directory")]
     WorkspaceNotFound { from: PathBuf },
 
-    /// `workspace.toml` is not well-formed TOML, or is missing a key it must have. `message` is the
-    /// TOML parser's own diagnostic.
-    #[error("cannot parse workspace manifest `{path}`: {message}")]
-    ManifestParse { path: PathBuf, message: String },
+    /// `workspace.toml` is broken. Refuses to open the workspace, naming the error.
+    #[error("`{path}` is broken: {message}")]
+    WorkspaceToml { path: PathBuf, message: String },
 
-    /// `workspace.toml` could not be emitted.
-    #[error("cannot serialize workspace manifest `{path}`: {message}")]
-    ManifestSerialize { path: PathBuf, message: String },
-
-    /// The manifest declares a `schema_version` this build does not understand. Both versions are
-    /// carried so the message can say plainly that the workspace was written by a newer version.
-    #[error(
-        "`{path}` declares schema_version {found}, but this build of jot supports at most {supported} — the workspace was written by a newer version"
-    )]
-    UnsupportedSchemaVersion {
-        path: PathBuf,
-        found: u32,
-        supported: u32,
-    },
-
-    /// `[workspace] id` is not a UUID.
-    #[error("`{path}`: workspace id `{value}` is not a UUID")]
-    InvalidWorkspaceId { path: PathBuf, value: String },
+    /// A settings file could not be emitted.
+    #[error("cannot serialize `{path}`: {message}")]
+    SettingsSerialize { path: PathBuf, message: String },
 
     // ----------------------------------------------------------------- registry
-    /// The OS config directory could not be located, so the registry has no home. Carries the
-    /// application identity that was looked up.
+    /// The OS config directory could not be located, so the registry has no home.
     #[error("cannot locate the OS config directory for `{application}`")]
     ConfigDirUnavailable { application: String },
 
@@ -246,71 +111,36 @@ pub enum Error {
     #[error("cannot read the workspace registry `{path}`: {message}")]
     RegistryUnreadable { path: PathBuf, message: String },
 
-    /// The registry file was read but does not parse, or parses into a shape that is not a
-    /// registry. **Recoverable** — see [`Error::is_registry_recoverable`].
+    /// The registry file was read but is not a registry. **Recoverable**.
     #[error("the workspace registry `{path}` is corrupt: {message}")]
     RegistryCorrupt { path: PathBuf, message: String },
 
-    /// The registry could not be emitted. Not recoverable: a save that silently does nothing loses
-    /// the user's action.
+    /// The registry could not be emitted.
     #[error("cannot serialize the workspace registry `{path}`: {message}")]
     RegistrySerialize { path: PathBuf, message: String },
 
-    // -------------------------------------------------------------------- the index (stage 4)
+    // -------------------------------------------------------------------- the index
     //
-    // The index is derived and disposable, so every variant here has the same remedy — delete the
-    // file and let `rebuild()` put it back — and each message says so, because a person holding a
-    // database error wants to know that before they want to know anything else.
+    // The index is derived and disposable, so every message says that deleting it is safe.
     /// The index database could not be opened, created, or migrated.
     #[error(
         "cannot open the index `{path}`: {message} (the index is derived — deleting it is safe)"
     )]
     IndexOpen { path: PathBuf, message: String },
 
-    /// The index's `user_version` is from a newer build of jot than this one.
-    ///
-    /// Migrations are forward-only, so a binary cannot know what a later version did to the
-    /// schema. Refusing is the only honest answer, and it costs nothing: the index carries no
-    /// state the notes do not.
-    // One line on purpose. A `\`-continued literal here got re-joined by `cargo fmt` with the
-    // continuation's indentation left inside the string, and shipped ten spaces mid-sentence to
-    // anyone whose index was from a newer build.
-    #[error(
-        "the index `{path}` is version {found} and this build understands {supported} — delete it and it will be rebuilt"
-    )]
-    IndexTooNew {
-        /// The database file.
-        path: PathBuf,
-        /// The `user_version` the file carries.
-        found: u32,
-        /// The newest version this binary has a migration for.
-        supported: u32,
-    },
-
     /// A read or a write against the index failed.
     #[error("index `{path}`: {message} (the index is derived — deleting it is safe)")]
     IndexQuery { path: PathBuf, message: String },
 
-    /// The filesystem watcher could not be started, or could not watch a directory.
-    ///
-    /// Never fatal to a surface. A vault with no watcher is a vault you refresh by hand, which is
-    /// exactly what every release before stage 5 did; the caller reports this and carries on
-    /// rather than refusing to open. Inotify watch limits and unsupported filesystems are the
-    /// common causes, and neither is worth losing the session over.
+    /// The filesystem watcher could not be started. Never fatal to a surface: a workspace with no
+    /// watcher is one you sync by hand.
     #[error("cannot watch `{path}` for changes: {message}")]
     Watch { path: PathBuf, message: String },
 }
 
 impl Error {
-    /// The filesystem path this error is about, if it is about one.
-    ///
-    /// `None` for the variants that are about a *note* rather than a file — the four note-lifecycle
-    /// errors, which name an id because the whole problem is that no file carries it — plus
-    /// [`Error::SerializeFrontmatter`], which names a frontmatter key on a block that may never
-    /// have had a file, and [`Error::ConfigDirUnavailable`], which fires precisely because there is
-    /// no path to name.
-    ///
-    /// For [`Error::Rename`] this is the *target* — the file the caller was trying to produce.
+    /// The filesystem path this error is about, if it is about one. For [`Error::Rename`] this
+    /// is the target.
     pub fn path(&self) -> Option<&Path> {
         match self {
             Error::Read { path, .. }
@@ -319,411 +149,30 @@ impl Error {
             | Error::ReadDir { path, .. }
             | Error::Remove { path, .. }
             | Error::NotUtf8 { path }
-            | Error::InvalidNoteFilename { path }
-            | Error::MissingFrontmatterFence { path }
-            | Error::UnterminatedFrontmatter { path }
-            | Error::MalformedYaml { path, .. }
-            | Error::FrontmatterNotAMapping { path }
-            | Error::UnpreservableFrontmatter { path, .. }
-            | Error::InvalidFrontmatterField { path, .. }
-            | Error::InvalidNoteIdValue { path, .. }
-            | Error::ReplyCycle { path, .. }
             | Error::NotAWorkspace { path }
+            | Error::OldFormat { path }
             | Error::WorkspaceExists { path }
-            | Error::ManifestParse { path, .. }
-            | Error::ManifestSerialize { path, .. }
-            | Error::UnsupportedSchemaVersion { path, .. }
-            | Error::InvalidWorkspaceId { path, .. }
+            | Error::WorkspaceToml { path, .. }
+            | Error::SettingsSerialize { path, .. }
             | Error::RegistryUnreadable { path, .. }
             | Error::RegistryCorrupt { path, .. }
             | Error::RegistrySerialize { path, .. }
             | Error::IndexOpen { path, .. }
-            | Error::IndexTooNew { path, .. }
             | Error::IndexQuery { path, .. }
             | Error::Watch { path, .. } => Some(path),
             Error::Rename { to, .. } => Some(to),
             Error::WorkspaceNotFound { from } => Some(from),
-            Error::SerializeFrontmatter { .. }
-            | Error::ConfigDirUnavailable { .. }
-            | Error::NoteNotFound { .. }
-            | Error::ReplyTargetMissing { .. }
-            | Error::AlreadyTrashed { .. }
-            | Error::NotTrashed { .. } => None,
+            Error::ConfigDirUnavailable { .. } => None,
         }
     }
 
-    /// Whether the registry's load path is allowed to swallow this error and continue with an empty
-    /// registry.
-    ///
-    /// True for exactly the two registry *read* failures. The registry is a cache; per the U5
-    /// ruling a bad one costs one re-add and never data, and it must never propagate into
-    /// `Workspace::open`. Everything else — including a registry that cannot be *written* — is a
-    /// real failure the caller must see.
+    /// Whether the registry's load path may swallow this error and continue with an empty
+    /// registry: exactly the two registry *read* failures. The registry is a cache; a bad one
+    /// costs one re-add and never data.
     pub fn is_registry_recoverable(&self) -> bool {
         matches!(
             self,
             Error::RegistryUnreadable { .. } | Error::RegistryCorrupt { .. }
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::error::Error as _;
-
-    fn io_err() -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access is denied")
-    }
-
-    const B: &str = "01a03d51-4b48-72e2-9f30-f180030c06ab";
-
-    fn uuid_b() -> Uuid {
-        Uuid::parse_str(B).unwrap()
-    }
-
-    /// One sample of every variant, so the tests below are exhaustive by construction. Adding a
-    /// variant without adding it here fails `variant_sample_list_is_exhaustive`.
-    fn every_variant() -> Vec<Error> {
-        vec![
-            Error::Read {
-                path: "notes/a.md".into(),
-                source: io_err(),
-            },
-            Error::Write {
-                path: "notes/b.md".into(),
-                source: io_err(),
-            },
-            Error::CreateDir {
-                path: "notes/.jot".into(),
-                source: io_err(),
-            },
-            Error::ReadDir {
-                path: "notes".into(),
-                source: io_err(),
-            },
-            Error::Rename {
-                from: "notes/.jot/tmp/x".into(),
-                to: "notes/c.md".into(),
-                source: io_err(),
-            },
-            Error::Remove {
-                path: "notes/.jot/tmp/x".into(),
-                source: io_err(),
-            },
-            Error::NotUtf8 {
-                path: "notes/d.md".into(),
-            },
-            Error::InvalidNoteFilename {
-                path: "notes/README.md".into(),
-            },
-            Error::MissingFrontmatterFence {
-                path: "notes/f.md".into(),
-            },
-            Error::UnterminatedFrontmatter {
-                path: "notes/g.md".into(),
-            },
-            Error::MalformedYaml {
-                path: "notes/h.md".into(),
-                message: "did not find expected ',' at line 2 column 1".into(),
-            },
-            Error::FrontmatterNotAMapping {
-                path: "notes/i.md".into(),
-            },
-            Error::UnpreservableFrontmatter {
-                path: "notes/j.md".into(),
-                message: "top-level key is a number, not a string".into(),
-            },
-            Error::InvalidFrontmatterField {
-                path: "notes/m.md".into(),
-                field: "title".into(),
-                message: "expected a string, found a sequence".into(),
-            },
-            Error::InvalidNoteIdValue {
-                path: "notes/n.md".into(),
-                field: "relation:reply_to".into(),
-                value: "not-a-uuid".into(),
-            },
-            Error::ReplyCycle {
-                path: "notes/o.md".into(),
-                id: uuid_b(),
-            },
-            Error::SerializeFrontmatter {
-                key: "title".into(),
-                message: "recursion limit exceeded".into(),
-            },
-            Error::NoteNotFound { id: uuid_b() },
-            Error::ReplyTargetMissing { id: uuid_b() },
-            Error::AlreadyTrashed { id: uuid_b() },
-            Error::NotTrashed { id: uuid_b() },
-            Error::NotAWorkspace {
-                path: "somewhere".into(),
-            },
-            Error::WorkspaceExists {
-                path: "notes".into(),
-            },
-            Error::WorkspaceNotFound {
-                from: "notes/a/b/c".into(),
-            },
-            Error::ManifestParse {
-                path: "notes/.jot/workspace.toml".into(),
-                message: "expected `=` at line 3".into(),
-            },
-            Error::ManifestSerialize {
-                path: "notes/.jot/workspace.toml".into(),
-                message: "unsupported type".into(),
-            },
-            Error::UnsupportedSchemaVersion {
-                path: "notes/.jot/workspace.toml".into(),
-                found: 7,
-                supported: 1,
-            },
-            Error::InvalidWorkspaceId {
-                path: "notes/.jot/workspace.toml".into(),
-                value: "nope".into(),
-            },
-            Error::ConfigDirUnavailable {
-                application: "danjolabs/jot".into(),
-            },
-            Error::RegistryUnreadable {
-                path: "config/workspaces.toml".into(),
-                message: "access is denied".into(),
-            },
-            Error::RegistryCorrupt {
-                path: "config/workspaces.toml".into(),
-                message: "expected a table".into(),
-            },
-            Error::RegistrySerialize {
-                path: "config/workspaces.toml".into(),
-                message: "unsupported type".into(),
-            },
-        ]
-    }
-
-    /// Catches a variant added to the enum without a sample here, which would silently shrink the
-    /// coverage of every other test in this module.
-    #[test]
-    fn variant_sample_list_is_exhaustive() {
-        let samples = every_variant();
-        let mut discriminants: Vec<String> = samples
-            .iter()
-            .map(|e| {
-                format!("{e:?}")
-                    .split_whitespace()
-                    .next()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        discriminants.sort();
-        discriminants.dedup();
-        assert_eq!(
-            discriminants.len(),
-            samples.len(),
-            "every_variant() has a duplicate or missing variant: {discriminants:?}"
-        );
-        // Bump deliberately when the taxonomy changes. Stage 1 froze it at 32; stage 1b
-        // removed five (`NoteIdMismatch`, `MissingId`, `MissingCreatedAt`, `MissingRoot`,
-        // `InvalidTimestamp` — all of them about keys the format no longer carries) and
-        // added two (`UnpreservableFrontmatter`, `ReplyCycle`), reaching 29. Stage 2 added the
-        // four note-lifecycle errors, which are the first errors in the crate about a *note*
-        // rather than a file. The pre-stage-4 refactor removed `InvalidWorkspaceKind` along with
-        // the `kind` field itself.
-        assert_eq!(
-            samples.len(),
-            32,
-            "the pre-stage-4 error taxonomy has 32 variants"
-        );
-    }
-
-    /// The rule from `overview.md`: an error that says only "parse error" is a bug. Every variant
-    /// that concerns a path must print that path.
-    #[test]
-    fn every_path_carrying_variant_prints_its_path() {
-        for e in every_variant() {
-            let Some(path) = e.path() else { continue };
-            let shown = e.to_string();
-            let needle = path.display().to_string();
-            assert!(
-                shown.contains(&needle),
-                "`{shown}` does not name its path `{needle}`"
-            );
-        }
-    }
-
-    /// Every variant with no path must still identify what it concerns.
-    #[test]
-    fn pathless_variants_still_identify_their_subject() {
-        // The note-lifecycle errors name an id, which is the whole of what is known: the failure
-        // is precisely that no file carries it.
-        for e in [
-            Error::NoteNotFound { id: uuid_b() },
-            Error::ReplyTargetMissing { id: uuid_b() },
-            Error::AlreadyTrashed { id: uuid_b() },
-            Error::NotTrashed { id: uuid_b() },
-        ] {
-            assert!(e.path().is_none(), "{e}");
-            assert!(e.to_string().contains(B), "{e}");
-        }
-
-        let e = Error::SerializeFrontmatter {
-            key: "title".into(),
-            message: "boom".into(),
-        };
-        assert!(e.path().is_none());
-        assert!(e.to_string().contains("title"), "{e}");
-
-        let e = Error::ConfigDirUnavailable {
-            application: "danjolabs/jot".into(),
-        };
-        assert!(e.path().is_none());
-        assert!(e.to_string().contains("danjolabs/jot"), "{e}");
-    }
-
-    /// No variant may degrade into a bare "parse error"-class message.
-    #[test]
-    fn no_variant_has_an_empty_or_useless_message() {
-        for e in every_variant() {
-            let shown = e.to_string();
-            assert!(shown.len() > 10, "message too thin: `{shown}`");
-            assert!(!shown.trim().is_empty(), "empty message for {e:?}");
-        }
-    }
-
-    /// A refused block must say which file and what about it jot could not carry through a write,
-    /// or the user has no way to fix the note.
-    #[test]
-    fn unpreservable_frontmatter_names_the_path_and_the_reason() {
-        let e = Error::UnpreservableFrontmatter {
-            path: "vault/01a03d50-bac0-7851-bd56-683ef65923cd.md".into(),
-            message: "key `summary` is not in the parsed mapping".into(),
-        };
-        let shown = e.to_string();
-        assert!(
-            shown.contains("01a03d50-bac0-7851-bd56-683ef65923cd.md"),
-            "{shown}"
-        );
-        assert!(shown.contains("summary"), "{shown}");
-    }
-
-    /// A reply cycle must name both the file it was found from and the note it cycles back to.
-    #[test]
-    fn reply_cycle_names_the_path_and_the_note() {
-        let e = Error::ReplyCycle {
-            path: "vault/a.md".into(),
-            id: uuid_b(),
-        };
-        let shown = e.to_string();
-        assert!(shown.contains("vault/a.md"), "{shown}");
-        assert!(shown.contains(B), "{shown}");
-    }
-
-    /// `open()` must be able to say plainly that the workspace is from the future, which needs both
-    /// numbers.
-    #[test]
-    fn unsupported_schema_version_names_both_versions() {
-        let e = Error::UnsupportedSchemaVersion {
-            path: "v/.jot/workspace.toml".into(),
-            found: 7,
-            supported: 1,
-        };
-        let shown = e.to_string();
-        assert!(shown.contains('7'), "{shown}");
-        assert!(shown.contains('1'), "{shown}");
-        assert!(shown.contains("newer version"), "{shown}");
-    }
-
-    /// The three fence/YAML failures must likewise be distinguishable.
-    #[test]
-    fn each_frontmatter_shape_failure_has_its_own_variant() {
-        let p = PathBuf::from("v/a.md");
-        let msgs = [
-            Error::MissingFrontmatterFence { path: p.clone() }.to_string(),
-            Error::UnterminatedFrontmatter { path: p.clone() }.to_string(),
-            Error::MalformedYaml {
-                path: p.clone(),
-                message: "bad".into(),
-            }
-            .to_string(),
-            Error::FrontmatterNotAMapping { path: p }.to_string(),
-        ];
-        let mut sorted = msgs.to_vec();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(
-            sorted.len(),
-            4,
-            "frontmatter shape messages are not distinct"
-        );
-    }
-
-    /// U5: exactly the registry read failures may be swallowed. A registry that cannot be *written*
-    /// must not be, or a `jot use` silently does nothing.
-    #[test]
-    fn only_registry_reads_are_recoverable() {
-        let recoverable: Vec<String> = every_variant()
-            .into_iter()
-            .filter(Error::is_registry_recoverable)
-            .map(|e| {
-                format!("{e:?}")
-                    .split_whitespace()
-                    .next()
-                    .unwrap()
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(recoverable, ["RegistryUnreadable", "RegistryCorrupt"]);
-    }
-
-    /// I/O-backed variants keep the underlying error reachable through `source()`, so a surface can
-    /// print the chain.
-    #[test]
-    fn io_variants_expose_their_source() {
-        for e in every_variant() {
-            let is_io = matches!(
-                e,
-                Error::Read { .. }
-                    | Error::Write { .. }
-                    | Error::CreateDir { .. }
-                    | Error::ReadDir { .. }
-                    | Error::Rename { .. }
-                    | Error::Remove { .. }
-            );
-            assert_eq!(
-                e.source().is_some(),
-                is_io,
-                "source() disagrees with the variant kind for {e:?}"
-            );
-        }
-    }
-
-    /// `Rename` names both files: recovering a half-finished atomic write by hand needs the staged
-    /// path as well as the target, and `path()` must point at the target.
-    #[test]
-    fn rename_names_both_paths_and_reports_the_target() {
-        let e = Error::Rename {
-            from: "v/.jot/tmp/staged".into(),
-            to: "v/note.md".into(),
-            source: io_err(),
-        };
-        let shown = e.to_string();
-        assert!(shown.contains("staged"), "{shown}");
-        assert!(shown.contains("note.md"), "{shown}");
-        assert_eq!(e.path(), Some(Path::new("v/note.md")));
-    }
-
-    #[test]
-    fn result_alias_is_usable() {
-        fn f(ok: bool) -> Result<u8> {
-            if ok {
-                Ok(1)
-            } else {
-                Err(Error::NotUtf8 {
-                    path: "v/a.md".into(),
-                })
-            }
-        }
-        assert_eq!(f(true).unwrap(), 1);
-        assert!(f(false).is_err());
     }
 }

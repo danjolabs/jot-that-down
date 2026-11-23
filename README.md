@@ -1,19 +1,19 @@
 # Jot That Down
 
-A personal capture tool over a directory of markdown files.
+A personal capture tool over a flat folder of markdown files.
 
-Every note is a `<uuid>[_slug].md` file whose **filename is its identity** and whose frontmatter
-carries its title and its relations. Notes reply to notes and quote notes, so an idea can grow a
-structure *while it is being written* instead of demanding a folder decision before the thought is
-finished.
+Every note is a `<id>.md` file whose **filename is its identity**, and whose frontmatter is typed by
+the workspace's `schema.json` — like a database that works offline, where each file is both a page
+and a row. Meaning lives in that typed layer, not in folders, so a note never has to be filed
+before the thought is finished. See [`docs/plans/redesign.md`](docs/plans/redesign.md).
 
 The files are the truth. Everything else — the index, the caches, the views — is derived and
-disposable, and the vault stays readable by any editor, greppable by any tool, and versionable by
-git.
+disposable, and the workspace stays readable by any editor, greppable by any tool, and versionable
+by git.
 
 ## Status
 
-**Usable from the command line, and browsable from the terminal.** Stages 1–5 of
+**Usable from the command line.** Stages 1–5 of
 [`docs/plans/overview.md`](docs/plans/overview.md) are built.
 
 | | |
@@ -22,7 +22,7 @@ git.
 | ✅ Note lifecycle, thread algebra, links | stage 2 |
 | ✅ `jot` CLI | stage 3 |
 | ✅ SQLite index, incremental sync, deterministic rebuild | stage 4 |
-| ✅ `jot tui` — timeline, files, search, trash, reader pane | stage 5 |
+| ✖ `jot tui` — built in stage 5, since removed; `jot` is CLI-only | stage 5 |
 | ⏳ Refactor and polish; the tail of the schema | stages 6–7 |
 | 💤 Desktop app | deferred, unscheduled |
 
@@ -63,43 +63,35 @@ cargo build --release                   # .envrc puts target/release on PATH
 ## Quick start
 
 ```sh
-jot workspace new ~/notes    # create a vault
+jot workspace new ~/notes    # writes workspace.toml and schema.json
 cd ~/notes                   # commands below discover it by walking up
 
 jot new -t "First thought" -m "Something worth keeping."
 echo "captured from a pipe" | jot new
 jot new -t "A title alone"   # a title is a note; the body is optional
+jot new --set status=seed    # any frontmatter key; the value is read as YAML
 jot new                      # opens $EDITOR; an untouched buffer cancels
 
-jot list                     # thread roots, newest first
-jot list --flat              # replies too
-jot show <id>
+jot list                     # newest first, by the created_at role
+jot show <id>                # frontmatter in schema order, problems beside their keys
+jot search lemon             # any frontmatter text
 ```
-
-Threads are the point:
-
-```console
-$ jot thread 01a05a59-c2c
-01a05a59-c2c  Jot that down
-├─ 01a05a59-c2d0  Untitled
-│  └─ 01a05a59-c2d5  Untitled
-│     ├─ 01a05a59-c2d9  Untitled
-│     └─ 01a05a59-c2df  Untitled
-└─ 01a05a59-c2e  Second branch
-```
-
-`--path` prints the single line through one note; `--segments` prints the thread cut into chains at
-its branch points.
 
 Editing and deleting:
 
 ```sh
-jot edit <id> -t "New title"      # or -m "new body", or --no-title
+jot edit <id> -t "New title"      # or -m "new body", --set key=value, --unset key
 jot edit <id>                     # no flags: opens $EDITOR on the whole note
+jot remove <id>                   # deletes the file; confirms (--yes skips)
+```
 
-jot remove <id>                   # trash — reversible, never cascades
-jot restore <id>
-jot purge <id>                    # irreversible; confirms
+When the schema changes, the notes do not — explicit commands rewrite them:
+
+```sh
+jot check                         # notes with problems, stray files; exits 5 on problems
+jot field fill status seed        # set a key on every note that lacks it
+jot field remove status           # remove a key from every note; confirms
+jot field rename title headline   # in every note, schema.json, and [roles]
 ```
 
 **Command names are full words, with short aliases**: `list`/`ls`, `remove`/`rm`,
@@ -107,57 +99,61 @@ jot purge <id>                    # irreversible; confirms
 
 ## Things worth knowing
 
+**jot never writes a note that fails `schema.json`.** A command that would is refused with the
+reasons. In `$EDITOR`, a refused buffer is reopened on the same text with the reasons written at
+the top of its frontmatter; quit without saving and the draft is kept, its path printed. Nothing
+typed is lost.
+
+**Reading never fixes anything.** A note that breaks the schema — `counter: two` where a number is
+declared — stays listed, readable and editable, with the problem shown beside the key.
+
+**Roles give keys their meaning.** `workspace.toml`'s `[roles]` maps `document:title` and
+`document:created_at` to keys of `schema.json`. With no title role a note lists as `Untitled`; with
+no created_at role `jot list` orders by modification time and says so.
+
 **Short ids are computed, not truncated.** `jot` prints the shortest prefix that is unique in your
-vault, so whatever it prints you can paste back. It is not a fixed eight characters: a UUIDv7's
-leading bits are a timestamp, so notes captured in the same minute need more of the id to tell
-apart. `--long` gives full UUIDs; `--json` always does.
+workspace, at least eight characters, so whatever it prints you can paste back. `--long` gives full
+ids; `--json` always does.
 
 **Nothing guesses.** An ambiguous id lists the candidates and exits non-zero. So does a workspace
-name that matches two vaults.
+name that matches two workspaces.
 
-**Trash never cascades.** Trashing a note with replies moves exactly one file; the replies stay live
-and show a trashed-parent marker. Trashing is a file move into `.jot/.trash/` — the directory *is*
-the state, so a restore leaves the file byte-identical.
+**Delete is delete.** `jot remove` removes the file; there is no trash, and nothing cascades — links
+to it simply dangle. Recovery is git's job, or the OS's.
 
-**Frontmatter keys jot does not understand are preserved verbatim** through every write. A vault
-imported from another tool keeps its keys.
-
-**Links** are `[[<uuid>]]` or `[[<uuid>|label]]` in a note's body, and are ignored inside code
-fences and inline code. `jot links <id>` shows outgoing links, backlinks, and quotes.
+**Links** are `[[<id>]]` or `[[<id>|label]]` in a note's body, and are ignored inside code fences
+and inline code. `jot links <id>` shows outgoing links and backlinks.
 
 **`--json` on every read command**, with a documented stable shape — see
 [`docs/cli-json.md`](docs/cli-json.md).
+
+**An old-format vault** (`.jot/workspace.toml`, `<id>_<slug>.md`) is refused with a message saying
+what changed. There is no converter yet, and nothing is touched.
 
 ## Where notes live
 
 ```text
 ~/notes/
-  .jot/
-    workspace.toml     # identity and config
-    .trash/            # trashed notes keep their filename
-    tmp/               # staging for atomic writes
-    index.db           # derived and disposable; appears on the first note
-    .gitignore         # index.db*, tmp/
-  01a03d4c-….md
-  01a03d4d-…_first_thoughts.md
+  workspace.toml       # [id] format, [roles]
+  schema.json          # JSON Schema for the frontmatter
+  .jot/                # derived only: index.db, tmp/, .gitignore
+  01a03d4c-….md        # a note is exactly <id>.md
+  README.md            # anything else is a stray: reported, never a note
 ```
-
-The slug after the UUID is decorative — the reader ignores it, so renaming a title does not move the
-note.
 
 ## Environment
 
 | Variable | Effect |
 | --- | --- |
-| `JOT_WORKSPACE` | The vault to act on, between `--workspace` and directory discovery. |
+| `JOT_WORKSPACE` | The workspace to act on, between `--workspace` and directory discovery. |
 | `JOT_REGISTRY` | Where the workspace registry lives, overriding the OS config directory. |
 | `EDITOR` / `VISUAL` | The editor `jot new` and `jot edit` hand off to. |
 | `NO_COLOR` | Any value disables colour. |
 
-Which vault a command acts on is resolved in one fixed order — `--workspace`, then `JOT_WORKSPACE`,
-then a `.jot/` found by walking up from the working directory, then the registry's current
-workspace. `--verbose` says which rule won, because a note captured into the wrong vault is the one
-mistake this tool could make quietly.
+Which workspace a command acts on is resolved in one fixed order — `--workspace`, then
+`JOT_WORKSPACE`, then a `workspace.toml` found by walking up from the working directory, then the
+registry's current workspace. `--verbose` says which rule won, because a note captured into the
+wrong workspace is the one mistake this tool could make quietly.
 
 ## Development
 

@@ -1,4 +1,4 @@
-//! `[[uuid]]` link extraction from a note body.
+//! `[[id]]` link extraction from a note body.
 //!
 //! Stage 2's links, and the second use of the markdown parser stage 1b took on. The rule is the
 //! same one the frontmatter splitter follows: **parse to an AST, read byte offsets, never call the
@@ -24,10 +24,9 @@
 //! `\ [ \ [ u …`, in which `[[` never appears, so an escaped link is not a link and nothing had to
 //! check for one.
 
-use crate::note::NoteId;
+use crate::id::{IdFormat, NoteId};
 use markdown::mdast::Node;
 use std::ops::Range;
-use uuid::Uuid;
 
 /// The opening delimiter. Its length is also how far past a match the scan resumes.
 const OPEN: &str = "[[";
@@ -38,13 +37,13 @@ const CLOSE: &str = "]]";
 /// The separator between a link's target and its label in `[[uuid|label]]`.
 const LABEL_SEPARATOR: char = '|';
 
-/// One `[[uuid]]` or `[[uuid|label]]` found in a body.
+/// One `[[id]]` or `[[id|label]]` found in a body.
 ///
-/// Extraction is **purely textual** and never consults the index: a link to a purged note extracts
-/// exactly like a link to a live one, and resolving it to
-/// [`Present`](crate::query::Ref::Present) / [`Trashed`](crate::query::Ref::Trashed) /
-/// [`Deleted`](crate::query::Ref::Deleted) is a separate step. That separation is what lets a
-/// rebuild reproduce the `links` rows from the files alone.
+/// Extraction is **purely textual** and never consults the index: a link to a deleted note
+/// extracts exactly like a link to a live one, and resolving it to
+/// [`Present`](crate::snapshot::Ref::Present) or [`Missing`](crate::snapshot::Ref::Missing) is a
+/// separate step. That separation is what lets a rebuild reproduce the `links` rows from the files
+/// alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
     /// The note this link points at. Not known to exist — see the type docs.
@@ -65,27 +64,32 @@ pub struct Link {
 /// different spans, because each is a real position in the text. Collapsing them to one edge is
 /// the caller's job and belongs where the edge set is built, not where the text is read.
 #[must_use]
-pub fn extract(body: &str) -> Vec<Link> {
+pub fn extract(body: &str, format: IdFormat) -> Vec<Link> {
     // `to_mdast` returns `Err` only for MDX syntax, which the default constructs do not enable.
     // A body that somehow fails to parse has no links this module is willing to claim.
     let Ok(tree) = markdown::to_mdast(body, &markdown::ParseOptions::default()) else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    walk(&tree, body, &mut out);
+    walk(&tree, body, format, &mut out);
     out.sort_by_key(|link| link.span.start);
     out
 }
 
 /// Descend into `node`, scanning the source behind every text node and refusing to enter code.
-fn walk(node: &Node, body: &str, out: &mut Vec<Link>) {
+fn walk(node: &Node, body: &str, format: IdFormat, out: &mut Vec<Link>) {
     match node {
         // Fenced and indented code, inline code, and raw HTML are all "not prose". A link written
         // inside any of them is being shown, not made.
         Node::Code(_) | Node::InlineCode(_) | Node::Html(_) => return,
         Node::Text(_) => {
             if let Some(position) = node.position() {
-                scan(body, position.start.offset..position.end.offset, out);
+                scan(
+                    body,
+                    position.start.offset..position.end.offset,
+                    format,
+                    out,
+                );
             }
             return;
         }
@@ -93,13 +97,13 @@ fn walk(node: &Node, body: &str, out: &mut Vec<Link>) {
     }
     if let Some(children) = node.children() {
         for child in children {
-            walk(child, body, out);
+            walk(child, body, format, out);
         }
     }
 }
 
 /// Find every well-formed link in `body[span]`, reporting spans absolute to `body`.
-fn scan(body: &str, span: Range<usize>, out: &mut Vec<Link>) {
+fn scan(body: &str, span: Range<usize>, format: IdFormat, out: &mut Vec<Link>) {
     let Some(text) = body.get(span.clone()) else {
         // A span that is not a char boundary cannot come from the parser; nothing to salvage.
         return;
@@ -120,7 +124,7 @@ fn scan(body: &str, span: Range<usize>, out: &mut Vec<Link>) {
         };
 
         let interior = &rest[..close];
-        if let Some(link) = parse_interior(interior) {
+        if let Some(link) = parse_interior(interior, format) {
             let end = interior_start + close + CLOSE.len();
             out.push(Link {
                 span: span.start + open..span.start + end,
@@ -136,17 +140,17 @@ fn scan(body: &str, span: Range<usize>, out: &mut Vec<Link>) {
     }
 }
 
-/// Turn the text between the delimiters into a link, or `None` when it does not name a UUID.
+/// Turn the text between the delimiters into a link, or `None` when it does not name an id.
 ///
-/// The target must be a UUID and nothing else. jot links by identity, so `[[some title]]` is not a
+/// The target must be an id in the workspace's format, compared case-insensitively. jot links by identity, so `[[some title]]` is not a
 /// link with an unresolvable target — it is not a link at all, and quietly dropping it is right:
 /// the syntax belongs to other tools and a body may have been pasted from one.
-fn parse_interior(interior: &str) -> Option<Link> {
+fn parse_interior(interior: &str, format: IdFormat) -> Option<Link> {
     let (target, label) = match interior.split_once(LABEL_SEPARATOR) {
         Some((target, label)) => (target, Some(label)),
         None => (interior, None),
     };
-    let target = NoteId::from(Uuid::parse_str(target.trim()).ok()?);
+    let target = format.check(&target.trim().to_ascii_lowercase()).ok()?;
     let label = label
         .map(str::trim)
         .filter(|label| !label.is_empty())
@@ -167,7 +171,11 @@ mod tests {
     const B: &str = "01a03d61-0000-7000-8000-00000000000b";
 
     fn nid(s: &str) -> NoteId {
-        s.parse().unwrap()
+        IdFormat::UuidV7.check(s).unwrap()
+    }
+
+    fn extract(body: &str) -> Vec<Link> {
+        super::extract(body, IdFormat::UuidV7)
     }
 
     fn targets(body: &str) -> Vec<NoteId> {

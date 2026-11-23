@@ -2,14 +2,15 @@
 //!
 //! # Why this is its own module
 //!
-//! `stage3.md` names it: **a note captured into the wrong vault is quietly lost.** It is the worst
-//! bug this surface can have, because nothing reports it — the command succeeds, prints an id, and
-//! the note is somewhere you will not look. Every other CLI failure is loud.
+//! `stage3.md` names it: **a note captured into the wrong workspace is quietly lost.** It is the
+//! worst bug this surface can have, because nothing reports it — the command succeeds, prints an
+//! id, and the note is somewhere you will not look. Every other CLI failure is loud.
 //!
 //! So resolution is one function with one documented order, it records *which* rule fired, and
 //! `--verbose` prints it. Ambiguity about where a note landed is never resolved silently.
 
 use anyhow::{Context as _, Result};
+use jot_core::Error;
 use jot_core::registry::{self, Registry};
 use jot_core::workspace::Workspace;
 use std::path::{Path, PathBuf};
@@ -26,12 +27,15 @@ pub const ENV_VAR: &str = "JOT_WORKSPACE";
 ///   variable. `XDG_CONFIG_HOME` and `HOME` therefore isolate nothing there, and a test suite that
 ///   registers workspaces would write into the developer's real registry. This is the only way to
 ///   redirect it on every platform.
-/// * **People.** A portable install, or keeping work and personal vaults in separate registries.
-///
-/// Policy lives here rather than in `jot-core`: the crate deliberately keeps `directories` behind
-/// one function and takes explicit paths everywhere else, so *which* path a surface uses is the
-/// surface's decision.
+/// * **People.** A portable install, or keeping work and personal workspaces in separate
+///   registries.
 pub const REGISTRY_ENV_VAR: &str = "JOT_REGISTRY";
+
+/// What is said under an old-format refusal. Core's message says what changed; this says what to
+/// do about it, which is a surface's business.
+const OLD_FORMAT_HINT: &str = "hint: nothing was changed. Keep using the jot that wrote this \
+                               workspace, or create a new one with `jot ws new <path>` and move \
+                               the notes across by hand";
 
 /// Which rule chose the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +44,7 @@ pub enum Source {
     Flag,
     /// The `JOT_WORKSPACE` environment variable.
     Env,
-    /// A `.jot/` found by walking up from the working directory.
+    /// A `workspace.toml` found by walking up from the working directory.
     Discovered,
     /// The registry's current workspace.
     Registry,
@@ -52,7 +56,7 @@ impl Source {
         match self {
             Source::Flag => "--workspace",
             Source::Env => "the JOT_WORKSPACE environment variable",
-            Source::Discovered => "a .jot/ directory found from the working directory",
+            Source::Discovered => "a workspace.toml found from the working directory",
             Source::Registry => "the registry's current workspace",
         }
     }
@@ -69,7 +73,7 @@ pub struct Context {
 impl Context {
     /// Open the workspace this invocation should act on.
     ///
-    /// The order is fixed and is the one `stage3.md` specifies:
+    /// The order is fixed:
     ///
     /// 1. `--workspace <path>`
     /// 2. `JOT_WORKSPACE`
@@ -77,28 +81,27 @@ impl Context {
     /// 4. the registry's current workspace
     ///
     /// An explicit choice (1 or 2) that does not open is an **error**, never a fallback: silently
-    /// dropping to the next rule is exactly how a note lands in the wrong vault. Discovery failing
-    /// is not an error, because "not inside a vault" is the normal state that makes rule 4 useful.
+    /// dropping to the next rule is exactly how a note lands in the wrong workspace. Discovery
+    /// finding nothing is not an error, because "not inside a workspace" is the normal state that
+    /// makes rule 4 useful — but discovery finding something it cannot open (an old-format
+    /// workspace, a broken `workspace.toml`) is, for the same reason as 1 and 2.
     pub fn open(flag: Option<&Path>, verbose: bool) -> Result<Context> {
         let context = Context::resolve(flag)?;
         if verbose {
             eprintln!(
-                "jot: using workspace `{}` ({}), chosen by {}",
+                "jot: using workspace `{}`, chosen by {}",
                 context.workspace.root().display(),
-                context.workspace.name(),
                 context.source.explain()
             );
         }
-        for warning in context.workspace.warnings() {
-            eprintln!("jot: warning: {warning}");
-        }
+        report_settings(&context.workspace);
         Ok(context)
     }
 
     fn resolve(flag: Option<&Path>) -> Result<Context> {
         if let Some(path) = flag {
             let workspace = Workspace::open(path)
-                .with_context(|| format!("--workspace `{}`", path.display()))?;
+                .map_err(|e| opening(e, format!("--workspace `{}`", path.display())))?;
             return Ok(Context {
                 workspace,
                 source: Source::Flag,
@@ -108,7 +111,7 @@ impl Context {
         if let Some(path) = std::env::var_os(ENV_VAR).filter(|value| !value.is_empty()) {
             let path = PathBuf::from(path);
             let workspace = Workspace::open(&path)
-                .with_context(|| format!("{ENV_VAR}=`{}`", path.display()))?;
+                .map_err(|e| opening(e, format!("{ENV_VAR}=`{}`", path.display())))?;
             return Ok(Context {
                 workspace,
                 source: Source::Env,
@@ -116,37 +119,70 @@ impl Context {
         }
 
         let cwd = std::env::current_dir().context("cannot read the working directory")?;
-        if let Ok(workspace) = Workspace::discover(&cwd) {
-            return Ok(Context {
-                workspace,
-                source: Source::Discovered,
-            });
+        match Workspace::discover(&cwd) {
+            Ok(workspace) => {
+                return Ok(Context {
+                    workspace,
+                    source: Source::Discovered,
+                });
+            }
+            Err(Error::WorkspaceNotFound { .. }) => {}
+            Err(e) => return Err(opening(e, String::from("the working directory"))),
         }
 
         // Last resort. A corrupt registry recovers to an empty one rather than failing, so this
         // reads as "no current workspace" instead of taking the command down.
         let registry = load_registry()?;
-        let current = registry
-            .current()
-            .and_then(|id| registry.get(id))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "not inside a jot workspace, and no current workspace is set\n\
-                     hint: run `jot ws new <path>` to make one, or `jot ws use <name>` to pick one"
-                )
-            })?;
-
-        let workspace = Workspace::open(current.path()).with_context(|| {
-            format!(
-                "the registry's current workspace `{}` at `{}`",
-                current.name(),
-                current.path().display()
+        let current = registry.current().ok_or_else(|| {
+            anyhow::anyhow!(
+                "not inside a jot workspace, and no current workspace is set\n\
+                 hint: run `jot ws new <path>` to make one, or `jot ws use <path>` to pick one"
+            )
+        })?;
+        let workspace = Workspace::open(current).map_err(|e| {
+            opening(
+                e,
+                format!("the registry's current workspace `{}`", current.display()),
             )
         })?;
         Ok(Context {
             workspace,
             source: Source::Registry,
         })
+    }
+}
+
+/// A failure to open a workspace, as the user should read it: `what` names how it was chosen, and
+/// an old-format workspace gets a hint about what to do next.
+pub fn opening(error: Error, what: String) -> anyhow::Error {
+    let old = matches!(error, Error::OldFormat { .. });
+    let error = anyhow::Error::from(error).context(what);
+    if old {
+        anyhow::anyhow!("{error:#}\n{OLD_FORMAT_HINT}")
+    } else {
+        error
+    }
+}
+
+/// Settings warnings and errors, on stderr, without blocking the command.
+///
+/// A broken `schema.json` refuses writes, not reads, so a read command still runs — and says so,
+/// because a listing computed from the last valid settings is not what the files say right now.
+fn report_settings(workspace: &Workspace) {
+    let settings = workspace.settings();
+    for warning in settings.warnings() {
+        eprintln!("jot: warning: {warning}");
+    }
+    if settings.errors().is_empty() {
+        return;
+    }
+    for error in settings.errors() {
+        eprintln!("jot: settings error: {error}");
+    }
+    if settings.is_stale() {
+        eprintln!("jot: writes are refused until that is fixed; reads use the last valid settings");
+    } else {
+        eprintln!("jot: writes are refused until that is fixed");
     }
 }
 
@@ -163,7 +199,7 @@ pub fn registry_path() -> Result<PathBuf> {
 ///
 /// A registry that cannot be read or parsed recovers to an empty one — that is the crate's
 /// documented behavior and the right one here: a corrupt list of workspaces must not stop you
-/// capturing a note into the vault you are standing in.
+/// capturing a note into the workspace you are standing in.
 pub fn load_registry() -> Result<Registry> {
     let path = registry_path()?;
     let registry = Registry::load_from(&path)?;
@@ -175,13 +211,6 @@ pub fn load_registry() -> Result<Registry> {
 
 /// Save the registry back where [`registry_path`] says it lives.
 pub fn save_registry(registry: &Registry) -> Result<()> {
-    let path = registry_path()?;
-    if let Some(parent) = path.parent() {
-        // `Registry::save_to` writes the file, but a redirected registry may name a directory that
-        // does not exist yet — a fresh profile, or a test's temp dir.
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create `{}`", parent.display()))?;
-    }
-    registry.save_to(&path)?;
+    registry.save_to(&registry_path()?)?;
     Ok(())
 }
