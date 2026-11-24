@@ -330,6 +330,11 @@ first two are the ones most worth a look.
   `resolve` reads `head...tail` (or `head…tail`, either side may be empty) as "starts with, ends
   with"; anything without an ellipsis is still a prefix.
 - **The default `schema.json` requires `title`** as well as `created_at` (above).
+- **`jot new`'s template lists every declared key**, in schema order: filled where creation fills
+  it (`default`, `document:created_at`), empty otherwise, each with a YAML comment saying `required`
+  and an `enum`'s values (`status: # seed | growing | done`). `Action::create_from_text` drops keys
+  left empty (`null`), so a placeholder is never written; the note is rendered fresh, so the
+  comments are not kept.
 
 ## Open — not decided by the user
 

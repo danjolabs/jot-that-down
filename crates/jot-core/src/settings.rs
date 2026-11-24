@@ -371,6 +371,15 @@ impl Schema {
         self.property(key).and_then(|p| p.get("default"))
     }
 
+    /// `key`'s `enum`: the only values it may take.
+    #[must_use]
+    pub fn enum_of(&self, key: &str) -> Option<&[Value]> {
+        self.property(key)
+            .and_then(|p| p.get("enum"))
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+    }
+
     /// `key`'s `format`.
     #[must_use]
     pub fn format_of(&self, key: &str) -> Option<&str> {

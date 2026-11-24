@@ -342,6 +342,59 @@ fn an_old_format_vault_is_refused_with_a_message_saying_the_format_changed() {
 }
 
 #[test]
+fn the_new_note_template_lists_every_declared_key_and_says_what_it_needs() {
+    let (_tmp, root) = fixture();
+    let schema = std::fs::read_to_string(root.join("schema.json")).unwrap();
+    let schema = schema.replace(
+        r#""required": ["created_at"]"#,
+        r#""required": ["title", "created_at"]"#,
+    );
+    std::fs::write(root.join("schema.json"), schema).unwrap();
+    let mut ws = Workspace::open(&root).unwrap();
+
+    let template = ws.template().unwrap();
+    let lines: Vec<&str> = template.lines().collect();
+    assert_eq!(lines[..2], ["---", "title: # required"], "{template}");
+    assert!(
+        lines[2].starts_with("created_at: 20") && lines[2].ends_with("Z # required"),
+        "{template}"
+    );
+    assert_eq!(
+        lines[3..],
+        [
+            "status: # seed | growing | done",
+            "counter:",
+            "tags:",
+            "---",
+            "",
+        ],
+        "{template}"
+    );
+
+    // Saved with only a title typed: the empty keys are dropped, not written as null, and the
+    // comments are gone.
+    let text = template.replacen("title: # required", "title: a title", 1);
+    let events = done(ws.apply(Action::create_from_text(&text).unwrap()));
+    let Event::NoteCreated { id } = &events[0] else {
+        panic!("{events:?}")
+    };
+    let written = read(&root, id.as_str());
+    assert!(
+        written.starts_with("---\ntitle: a title\ncreated_at: "),
+        "{written}"
+    );
+    for absent in ["#", "status", "counter", "tags", "null"] {
+        assert!(!written.contains(absent), "`{absent}` in {written}");
+    }
+
+    // Saved untouched: the title is still missing, so it is refused.
+    assert!(matches!(
+        ws.apply(Action::create_from_text(&template).unwrap()),
+        Outcome::Rejected(Rejection::Invalid { .. })
+    ));
+}
+
+#[test]
 fn init_writes_both_settings_files_and_refuses_to_overwrite() {
     let tmp = tempfile::tempdir().unwrap();
     let mut ws = Workspace::init(tmp.path()).unwrap();

@@ -439,8 +439,10 @@ impl Workspace {
         }))
     }
 
-    /// The text an `$EDITOR` buffer for a new note starts from: the creation defaults rendered —
-    /// every `default`, and `document:created_at` filled.
+    /// The text an `$EDITOR` buffer for a new note starts from: every key `schema.json` declares,
+    /// with every `default` and `document:created_at` filled, the rest left empty, and a comment
+    /// on each line saying whether it is required and which values an `enum` allows. Read it back
+    /// with [`Action::create_from_text`], which drops the keys left empty.
     ///
     /// # Errors
     ///
@@ -451,8 +453,7 @@ impl Workspace {
                 errors: self.snapshot.settings.errors.clone(),
             });
         };
-        let fields = action::creation_fields(valid, &Fields::new(), Utc::now());
-        crate::document::render(&fields, "")
+        action::template(valid, Utc::now())
             .map_err(|message| Rejection::Unrepresentable { message })
     }
 

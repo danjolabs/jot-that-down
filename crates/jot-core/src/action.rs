@@ -92,13 +92,18 @@ pub enum Action {
 }
 
 impl Action {
-    /// `Action::Create` from note text — an `$EDITOR` buffer.
+    /// `Action::Create` from note text — an `$EDITOR` buffer, usually seeded by
+    /// [`Workspace::template`](crate::Workspace::template).
+    ///
+    /// A key left empty (`status:`, or `status: null`) is not given, and is dropped: the template
+    /// lists every declared key, and one nobody filled in must not be written as `null`.
     ///
     /// # Errors
     ///
     /// [`Rejection::Invalid`] when the frontmatter cannot be converted to JSON.
     pub fn create_from_text(text: &str) -> Result<Action, Rejection> {
-        let (fields, body) = parts(text)?;
+        let (mut fields, body) = parts(text)?;
+        fields.retain(|_, value| !value.is_null());
         Ok(Action::Create { fields, body })
     }
 
@@ -856,6 +861,57 @@ pub(crate) fn creation_fields(
         fields.insert(key.to_string(), Value::String(stamp(schema, key, now)));
     }
     schema.ordered(&fields)
+}
+
+/// The text a new note's `$EDITOR` buffer starts from.
+///
+/// Every declared key, in schema order: filled where creation would fill it (a `default`,
+/// `document:created_at`), empty otherwise. Each line says in a YAML comment what the key needs —
+/// `required`, and an `enum`'s values — so the schema is readable where it is being filled in:
+///
+/// ```text
+/// ---
+/// title: # required
+/// created_at: 2026-11-24T08:00:00Z # required
+/// status: # seed | growing | done
+/// ---
+/// ```
+///
+/// Comments are not kept: [`Action::create_from_text`] reads the buffer back as YAML, drops the
+/// keys left empty, and the note is rendered fresh.
+pub(crate) fn template(valid: &Valid, now: chrono::DateTime<Utc>) -> Result<String, String> {
+    let schema = &valid.schema;
+    let filled = creation_fields(valid, &Fields::new(), now);
+    let mut out = String::from("---\n");
+    for key in schema.order() {
+        out.push_str(&document::render_entry(
+            key,
+            filled.get(key),
+            &needs(schema, key),
+        )?);
+    }
+    out.push_str("---\n");
+    out.push_str(&document::body_text(""));
+    Ok(out)
+}
+
+/// What a template line says about `key`: `required`, then an `enum`'s values.
+fn needs(schema: &Schema, key: &str) -> String {
+    let mut parts = Vec::new();
+    if schema.is_required(key) {
+        parts.push(String::from("required"));
+    }
+    if let Some(values) = schema.enum_of(key) {
+        let values: Vec<String> = values
+            .iter()
+            .map(|value| match value {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            })
+            .collect();
+        parts.push(values.join(" | "));
+    }
+    parts.join("; ")
 }
 
 /// `document:created_at`'s value at creation: today's local date for `format: date`, UTC now for

@@ -125,6 +125,36 @@ pub(crate) fn render(fields: &Fields, body: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// One frontmatter entry, newline-terminated, with `comment` after its first line. `None` is an
+/// empty key — `title:` — which reads back as `null`.
+///
+/// The comment goes on the first line because that is the one line every entry has that YAML
+/// allows a comment on: after a scalar, after `key:` opening a block, after a `|-` indicator.
+///
+/// # Errors
+///
+/// `yaml_serde`'s message, if it cannot emit a value — not reachable for JSON input.
+pub(crate) fn render_entry(
+    key: &str,
+    value: Option<&Value>,
+    comment: &str,
+) -> Result<String, String> {
+    let mut one = Fields::new();
+    one.insert(key.to_owned(), value.cloned().unwrap_or(Value::Null));
+    let mut yaml = yaml_serde::to_string(&one).map_err(|e| e.to_string())?;
+    if value.is_none() {
+        // `key: null` and `key:` read back the same; the bare form is the one that asks to be
+        // filled in.
+        let trimmed = yaml.trim_end().strip_suffix(" null").map(str::to_owned);
+        yaml = trimmed.ok_or_else(|| format!("unexpected YAML for an empty key: {yaml}"))? + "\n";
+    }
+    if comment.is_empty() {
+        return Ok(yaml);
+    }
+    let (first, rest) = yaml.split_once('\n').unwrap_or((&yaml, ""));
+    Ok(format!("{first} # {comment}\n{rest}"))
+}
+
 /// A body as written: one blank line after the fence, newline-terminated. Both ends are
 /// normalised so that a body read back from an `$EDITOR` buffer — which begins with the newline
 /// after the fence — does not gain a blank line on every edit.

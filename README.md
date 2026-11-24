@@ -51,7 +51,7 @@ jot new -t "First thought" -m "Something worth keeping."
 echo "captured from a pipe" | jot new -t "From a pipe"
 jot new -t "A title alone"   # a title is a note; the body is optional
 jot new -t "Seedling" --set status=seed   # any key; the value is read as YAML
-jot new                      # opens $EDITOR; an untouched buffer cancels
+jot new                      # opens $EDITOR on every schema key; untouched cancels
 
 jot list                     # newest first, by the created_at role
 jot show <id>                # frontmatter in schema order, problems beside their keys
@@ -96,6 +96,22 @@ same minute share their first ten or more characters. `jot` prints the first fou
 shortest tail that is unique in your workspace, at least four: `01a0...eefa`. Paste it back as
 printed, or type only the tail as `...eefa`; a prefix or the full id works too. `--long` gives full
 ids; `--json` always does.
+
+**`jot new` opens `$EDITOR` on the whole schema.** Every key `schema.json` declares is listed, in
+order, with `created_at` and any `default` filled in and a YAML comment saying what the key needs:
+
+```yaml
+---
+title: # required
+created_at: 2026-11-24T08:47:08Z # required
+status: # seed | growing | done
+counter:
+tags:
+---
+```
+
+Keys left empty are dropped rather than written as `null`, and the comments are not kept. The
+default `schema.json` requires a title.
 
 **Nothing guesses.** An ambiguous id lists the candidates and exits non-zero. So does a workspace
 name that matches two workspaces.

@@ -607,12 +607,18 @@ fn new_in_editor(workspace: &mut Workspace, cli: &Cli, style: &Style) -> Result<
     let seed = workspace
         .template()
         .map_err(|r| Exit::runtime(refusal(&r)))?;
-    let template = Document::parse(&seed);
+    // Empty keys are placeholders, and core drops them on read-back, so they are not "typed".
+    let given = |doc: &Document| -> Fields {
+        let mut fields = doc.fields.clone();
+        fields.retain(|_, value| !value.is_null());
+        fields
+    };
+    let template = given(&Document::parse(&seed));
 
     let composed = editor::compose(&seed, |text| {
-        // Changed only in whitespace is the same as untouched.
+        // Changed only in whitespace, or only by deleting empty keys, is the same as untouched.
         let doc = Document::parse(text);
-        if doc.problems.is_empty() && doc.fields == template.fields && doc.body.trim().is_empty() {
+        if doc.problems.is_empty() && given(&doc) == template && doc.body.trim().is_empty() {
             return Verdict::Accept(None);
         }
         match Action::create_from_text(text) {
