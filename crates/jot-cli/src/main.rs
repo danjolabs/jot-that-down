@@ -21,7 +21,7 @@
 //! | 1 | runtime error, including a write core refused |
 //! | 2 | usage error (clap's own) |
 //! | 3 | no such note or workspace |
-//! | 4 | ambiguous id prefix or workspace name |
+//! | 4 | ambiguous id or workspace name |
 //! | 5 | `jot check` found problems |
 
 mod context;
@@ -181,7 +181,7 @@ struct NewArgs {
 
 #[derive(clap::Args)]
 struct ShowArgs {
-    /// The note's id, or a unique prefix of it.
+    /// The note's id: as printed (`01a0...eefa`), in full, or a unique prefix.
     id: String,
     /// Print the file's bytes exactly.
     #[arg(long)]
@@ -190,7 +190,7 @@ struct ShowArgs {
 
 #[derive(clap::Args)]
 struct EditArgs {
-    /// The note's id, or a unique prefix of it.
+    /// The note's id: as printed (`01a0...eefa`), in full, or a unique prefix.
     id: String,
     /// Replace the title.
     #[arg(short, long)]
@@ -217,7 +217,7 @@ impl EditArgs {
 
 #[derive(clap::Args)]
 struct RemoveArgs {
-    /// The note's id, or a unique prefix of it.
+    /// The note's id: as printed (`01a0...eefa`), in full, or a unique prefix.
     id: String,
     /// Skip the confirmation prompt.
     #[arg(short = 'y', long)]

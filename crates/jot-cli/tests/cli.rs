@@ -681,8 +681,8 @@ fn an_ambiguous_prefix_lists_the_candidates_and_exits_four() {
 
 #[test]
 fn a_printed_short_id_can_always_be_handed_straight_back() {
-    // Ids captured together share a long prefix, so this fails immediately if the abbreviation
-    // width is fixed rather than computed.
+    // Ids captured together share a long prefix, so this fails immediately if a short id is cut
+    // from the front of the id rather than showing its tail.
     let vault = Vault::new();
     for i in 0..12 {
         vault.new_note(&["-t", &format!("note {i}")]);
@@ -694,7 +694,11 @@ fn a_printed_short_id_can_always_be_handed_straight_back() {
         .collect();
     assert_eq!(shorts.len(), 12, "{listing}");
     for short in shorts {
-        assert!(short.len() >= 8, "`{short}` is under the floor");
+        let (head, tail) = short
+            .split_once("...")
+            .unwrap_or_else(|| panic!("`{short}` is not head...tail"));
+        assert_eq!(head.len(), 4, "`{short}`");
+        assert!(tail.len() >= 4, "`{short}`'s tail is under the floor");
         vault
             .cmd()
             .args(["--workspace", vault.ws(), "show", short])

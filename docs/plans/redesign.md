@@ -29,7 +29,7 @@ both a page and a row.
 | Advisory-only validation | jot's own writes are strict (below) |
 
 **Kept:** the `(size, mtime_ns)` + blake3 sync fast path, atomic writes, the watcher (redesigned as an
-event source), shortest-unique id prefixes, the registry.
+event source), short ids (now `head...tail`, see below), the registry.
 
 ## Folder layout
 
@@ -320,6 +320,14 @@ first two are the ones most worth a look.
 - `open` creates `.jot/tmp` and `.jot/.gitignore` (`*`). Index `user_version` 2; any other version is
   dropped and rebuilt.
 - Registry: `last_opened` dropped; `name` written only when set.
+
+## Decided on 2026-11-24, during review
+
+- **Short ids are `head...tail`:** the id's first four characters, `...`, and the shortest suffix no
+  other note's id ends with, at least four: `01a0...eefa`. A UUIDv7's prefix is a timestamp, so a
+  shortest-unique *prefix* grew past ten characters exactly when notes were written together.
+  `resolve` reads `head...tail` (or `head…tail`, either side may be empty) as "starts with, ends
+  with"; anything without an ellipsis is still a prefix.
 
 ## Open — not decided by the user
 

@@ -468,10 +468,10 @@ impl Workspace {
         self.snapshot.list()
     }
 
-    /// Resolves a git-style id prefix.
+    /// Resolves a short id as printed (`01a0...eefa`) or an id prefix. See [`Snapshot::resolve`].
     #[must_use]
-    pub fn resolve(&self, prefix: &str) -> Resolution {
-        self.snapshot.resolve(prefix)
+    pub fn resolve(&self, text: &str) -> Resolution {
+        self.snapshot.resolve(text)
     }
 
     /// Every note with problems.
@@ -490,7 +490,7 @@ impl Workspace {
         self.snapshot.strays().cloned().collect()
     }
 
-    /// The shortest unambiguous prefix of every note id, at least `min` long.
+    /// Every note id's short form, `head...tail`, with the tail at least `min` long.
     #[must_use]
     pub fn abbreviations(&self, min: usize) -> BTreeMap<NoteId, String> {
         self.snapshot.abbreviations(min)

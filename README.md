@@ -91,8 +91,10 @@ declared — stays listed, readable and editable, with the problem shown beside 
 `document:created_at` to keys of `schema.json`. With no title role a note lists as `Untitled`; with
 no created_at role `jot list` orders by modification time and says so.
 
-**Short ids are computed, not truncated.** `jot` prints the shortest prefix that is unique in your
-workspace, at least eight characters, so whatever it prints you can paste back. `--long` gives full
+**Short ids show the end of the id.** A UUIDv7 starts with a timestamp, so notes written in the
+same minute share their first ten or more characters. `jot` prints the first four, `...`, and the
+shortest tail that is unique in your workspace, at least four: `01a0...eefa`. Paste it back as
+printed, or type only the tail as `...eefa`; a prefix or the full id works too. `--long` gives full
 ids; `--json` always does.
 
 **Nothing guesses.** An ambiguous id lists the candidates and exits non-zero. So does a workspace
