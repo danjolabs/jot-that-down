@@ -294,8 +294,9 @@ first two are the ones most worth a look.
   touches would fail the schema afterwards — or already has conversion problems — the whole batch is
   `Rejected` (`NotesInvalid`, naming the notes). An already-invalid note therefore blocks a rename
   until fixed by hand. The softer "a write may not add problems" would break the write guarantee.
-- **The default `schema.json` requires only `created_at`**, not `title`, so a body-only quick capture
-  still works.
+- ~~**The default `schema.json` requires only `created_at`**, not `title`, so a body-only quick
+  capture still works.~~ Reversed by the user on 2026-11-24: the default requires `title` and
+  `created_at`, as the example above always did. `jot new -m <body>` without `-t` is refused.
 - `Outcome` gained `Failed(Failure)` for single-note actions and `Sync`; `Partial` carries
   `settings: Option<Failure>` for a `RenameField` whose settings rewrite failed after the notes.
 - `RenameField` rewrites notes, then `schema.json` (pretty-printed — its formatting is lost), then
@@ -328,6 +329,7 @@ first two are the ones most worth a look.
   shortest-unique *prefix* grew past ten characters exactly when notes were written together.
   `resolve` reads `head...tail` (or `head…tail`, either side may be empty) as "starts with, ends
   with"; anything without an ellipsis is still a prefix.
+- **The default `schema.json` requires `title`** as well as `created_at` (above).
 
 ## Open — not decided by the user
 

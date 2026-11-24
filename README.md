@@ -48,9 +48,9 @@ jot workspace new ~/notes    # writes workspace.toml and schema.json
 cd ~/notes                   # commands below discover it by walking up
 
 jot new -t "First thought" -m "Something worth keeping."
-echo "captured from a pipe" | jot new
+echo "captured from a pipe" | jot new -t "From a pipe"
 jot new -t "A title alone"   # a title is a note; the body is optional
-jot new --set status=seed    # any frontmatter key; the value is read as YAML
+jot new -t "Seedling" --set status=seed   # any key; the value is read as YAML
 jot new                      # opens $EDITOR; an untouched buffer cancels
 
 jot list                     # newest first, by the created_at role

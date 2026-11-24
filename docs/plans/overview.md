@@ -31,6 +31,7 @@ to revisit one is a question for the user.
 | Identity | A note is a file named exactly `<id>.md`, lowercase, in the format `id.format` names (`uuidv7` only, for now). No slug. The filesystem enforces uniqueness; creation uses `create_new`, so a collision is refused, never an overwrite. |
 | The id is opaque | Nothing is decoded from it. `created_at` exists only through the `document:created_at` role, filled on create. |
 | Short ids | `01a0...eefa`: the first four characters, `...`, and the shortest unique tail (at least four). Printed for reading only, never in `--json`; read back as "starts with, ends with". Decided 2026-11-24. |
+| Default schema | `jot init` writes `title` and `created_at`, both required. Decided 2026-11-24. |
 | Strays | Any other `*.md` file (`README.md`, `<id> - Copy.md`, an uppercase id) is reported, never indexed as a note and never renamed automatically. |
 | Write guarantee | jot never writes a note that fails the schema. Every write goes through one validator; a refused `$EDITOR` buffer is reopened on the same text. |
 | Reads | Validated per field, never auto-fixed. An invalid value is kept and shown with its problem; the note stays listed, readable and editable. |

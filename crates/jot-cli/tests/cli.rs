@@ -150,12 +150,12 @@ fn ws_new_creates_both_settings_files_and_refuses_to_overwrite_them() {
 #[test]
 fn every_command_answers_to_its_full_word_and_its_short_alias() {
     let vault = Vault::new();
-    vault.new_note(&["-m", "a thought"]);
+    vault.new_note(&["-t", "t", "-m", "a thought"]);
 
     assert_eq!(vault.run(&["list"]), vault.run(&["ls"]));
 
     for name in ["remove", "rm"] {
-        let id = vault.new_note(&["-m", "temporary"]);
+        let id = vault.new_note(&["-t", "t", "-m", "temporary"]);
         vault.run(&[name, "--yes", &id]);
         assert!(!vault.note_file(&id).exists(), "`{name}` must delete");
     }
@@ -315,7 +315,7 @@ fn an_old_format_workspace_is_refused_with_what_changed() {
 #[test]
 fn new_writes_a_file_named_exactly_by_the_id_it_prints() {
     let vault = Vault::new();
-    let id = vault.new_note(&["-m", "a thought"]);
+    let id = vault.new_note(&["-t", "t", "-m", "a thought"]);
     assert!(vault.note_file(&id).is_file(), "{id}");
 }
 
@@ -324,7 +324,7 @@ fn a_piped_body_becomes_a_note_and_an_empty_one_writes_nothing() {
     let vault = Vault::new();
     let output = vault
         .cmd()
-        .args(["--workspace", vault.ws(), "--long", "new"])
+        .args(["--workspace", vault.ws(), "--long", "new", "-t", "piped"])
         .write_stdin("captured from a pipe")
         .assert()
         .success();
@@ -351,6 +351,15 @@ fn a_title_alone_is_a_note_and_set_reads_its_value_as_yaml() {
     assert_eq!(note["fields"]["n"], 3);
     assert_eq!(note["fields"]["label"], "3");
     assert!(note["fields"]["created_at"].is_string(), "filled on create");
+}
+
+#[test]
+fn a_new_workspace_requires_a_title() {
+    let vault = Vault::new();
+    let (code, stderr) = vault.fail(&["new", "-m", "a body and nothing else"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("title"), "{stderr}");
+    assert_eq!(count_notes(vault.path()), 0);
 }
 
 #[test]
@@ -714,7 +723,7 @@ fn a_printed_short_id_can_always_be_handed_straight_back() {
 #[test]
 fn every_command_works_from_a_subdirectory_of_the_workspace() {
     let vault = Vault::new();
-    let id = vault.new_note(&["-m", "a thought"]);
+    let id = vault.new_note(&["-t", "t", "-m", "a thought"]);
     let nested = vault.path().join("a/b/c");
     std::fs::create_dir_all(&nested).unwrap();
 
@@ -730,7 +739,7 @@ fn every_command_works_from_a_subdirectory_of_the_workspace() {
 #[test]
 fn the_env_var_selects_the_workspace_when_there_is_no_flag() {
     let vault = Vault::new();
-    let id = vault.new_note(&["-m", "from the env"]);
+    let id = vault.new_note(&["-t", "t", "-m", "from the env"]);
     let elsewhere = tempfile::tempdir().unwrap();
 
     vault
@@ -752,7 +761,7 @@ fn an_explicit_workspace_that_does_not_open_is_an_error_and_never_a_fallback() {
     vault
         .cmd()
         .env("JOT_WORKSPACE", elsewhere.path())
-        .args(["new", "-m", "must not be captured"])
+        .args(["new", "-t", "t", "-m", "must not be captured"])
         .assert()
         .failure();
     assert_eq!(
@@ -780,7 +789,7 @@ fn verbose_says_which_workspace_was_chosen_and_why() {
 fn json_output_is_clean_even_when_a_warning_is_printed() {
     // Warnings go to stderr precisely so `jot ls --json | jq` keeps working.
     let vault = Vault::new();
-    vault.new_note(&["-m", "fine"]);
+    vault.new_note(&["-t", "t", "-m", "fine"]);
     std::fs::write(vault.path().join("README.md"), "not a note\n").unwrap();
 
     let output = vault

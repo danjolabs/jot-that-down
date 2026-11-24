@@ -346,9 +346,16 @@ fn init_writes_both_settings_files_and_refuses_to_overwrite() {
     let tmp = tempfile::tempdir().unwrap();
     let mut ws = Workspace::init(tmp.path()).unwrap();
     assert!(ws.settings().is_writable(), "{:?}", ws.settings().errors());
-    // Quick capture: only `created_at` is required, and it is filled.
+    // The default schema requires a title; `created_at` is required too, and filled.
+    assert!(matches!(
+        ws.apply(Action::Create {
+            fields: jot_core::Fields::new(),
+            body: String::from("a thought"),
+        }),
+        Outcome::Rejected(Rejection::Invalid { .. })
+    ));
     done(ws.apply(Action::Create {
-        fields: jot_core::Fields::new(),
+        fields: fields(json!({ "title": "a title" })),
         body: String::from("a thought"),
     }));
     assert!(matches!(

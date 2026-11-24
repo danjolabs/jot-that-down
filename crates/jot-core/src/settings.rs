@@ -178,8 +178,8 @@ format = \"uuidv7\"
 
 /// The text `init` writes for `schema.json`.
 ///
-/// Only `created_at` is required: it is filled on create, so a quick capture with no title is
-/// still a valid note.
+/// Both role keys are required. `created_at` is filled on create; `title` has to be given, with
+/// `-t` or in the editor.
 pub(crate) const DEFAULT_SCHEMA_JSON: &str = r#"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
@@ -187,7 +187,7 @@ pub(crate) const DEFAULT_SCHEMA_JSON: &str = r#"{
     "title": { "type": "string" },
     "created_at": { "type": "string", "format": "date-time" }
   },
-  "required": ["created_at"]
+  "required": ["title", "created_at"]
 }
 "#;
 
