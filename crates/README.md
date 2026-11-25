@@ -42,7 +42,7 @@ The rule is not "call these modules" but **every operation on a workspace goes t
 | `Snapshot`, `Row`, `Listing`, `Ordering`, `Hash` | `snapshot` |
 | `Registry` — the workspace list. `jot-cli` is the only caller | `registry` |
 | `Watcher` — "something changed", the trigger for `Sync`. No caller yet | `watch` |
-| shortest-unique-prefix ids | `shortid` |
+| short ids (`01a0...eefa`) | `shortid` |
 | `Error` | `error` |
 | `index`, `fs` | **not exposed**, so no surface can name them |
 

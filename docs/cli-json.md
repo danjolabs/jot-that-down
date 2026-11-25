@@ -20,8 +20,10 @@ the thread, trash and slug fields of the earlier format are gone.
 - **Times jot measures** (`edited_at`, the file's mtime) are RFC 3339, UTC. **Values a note
   carries** (`created_at`, everything in `fields`) are exactly what the file says.
 
-Short ids in human output are the shortest prefix unique in the workspace, at least 8 characters.
-The id carries no meaning — nothing is decoded from it — so there is no reason for a wider floor.
+Short ids in human output are the id's first four characters, `...`, and the shortest tail unique in
+the workspace, at least four: `01a0...eefa`. The tail is shown because a UUIDv7's leading characters
+are a timestamp, which notes written together share. Every command that takes an id accepts the
+short form, `...` plus a tail alone, a prefix, or the full id.
 
 ## `row` — one note in a listing
 
@@ -129,9 +131,9 @@ Both spellings are stable; scripts may use either.
 | 1 | runtime error, including a write jot refused (the note would fail `schema.json`, broken settings) |
 | 2 | usage error |
 | 3 | no such note or workspace |
-| 4 | ambiguous id prefix, or a workspace name several workspaces share |
+| 4 | ambiguous id, or a workspace name several workspaces share |
 | 5 | `jot check` found problems |
 
-An ambiguous prefix lists its candidates on stderr and exits 4. It never guesses. An old-format
+An ambiguous id lists its candidates on stderr and exits 4. It never guesses. An old-format
 workspace (`.jot/workspace.toml`, `<id>_<slug>.md`) is refused with exit 1 and a message saying what
 changed; there is no converter yet.

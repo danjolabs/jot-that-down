@@ -57,7 +57,7 @@ Every command resolves a workspace through `context` and acts through `Workspace
 - **Shell** — `completions`
 
 Exit codes are fixed because scripts depend on them: `0` success, `1` runtime (a refused write
-included), `2` usage (clap's), `3` no such note or workspace, `4` ambiguous id prefix or shared
+included), `2` usage (clap's), `3` no such note or workspace, `4` ambiguous id or shared
 workspace name, `5` `jot check` found problems.
 
 ## Two things the picture is hiding

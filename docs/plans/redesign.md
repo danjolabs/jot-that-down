@@ -29,7 +29,7 @@ both a page and a row.
 | Advisory-only validation | jot's own writes are strict (below) |
 
 **Kept:** the `(size, mtime_ns)` + blake3 sync fast path, atomic writes, the watcher (redesigned as an
-event source), shortest-unique id prefixes, the registry.
+event source), short ids (now `head...tail`, see below), the registry.
 
 ## Folder layout
 
@@ -294,8 +294,9 @@ first two are the ones most worth a look.
   touches would fail the schema afterwards — or already has conversion problems — the whole batch is
   `Rejected` (`NotesInvalid`, naming the notes). An already-invalid note therefore blocks a rename
   until fixed by hand. The softer "a write may not add problems" would break the write guarantee.
-- **The default `schema.json` requires only `created_at`**, not `title`, so a body-only quick capture
-  still works.
+- ~~**The default `schema.json` requires only `created_at`**, not `title`, so a body-only quick
+  capture still works.~~ Reversed by the user on 2026-11-24: the default requires `title` and
+  `created_at`, as the example above always did. `jot new -m <body>` without `-t` is refused.
 - `Outcome` gained `Failed(Failure)` for single-note actions and `Sync`; `Partial` carries
   `settings: Option<Failure>` for a `RenameField` whose settings rewrite failed after the notes.
 - `RenameField` rewrites notes, then `schema.json` (pretty-printed — its formatting is lost), then
@@ -320,6 +321,20 @@ first two are the ones most worth a look.
 - `open` creates `.jot/tmp` and `.jot/.gitignore` (`*`). Index `user_version` 2; any other version is
   dropped and rebuilt.
 - Registry: `last_opened` dropped; `name` written only when set.
+
+## Decided on 2026-11-24, during review
+
+- **Short ids are `head...tail`:** the id's first four characters, `...`, and the shortest suffix no
+  other note's id ends with, at least four: `01a0...eefa`. A UUIDv7's prefix is a timestamp, so a
+  shortest-unique *prefix* grew past ten characters exactly when notes were written together.
+  `resolve` reads `head...tail` (or `head…tail`, either side may be empty) as "starts with, ends
+  with"; anything without an ellipsis is still a prefix.
+- **The default `schema.json` requires `title`** as well as `created_at` (above).
+- **`jot new`'s template lists every declared key**, in schema order: filled where creation fills
+  it (`default`, `document:created_at`), empty otherwise, each with a YAML comment saying `required`
+  and an `enum`'s values (`status: # seed | growing | done`). `Action::create_from_text` drops keys
+  left empty (`null`), so a placeholder is never written; the note is rendered fresh, so the
+  comments are not kept.
 
 ## Open — not decided by the user
 

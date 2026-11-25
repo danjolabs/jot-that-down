@@ -194,7 +194,7 @@ pub struct Listing {
     pub rows: Vec<Row>,
 }
 
-/// The result of resolving an id prefix.
+/// The result of resolving a short id or an id prefix.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Resolution {
     /// Exactly one note matched.
@@ -320,23 +320,33 @@ impl Snapshot {
         }
     }
 
-    /// Resolves a git-style id prefix, case-insensitively.
+    /// Resolves what a user typed to name a note, case-insensitively: a short id as printed
+    /// (`01a0...eefa`, see [`shortid`]), or a git-style prefix, which includes a full id.
     #[must_use]
-    pub fn resolve(&self, prefix: &str) -> Resolution {
-        let needle = prefix.trim().to_ascii_lowercase();
-        if needle.is_empty() {
-            return Resolution::None;
-        }
-        let exact = NoteId::trusted(needle.clone());
-        if let Some(record) = self.notes.get(&exact) {
-            return Resolution::Unique(self.row_of(record));
-        }
-        let mut matched: Vec<Row> = self
-            .notes
-            .range(exact..)
-            .take_while(|(id, _)| id.as_str().starts_with(&needle))
-            .map(|(_, r)| self.row_of(r))
-            .collect();
+    pub fn resolve(&self, text: &str) -> Resolution {
+        let needle = text.trim().to_ascii_lowercase();
+        let mut matched: Vec<Row> = match shortid::parse(&needle) {
+            shortid::Query::Prefix("") | shortid::Query::Ends { head: "", tail: "" } => {
+                return Resolution::None;
+            }
+            shortid::Query::Prefix(prefix) => {
+                let exact = NoteId::trusted(prefix.to_owned());
+                if let Some(record) = self.notes.get(&exact) {
+                    return Resolution::Unique(self.row_of(record));
+                }
+                self.notes
+                    .range(exact..)
+                    .take_while(|(id, _)| id.as_str().starts_with(prefix))
+                    .map(|(_, r)| self.row_of(r))
+                    .collect()
+            }
+            query @ shortid::Query::Ends { .. } => self
+                .notes
+                .iter()
+                .filter(|(id, _)| query.matches(id.as_str()))
+                .map(|(_, r)| self.row_of(r))
+                .collect(),
+        };
         match matched.len() {
             0 => Resolution::None,
             1 => Resolution::Unique(matched.remove(0)),
@@ -344,7 +354,8 @@ impl Snapshot {
         }
     }
 
-    /// The shortest unambiguous prefix of every note id, at least `min` long.
+    /// Every note id's short form, `head...tail`, with the tail at least `min` long. See
+    /// [`shortid::abbreviate`].
     #[must_use]
     pub fn abbreviations(&self, min: usize) -> BTreeMap<NoteId, String> {
         shortid::abbreviate(self.notes.keys().map(NoteId::as_str), min)

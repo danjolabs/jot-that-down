@@ -439,8 +439,10 @@ impl Workspace {
         }))
     }
 
-    /// The text an `$EDITOR` buffer for a new note starts from: the creation defaults rendered —
-    /// every `default`, and `document:created_at` filled.
+    /// The text an `$EDITOR` buffer for a new note starts from: every key `schema.json` declares,
+    /// with every `default` and `document:created_at` filled, the rest left empty, and a comment
+    /// on each line saying whether it is required and which values an `enum` allows. Read it back
+    /// with [`Action::create_from_text`], which drops the keys left empty.
     ///
     /// # Errors
     ///
@@ -451,8 +453,7 @@ impl Workspace {
                 errors: self.snapshot.settings.errors.clone(),
             });
         };
-        let fields = action::creation_fields(valid, &Fields::new(), Utc::now());
-        crate::document::render(&fields, "")
+        action::template(valid, Utc::now())
             .map_err(|message| Rejection::Unrepresentable { message })
     }
 
@@ -468,10 +469,10 @@ impl Workspace {
         self.snapshot.list()
     }
 
-    /// Resolves a git-style id prefix.
+    /// Resolves a short id as printed (`01a0...eefa`) or an id prefix. See [`Snapshot::resolve`].
     #[must_use]
-    pub fn resolve(&self, prefix: &str) -> Resolution {
-        self.snapshot.resolve(prefix)
+    pub fn resolve(&self, text: &str) -> Resolution {
+        self.snapshot.resolve(text)
     }
 
     /// Every note with problems.
@@ -490,7 +491,7 @@ impl Workspace {
         self.snapshot.strays().cloned().collect()
     }
 
-    /// The shortest unambiguous prefix of every note id, at least `min` long.
+    /// Every note id's short form, `head...tail`, with the tail at least `min` long.
     #[must_use]
     pub fn abbreviations(&self, min: usize) -> BTreeMap<NoteId, String> {
         self.snapshot.abbreviations(min)

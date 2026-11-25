@@ -21,18 +21,18 @@ use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-/// The floor on an abbreviated note id.
+/// The floor on the tail of a short id (`01a0...eefa`).
 ///
-/// The id carries no meaning any more — nothing decodes a timestamp out of it — so the old
-/// argument for printing a UUIDv7's whole millisecond prefix is gone, and the floor is the
-/// conventional eight. [`Workspace::abbreviations`](jot_core::Workspace::abbreviations) still
-/// widens any id that eight characters do not make unique, so what is printed always resolves.
-pub const MIN_ID_WIDTH: usize = jot_core::shortid::MIN_WIDTH;
+/// A UUIDv7's leading characters are a timestamp, so notes written in the same minute share
+/// them; the tail is where ids differ.
+/// [`Workspace::abbreviations`](jot_core::Workspace::abbreviations) widens any tail that four
+/// characters do not make unique, so what is printed always resolves.
+pub const MIN_ID_WIDTH: usize = jot_core::shortid::MIN_TAIL;
 
 /// How ids are printed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdWidth {
-    /// The shortest prefix that is unique in this workspace, floored at [`MIN_ID_WIDTH`].
+    /// The first four characters and the shortest tail unique in this workspace, `01a0...eefa`.
     Abbreviated,
     /// The full id, for scripting and for feeding back to `jot`.
     Long,
@@ -48,7 +48,7 @@ pub struct Style {
     pub color: bool,
     /// How to print ids.
     pub width: IdWidth,
-    /// Shortest unique prefix per note. Empty before a workspace is opened.
+    /// Short id per note. Empty before a workspace is opened.
     abbreviations: Arc<BTreeMap<NoteId, String>>,
 }
 
