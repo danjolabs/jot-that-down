@@ -1,0 +1,9 @@
+# jot workspace settings. The frontmatter schema is in schema.json, beside this file.
+# Unknown keys warn and never fail; a key never changes meaning once it exists.
+
+[id]
+format = "uuidv7"
+
+[roles]
+"document:title" = "title"
+"document:created_at" = "created_at"

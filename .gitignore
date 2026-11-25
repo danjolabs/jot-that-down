@@ -1,0 +1,12 @@
+/target
+**/target
+Cargo.lock.bak
+*.pdb
+
+.direnv/
+# Agent worktrees (Agent tool isolation: worktree).
+.claude/worktrees/
+
+# SQLite indexes are derived and disposable, including the ones tests leave in fixtures.
+*.db
+*.db-*

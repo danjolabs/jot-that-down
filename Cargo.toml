@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/jot-core", "crates/jot-cli"]
+
+[workspace.package]
+version = "0.0.6-k"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/danjolabs/jot-that-down"
+
+# Only dependencies used by two or more members live here. One used by a single member is declared
+# in that member's own manifest, and moves here when a second member needs it.
+[workspace.dependencies]
+# Workspace members.
+jot-core = { path = "crates/jot-core" }
+
+chrono = { version = "0.4.45", default-features = false, features = [
+    "clock",
+    "serde",
+    "std",
+] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+toml = "1.1"
+uuid = { version = "1.26", features = ["serde", "v7"] }
+
+# Surfaces only. None of these may reach `jot-core`
+anyhow = "1.0"
+
+# Dev only.
+tempfile = "3.27"
