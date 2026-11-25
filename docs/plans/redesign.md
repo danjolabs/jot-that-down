@@ -28,8 +28,7 @@ both a page and a row.
 | Unknown frontmatter keys preserved by jot's choice | `schema.json` decides via `additionalProperties` |
 | Advisory-only validation | jot's own writes are strict (below) |
 
-**Kept:** `[[<id>]]` body links and backlinks (no decision removed them; flag if they get in the
-way), the `(size, mtime_ns)` + blake3 sync fast path, atomic writes, the watcher (redesigned as an
+**Kept:** the `(size, mtime_ns)` + blake3 sync fast path, atomic writes, the watcher (redesigned as an
 event source), shortest-unique id prefixes, the registry.
 
 ## Folder layout
@@ -235,8 +234,6 @@ CREATE TABLE problems (
 
 CREATE TABLE strays (path TEXT PRIMARY KEY, reason TEXT NOT NULL) STRICT;
 
-CREATE TABLE links (...);      -- [[id]] body links, as today
-
 CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
 -- digests of workspace.toml and schema.json; the last valid settings snapshot
 ```
@@ -281,11 +278,12 @@ name = "notes"
 
 ## CLI
 
-Commands map onto actions and queries. Kept: `new`, `list`/`ls`, `show`, `edit`, `remove`/`rm`
-(now deletes, confirms), `search`, `links`, `workspace`/`ws`, `index`, `completions`. Removed:
-`thread`, `restore`, `purge`, `trash`, `tui`. Added: field commands for the three batch actions,
-and a way to list problems and strays. `--json` stays on every read. Exact names are the CLI task's
-to propose.
+Commands map onto actions and queries: `new`, `list`/`ls`, `show`, `edit`, `remove`/`rm` (deletes,
+confirms), `field fill|remove|rename`, `check`, `workspace`/`ws`, `completions`. `--json` stays on
+every read.
+
+Removed with the redesign: `thread`, `restore`, `purge`, `trash`, `tui`. Removed after it
+(2026-11-23, by the user): `search`, `links`, `index status|rebuild`, and `ls -n`.
 
 ## Calls made during the core rewrite
 
@@ -310,7 +308,6 @@ first two are the ones most worth a look.
   `decide` — the "checked lazily at write time" rule.
 - `created_at` fill: `date` → today's **local** date; `date-time` → UTC now, to the second.
 - Sort ties (equal or missing `created_at`, equal mtime) break by id ascending.
-- Search is a case-insensitive substring match over every string field and string array item.
 - Under broken settings, validation uses the current schema if it compiles, else the last valid one;
   roles always come from the last valid snapshot.
 - Self-write suppression: each write records the new hash on the note immediately, so the next
@@ -327,7 +324,8 @@ first two are the ones most worth a look.
 ## Open — not decided by the user
 
 - `document:edited_at` as a role, versus mtime in the index (default: mtime).
-- Whether `[[id]]` body links stay (default: kept).
+- ~~Whether `[[id]]` body links stay.~~ Dropped by the user on 2026-11-23, in core as well as the
+  CLI: no link extraction, no `links` table, no backlinks. The index format moved to version 3.
 - Ordering with no `document:created_at` (default: mtime, labelled).
 - Upgrading an existing old-format vault (`.jot/workspace.toml`, `<id>_slug.md`). Not built; an
   old vault is detected and refused with a message saying what changed.

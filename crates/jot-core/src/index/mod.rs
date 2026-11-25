@@ -29,8 +29,8 @@ use crate::problem::Problem;
 use crate::settings::Schema;
 use crate::snapshot::{Hash, Record, Stray, sort_time};
 
-/// The index format this build writes. 1 was the pre-redesign index.
-pub(crate) const VERSION: i64 = 2;
+/// The index format this build writes. 1 was the pre-redesign index; 2 had a `links` table.
+pub(crate) const VERSION: i64 = 3;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
@@ -103,7 +103,6 @@ impl Index {
             path: self.path.clone(),
             message: e.to_string(),
         };
-        // Dangling links are a designed state; a foreign key would make them unrepresentable.
         self.conn
             .execute_batch(
                 "PRAGMA journal_mode = WAL;
@@ -168,21 +167,6 @@ impl Index {
             }
         }
 
-        let mut links: BTreeMap<String, Vec<NoteId>> = BTreeMap::new();
-        {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT from_id, to_id FROM links ORDER BY from_id, position")
-                .map_err(err)?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-                .map_err(err)?;
-            for row in rows {
-                let (from, to) = row.map_err(err)?;
-                links.entry(from).or_default().push(NoteId::trusted(to));
-            }
-        }
-
         let mut notes = BTreeMap::new();
         {
             let mut stmt = self
@@ -220,7 +204,6 @@ impl Index {
                         .cloned()
                         .collect(),
                     problems,
-                    links: links.remove(&id).unwrap_or_default(),
                     hash: Hash(hash),
                     size: u64::try_from(size).unwrap_or(0),
                     mtime_ns,
@@ -286,16 +269,6 @@ impl Index {
                 for p in &record.problems {
                     problems.execute(params![id, p.key, p.rule, p.message])?;
                 }
-                let mut links = tx.prepare_cached(
-                    "INSERT OR IGNORE INTO links (from_id, to_id, position) VALUES (?1, ?2, ?3)",
-                )?;
-                for (position, to) in record.links.iter().enumerate() {
-                    links.execute(params![
-                        id,
-                        to.as_str(),
-                        i64::try_from(position).unwrap_or(0)
-                    ])?;
-                }
             }
             if let Some(strays) = changes.strays {
                 tx.execute("DELETE FROM strays", [])?;
@@ -332,7 +305,6 @@ impl Index {
                 "SELECT note_id, key, rule, message FROM problems",
             ),
             ("strays", "SELECT path, reason FROM strays"),
-            ("links", "SELECT from_id, to_id, position FROM links"),
             ("index_meta", "SELECT key, value FROM index_meta"),
         ] {
             let mut stmt = self.conn.prepare(sql).unwrap();
@@ -359,7 +331,6 @@ fn forget(tx: &rusqlite::Transaction<'_>, id: &str) -> rusqlite::Result<()> {
         "DELETE FROM notes WHERE id = ?1",
         "DELETE FROM field_values WHERE note_id = ?1",
         "DELETE FROM problems WHERE note_id = ?1",
-        "DELETE FROM links WHERE from_id = ?1",
     ] {
         tx.prepare_cached(sql)?.execute(params![id])?;
     }

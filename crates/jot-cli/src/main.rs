@@ -139,7 +139,7 @@ enum Command {
     New(NewArgs),
     /// List notes, newest first.
     #[command(visible_alias = "ls")]
-    List(ListArgs),
+    List,
     /// Print one note in full, with its problems beside its fields.
     Show(ShowArgs),
     /// Change a note's frontmatter or body.
@@ -147,10 +147,6 @@ enum Command {
     /// Delete a note's file. Irreversible; confirms.
     #[command(visible_alias = "rm")]
     Remove(RemoveArgs),
-    /// Find notes whose frontmatter text contains a string.
-    Search(SearchArgs),
-    /// Show a note's links and the notes linking to it.
-    Links(IdArgs),
     /// Change one frontmatter key in every note at once.
     #[command(subcommand)]
     Field(FieldCommand),
@@ -159,9 +155,6 @@ enum Command {
     /// Manage workspaces.
     #[command(subcommand, visible_alias = "ws")]
     Workspace(WsCommand),
-    /// Inspect the index.
-    #[command(subcommand)]
-    Index(IndexCommand),
     /// Print a shell completion script.
     Completions {
         /// The shell to generate for.
@@ -184,13 +177,6 @@ struct NewArgs {
     /// $EDITOR.
     #[arg(short = 'm', long)]
     message: Option<String>,
-}
-
-#[derive(clap::Args)]
-struct ListArgs {
-    /// Show at most this many.
-    #[arg(short = 'n', long)]
-    limit: Option<usize>,
 }
 
 #[derive(clap::Args)]
@@ -236,18 +222,6 @@ struct RemoveArgs {
     /// Skip the confirmation prompt.
     #[arg(short = 'y', long)]
     yes: bool,
-}
-
-#[derive(clap::Args)]
-struct IdArgs {
-    /// The note's id, or a unique prefix of it.
-    id: String,
-}
-
-#[derive(clap::Args)]
-struct SearchArgs {
-    /// Text to find in any frontmatter string, case-insensitively.
-    query: String,
 }
 
 #[derive(Subcommand)]
@@ -369,14 +343,6 @@ enum WsCommand {
     },
 }
 
-#[derive(Subcommand)]
-enum IndexCommand {
-    /// Note, problem and stray counts, and the state of the settings.
-    Status,
-    /// Throw the index away and rebuild it from the files.
-    Rebuild,
-}
-
 /// Parses `key=value`, reading the value as YAML.
 fn assignment(text: &str) -> Result<Assignment, String> {
     let (key, value) = text
@@ -434,7 +400,7 @@ fn run() -> Result<(), Exit> {
 
     let mut context = Context::open(cli.workspace.as_deref(), cli.verbose)?;
     let workspace = &mut context.workspace;
-    if !matches!(command, Command::Check | Command::Index(_)) {
+    if !matches!(command, Command::Check) {
         report_problems(workspace);
     }
     // Short ids are only meaningful against the workspace they have to be distinct from, so the
@@ -443,15 +409,12 @@ fn run() -> Result<(), Exit> {
 
     match command {
         Command::New(args) => new(workspace, args, &cli, &style),
-        Command::List(args) => list(workspace, args, &cli, &style),
+        Command::List => list(workspace, &cli, &style),
         Command::Show(args) => show(workspace, args, &cli, &style),
         Command::Edit(args) => edit(workspace, args, &cli, &style),
         Command::Remove(args) => remove(workspace, args, &style),
-        Command::Search(args) => search(workspace, args, &cli, &style),
-        Command::Links(args) => links(workspace, args, &cli, &style),
         Command::Field(args) => field(workspace, args, &style),
         Command::Check => check(workspace, &cli, &style),
-        Command::Index(args) => index(workspace, args, &cli),
         Command::Workspace(_) | Command::Completions { .. } => unreachable!("handled above"),
     }
 }
@@ -682,11 +645,8 @@ fn read_stdin() -> Result<String, Exit> {
 }
 
 /// `jot ls`.
-fn list(workspace: &Workspace, args: &ListArgs, cli: &Cli, style: &Style) -> Result<(), Exit> {
-    let mut listing = workspace.list();
-    if let Some(limit) = args.limit {
-        listing.rows.truncate(limit);
-    }
+fn list(workspace: &Workspace, cli: &Cli, style: &Style) -> Result<(), Exit> {
+    let listing = workspace.list();
     if cli.json {
         return emit(&output::listing_json(&listing));
     }
@@ -795,47 +755,9 @@ fn remove(workspace: &mut Workspace, args: &RemoveArgs, style: &Style) -> Result
         return Ok(());
     }
 
-    let linked = workspace.backlinks(&id).len();
     done(workspace.apply(Action::Delete { id: id.clone() }))?;
     eprintln!("jot: deleted {}", style.show(&id));
-    if linked > 0 {
-        // Nothing cascades; the links dangle, which is a designed state — but worth saying.
-        eprintln!("jot: {} still link to it", output::count(linked, "note"));
-    }
     Ok(())
-}
-
-/// `jot search`.
-fn search(workspace: &Workspace, args: &SearchArgs, cli: &Cli, style: &Style) -> Result<(), Exit> {
-    let listing = workspace.search(&args.query);
-    if cli.json {
-        emit(&output::listing_json(&listing))
-    } else if listing.rows.is_empty() {
-        eprintln!("jot: nothing matches `{}`", args.query);
-        Ok(())
-    } else {
-        print!("{}", output::listing(&listing, style));
-        Ok(())
-    }
-}
-
-/// `jot links`.
-fn links(workspace: &Workspace, args: &IdArgs, cli: &Cli, style: &Style) -> Result<(), Exit> {
-    let id = resolve(workspace, &args.id)?;
-    let outgoing = workspace.links_in(&id)?;
-    let backlinks = workspace.backlinks(&id);
-    if cli.json {
-        emit(&json!({
-            "id": id.as_str(),
-            "links_out": outgoing.iter()
-                .map(|(link, target)| output::link_json(link, target))
-                .collect::<Vec<_>>(),
-            "links_in": backlinks.iter().map(output::row_json).collect::<Vec<_>>(),
-        }))
-    } else {
-        print!("{}", output::links(&outgoing, &backlinks, style));
-        Ok(())
-    }
 }
 
 /// `jot field` — the three batch actions.
@@ -970,48 +892,6 @@ fn check(workspace: &Workspace, cli: &Cli, style: &Style) -> Result<(), Exit> {
             error: anyhow!(""),
             code: EXIT_PROBLEMS,
         })
-    }
-}
-
-/// `jot index`.
-fn index(workspace: &mut Workspace, command: &IndexCommand, cli: &Cli) -> Result<(), Exit> {
-    // `open` already synced, so `status` has nothing to do but report.
-    if let IndexCommand::Rebuild = command {
-        let events = done(workspace.rebuild())?;
-        if !cli.json {
-            eprintln!(
-                "jot: rebuilt the index; {} it had been missing",
-                output::count(events.len(), "change")
-            );
-        }
-    }
-    let settings = workspace.settings();
-    let notes = workspace.snapshot().len();
-    let problems = workspace.problems().len();
-    let strays = workspace.strays().len();
-
-    if cli.json {
-        emit(&json!({
-            "root": workspace.root().display().to_string(),
-            "notes": notes,
-            "notes_with_problems": problems,
-            "strays": strays,
-            "writable": settings.is_writable(),
-            "stale": settings.is_stale(),
-        }))
-    } else {
-        println!("workspace  {}", workspace.root().display());
-        println!("notes      {notes} ({problems} with problems)");
-        println!("strays     {strays}");
-        println!(
-            "settings   {}",
-            match (settings.is_writable(), settings.is_stale()) {
-                (true, _) => "valid",
-                (false, true) => "broken — reading with the last valid settings",
-                (false, false) => "broken",
-            }
-        );
-        Ok(())
     }
 }
 

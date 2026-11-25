@@ -39,10 +39,10 @@ to revisit one is a question for the user.
 | Broken settings | Checked lazily at write time: that write is refused. Reads keep the roles of the last valid settings, kept in `index_meta`. |
 | Actions and events | Every mutation is an `Action`, decided purely against the snapshot, then executed. A refused action is a `Rejection` (nothing attempted); an IO refusal is a `Failure`. Events are facts emitted after success, in memory only, never a log. Reads are plain queries. |
 | External changes | The watcher says only "something changed"; `Sync` diffs the files against the index and produces precise events. jot's own writes are not reported twice. |
-| Delete | Removes the file. No trash, no relations, nothing cascades. `[[id]]` links to a deleted note dangle, by design. |
-| Links | `[[<id>]]` and `[[<id>\|label]]` in note bodies, with backlinks. Resolve within one workspace. |
+| Delete | Removes the file. No trash, no relations, nothing cascades. |
+| Links between notes | None. No relations, no `[[id]]` body links, no backlinks: a note relates to others only through what its fields say. Dropped 2026-11-23. |
 | Registry | `workspaces.toml` in the OS config dir, keyed by canonical absolute path. `name` is optional. |
-| Search | Frontmatter text only. Full-text is deferred (`docs/sidenote.md`). |
+| CLI scope | `new`, `list`, `show`, `edit`, `remove`, `field`, `check`, `workspace`, `completions`. `search`, `links` and `index` were dropped 2026-11-23; the index rebuilds itself when `.jot/index.db` is deleted. |
 | Surfaces | The CLI only. The TUI was removed; the desktop plan stays deferred ([`todo/desktop.md`](todo/desktop.md)), and a shared GUI is expected to live outside this repository ([`docs/conversation/ecosystem-and-storage-split.md`](../conversation/ecosystem-and-storage-split.md)). |
 | Stack | Rust; `clap` for the CLI. |
 
@@ -103,10 +103,7 @@ impl Workspace {
     fn get(&self, id: &NoteId) -> Result<Option<Note>>;
     fn template(&self) -> Result<String, Rejection>;
     fn list(&self) -> Listing;
-    fn search(&self, text: &str) -> Listing;
     fn resolve(&self, prefix: &str) -> Resolution;
-    fn backlinks(&self, id: &NoteId) -> Vec<Row>;
-    fn links_in(&self, id: &NoteId) -> Result<Vec<(Link, Ref)>>;
     fn problems(&self) -> Vec<(NoteId, Vec<Problem>)>;
     fn strays(&self) -> Vec<Stray>;
     fn abbreviations(&self, min: usize) -> BTreeMap<NoteId, String>;
@@ -115,7 +112,7 @@ impl Workspace {
 
 `Action`, `Event`, `Rejection`, `Failure`, `Outcome` and the index tables are specified in
 [`redesign.md`](redesign.md). Reads answer from the in-memory snapshot and are not `Result`, except
-the ones that re-read a file (`get`, `links_in`).
+`get`, which re-reads the file.
 
 ## Stages
 
@@ -167,8 +164,7 @@ implementer, Codex review on request, and your review before anything is committ
   the CLI. A test earns its place by guarding a decision or a failure mode a reader would not spot.
 - **The rebuild invariant** — a full rebuild produces the same rows as an incremental sync, except
   `edited_at`, which comes from mtime and is not reproducible content.
-- **No cascading anything** — no cascading delete, no foreign keys. Dangling links are a designed
-  state.
+- **No cascading anything** — no cascading delete, no foreign keys.
 
 ## Definition of done
 

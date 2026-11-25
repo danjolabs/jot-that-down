@@ -35,16 +35,6 @@ CREATE INDEX problems_by_note ON problems (note_id);
 -- `*.md` files that are not notes, by file name.
 CREATE TABLE strays (path TEXT PRIMARY KEY, reason TEXT NOT NULL) STRICT;
 
--- `[[id]]` body links: distinct targets in first-appearance order. No foreign keys: a link to a
--- deleted note is a designed state.
-CREATE TABLE links (
-  from_id  TEXT NOT NULL,
-  to_id    TEXT NOT NULL,
-  position INTEGER NOT NULL,
-  PRIMARY KEY (from_id, to_id)
-) STRICT;
-CREATE INDEX links_to ON links (to_id);
-
 -- Housekeeping: the digests of workspace.toml and schema.json the rows were built against, and the
 -- last valid settings snapshot.
 CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;

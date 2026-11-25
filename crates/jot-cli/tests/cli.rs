@@ -20,19 +20,25 @@ const HAND_ID: &str = "01a03d4c-c708-7cbf-83c0-883cedb7f1d5";
 
 /// A temp workspace plus a builder for commands pointed at it.
 struct Vault {
-    dir: TempDir,
+    // Held so the directory outlives the test; every path goes through `root`.
+    _dir: TempDir,
+    // The temp dir in the registry's canonical spelling. On a Windows runner the temp dir can be an
+    // 8.3 short path (`C:\Users\RUNNER~1\…`) while the registry stores the long one
+    // (`runneradmin`), so comparing against the raw spelling fails for a correct registry.
+    root: PathBuf,
 }
 
 impl Vault {
     fn new() -> Vault {
         let dir = tempfile::tempdir().unwrap();
-        let vault = Vault { dir };
+        let root = jot_core::registry::canonical(dir.path());
+        let vault = Vault { _dir: dir, root };
         vault.jot(&["ws", "new", &vault.path().display().to_string()]);
         vault
     }
 
     fn path(&self) -> &Path {
-        self.dir.path()
+        &self.root
     }
 
     fn ws(&self) -> &str {
@@ -49,8 +55,8 @@ impl Vault {
             // A registry write must never touch the developer's real one, and `JOT_REGISTRY` is
             // the only thing that guarantees it: `directories` reads `FOLDERID_RoamingAppData`
             // through a syscall on Windows, so `XDG_CONFIG_HOME`/`HOME` isolate nothing there.
-            .env("JOT_REGISTRY", self.dir.path().join("registry.toml"))
-            .current_dir(self.dir.path());
+            .env("JOT_REGISTRY", self.root.join("registry.toml"))
+            .current_dir(&self.root);
         cmd
     }
 
@@ -561,35 +567,6 @@ fn check_lists_problems_and_strays_and_exits_five_only_for_problems() {
 }
 
 #[test]
-fn search_matches_frontmatter_text_and_says_so_when_nothing_does() {
-    let vault = Vault::new();
-    vault.new_note(&["-t", "Oranges and lemons"]);
-    vault.new_note(&["-t", "Something else"]);
-
-    let hits = vault.json(&["search", "lemon"]);
-    assert_eq!(hits["notes"].as_array().unwrap().len(), 1);
-    assert!(vault.stderr(&["search", "zzz"]).contains("nothing matches"));
-}
-
-#[test]
-fn links_reports_links_out_and_in() {
-    let vault = Vault::new();
-    let target = vault.new_note(&["-t", "target"]);
-    let source = vault.new_note(&["-t", "source", "-m", &format!("see [[{target}|it]]")]);
-
-    let out = vault.json(&["links", &source]);
-    assert_eq!(out["links_out"][0]["target"], target.as_str());
-    assert_eq!(out["links_out"][0]["label"], "it");
-    assert_eq!(out["links_out"][0]["state"], "present");
-    let back = vault.json(&["links", &target]);
-    assert_eq!(back["links_in"][0]["id"], source.as_str());
-}
-
-// =============================================================================================
-// Deleting
-// =============================================================================================
-
-#[test]
 fn rm_confirms_and_declining_keeps_the_note() {
     let vault = Vault::new();
     let id = vault.new_note(&["-t", "keep me"]);
@@ -811,25 +788,6 @@ fn json_output_is_clean_even_when_a_warning_is_printed() {
     serde_json::from_str::<Value>(&stdout).expect("stdout is still valid JSON");
     let stderr = String::from_utf8(output.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("stray"), "the stray is reported: {stderr}");
-}
-
-#[test]
-fn index_status_counts_notes_problems_and_strays() {
-    let vault = Vault::new();
-    vault.new_note(&["-m", "one"]);
-    std::fs::write(
-        vault.note_file(HAND_ID),
-        "---\ncreated_at: yesterday\n---\n",
-    )
-    .unwrap();
-    std::fs::write(vault.path().join("README.md"), "not a note\n").unwrap();
-
-    let status = vault.json(&["index", "status"]);
-    assert_eq!(status["notes"], 2);
-    assert_eq!(status["notes_with_problems"], 1);
-    assert_eq!(status["strays"], 1);
-    assert_eq!(status["writable"], true);
-    assert_eq!(vault.json(&["index", "rebuild"])["notes"], 2);
 }
 
 #[test]

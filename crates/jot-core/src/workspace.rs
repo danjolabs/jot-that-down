@@ -43,12 +43,11 @@ use crate::error::{Error, Result};
 use crate::fs::{self, CreateNewError};
 use crate::id::NoteId;
 use crate::index::{self, Changes, Index};
-use crate::link::{self, Link};
 use crate::problem::Problem;
 use crate::settings::{
     self, Digests, SCHEMA_JSON, Settings, SettingsFile, SettingsFiles, Valid, WORKSPACE_TOML,
 };
-use crate::snapshot::{Hash, Listing, Record, Ref, Resolution, Row, Snapshot, Stray};
+use crate::snapshot::{Hash, Listing, Record, Resolution, Row, Snapshot, Stray};
 
 /// The directory of derived state.
 pub const JOT_DIR: &str = ".jot";
@@ -469,46 +468,10 @@ impl Workspace {
         self.snapshot.list()
     }
 
-    /// Notes whose frontmatter strings contain `text`.
-    #[must_use]
-    pub fn search(&self, text: &str) -> Listing {
-        self.snapshot.search(text)
-    }
-
     /// Resolves a git-style id prefix.
     #[must_use]
     pub fn resolve(&self, prefix: &str) -> Resolution {
         self.snapshot.resolve(prefix)
-    }
-
-    /// What an id refers to.
-    #[must_use]
-    pub fn reference(&self, id: &NoteId) -> Ref {
-        self.snapshot.reference(id)
-    }
-
-    /// Notes whose body links to `id`.
-    #[must_use]
-    pub fn backlinks(&self, id: &NoteId) -> Vec<Row> {
-        self.snapshot.backlinks(id)
-    }
-
-    /// The links in one note's body, with offsets, each resolved.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Read`] if the file cannot be read.
-    pub fn links_in(&self, id: &NoteId) -> Result<Vec<(Link, Ref)>> {
-        let Some(note) = self.get(id)? else {
-            return Ok(Vec::new());
-        };
-        Ok(link::extract(&note.body, self.snapshot.settings.format)
-            .into_iter()
-            .map(|link| {
-                let target = self.reference(&link.target);
-                (link, target)
-            })
-            .collect())
     }
 
     /// Every note with problems.
@@ -908,19 +871,12 @@ fn record_of(
     (size, mtime_ns): (u64, i64),
 ) -> Record {
     let doc = Document::parse_bytes(bytes);
-    let mut links: Vec<NoteId> = Vec::new();
-    for l in link::extract(&doc.body, settings.format) {
-        if !links.contains(&l.target) {
-            links.push(l.target);
-        }
-    }
     let problems = settings.problems(&doc.fields, &doc.problems);
     Record {
         id,
         fields: doc.fields,
         conversion: doc.problems,
         problems,
-        links,
         hash: Hash::of(bytes),
         size,
         mtime_ns,
@@ -1106,7 +1062,7 @@ mod tests {
                 .as_object()
                 .unwrap()
                 .clone(),
-            body: String::from("see [[01a03d4c-c708-7cbf-83c0-883cedb7f1d5]]"),
+            body: String::from("a body"),
         }) else {
             panic!()
         };
